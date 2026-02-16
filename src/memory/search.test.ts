@@ -5,7 +5,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createHybridSearch, type SearchResult } from "./search.js";
 import type { MemoryStore, ScoredResult } from "./store.js";
-import type { EmbeddingProvider } from "./embeddings.js";
 
 describe("HybridSearch", () => {
   // Mock store for testing
@@ -18,15 +17,7 @@ describe("HybridSearch", () => {
     close: vi.fn(),
   });
 
-  // Mock embedding provider
-  const createMockEmbeddingProvider = (embedding: number[] = []): EmbeddingProvider => ({
-    embed: vi.fn().mockResolvedValue(embedding),
-    embedBatch: vi.fn().mockResolvedValue([embedding]),
-    dims: 768,
-    ready: true,
-    providerName: "mock",
-    close: vi.fn(),
-  });
+  const createMockEmbed = (embedding: number[] = []) => vi.fn().mockResolvedValue(embedding);
 
   describe("merges keyword and vector results", () => {
     it("puts overlapping results first", async () => {
@@ -40,8 +31,8 @@ describe("HybridSearch", () => {
       ];
 
       const store = createMockStore(keywordResults, vectorResults);
-      const embeddings = createMockEmbeddingProvider();
-      const search = createHybridSearch(store, embeddings);
+      const embed = createMockEmbed();
+      const search = createHybridSearch(store, embed);
 
       const results = await search("test query");
 
@@ -60,14 +51,14 @@ describe("HybridSearch", () => {
       ];
 
       const store = createMockStore(keywordResults, vectorResults);
-      const embeddings = createMockEmbeddingProvider();
-      const search = createHybridSearch(store, embeddings);
+      const embed = createMockEmbed();
+      const search = createHybridSearch(store, embed);
 
       const results = await search("test query");
 
       expect(results.length).toBe(2);
-      expect(results.find(r => r.id === "A")).toBeDefined();
-      expect(results.find(r => r.id === "C")).toBeDefined();
+      expect(results.find((r) => r.id === "A")).toBeDefined();
+      expect(results.find((r) => r.id === "C")).toBeDefined();
     });
   });
 
@@ -82,12 +73,12 @@ describe("HybridSearch", () => {
       ];
 
       const store = createMockStore(keywordResults, vectorResults);
-      const embeddings = createMockEmbeddingProvider();
-      const search = createHybridSearch(store, embeddings);
+      const embed = createMockEmbed();
+      const search = createHybridSearch(store, embed);
 
       const results = await search("test query");
 
-      const bResults = results.filter(r => r.id === "B");
+      const bResults = results.filter((r) => r.id === "B");
       expect(bResults).toHaveLength(1);
     });
   });
@@ -104,8 +95,8 @@ describe("HybridSearch", () => {
       const vectorResults: ScoredResult[] = [];
 
       const store = createMockStore(keywordResults, vectorResults);
-      const embeddings = createMockEmbeddingProvider();
-      const search = createHybridSearch(store, embeddings, { limit: 3 });
+      const embed = createMockEmbed();
+      const search = createHybridSearch(store, embed, { limit: 3 });
 
       const results = await search("test query");
 
@@ -116,8 +107,8 @@ describe("HybridSearch", () => {
   describe("returns empty for empty query", () => {
     it("returns empty array for empty string", async () => {
       const store = createMockStore([], []);
-      const embeddings = createMockEmbeddingProvider();
-      const search = createHybridSearch(store, embeddings);
+      const embed = createMockEmbed();
+      const search = createHybridSearch(store, embed);
 
       const results = await search("");
 
@@ -126,8 +117,8 @@ describe("HybridSearch", () => {
 
     it("returns empty array for whitespace only", async () => {
       const store = createMockStore([], []);
-      const embeddings = createMockEmbeddingProvider();
-      const search = createHybridSearch(store, embeddings);
+      const embed = createMockEmbed();
+      const search = createHybridSearch(store, embed);
 
       const results = await search("   ");
 
@@ -143,8 +134,8 @@ describe("HybridSearch", () => {
       const vectorResults: ScoredResult[] = [];
 
       const store = createMockStore(keywordResults, vectorResults);
-      const embeddings = createMockEmbeddingProvider();
-      const search = createHybridSearch(store, embeddings);
+      const embed = createMockEmbed();
+      const search = createHybridSearch(store, embed);
 
       const results = await search("test query");
 
@@ -161,8 +152,8 @@ describe("HybridSearch", () => {
       ];
 
       const store = createMockStore(keywordResults, vectorResults);
-      const embeddings = createMockEmbeddingProvider();
-      const search = createHybridSearch(store, embeddings);
+      const embed = createMockEmbed();
+      const search = createHybridSearch(store, embed);
 
       const results = await search("test query");
 
@@ -176,8 +167,8 @@ describe("HybridSearch", () => {
   describe("search with no indexed facts", () => {
     it("returns empty results when store is empty", async () => {
       const store = createMockStore([], []);
-      const embeddings = createMockEmbeddingProvider();
-      const search = createHybridSearch(store, embeddings);
+      const embed = createMockEmbed();
+      const search = createHybridSearch(store, embed);
 
       const results = await search("test query");
 
@@ -196,8 +187,8 @@ describe("HybridSearch", () => {
       ];
 
       const store = createMockStore(keywordResults, vectorResults);
-      const embeddings = createMockEmbeddingProvider();
-      const search = createHybridSearch(store, embeddings, {
+      const embed = createMockEmbed();
+      const search = createHybridSearch(store, embed, {
         vectorWeight: 0.7,
         keywordWeight: 0.3,
         k: 60,

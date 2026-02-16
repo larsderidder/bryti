@@ -6,7 +6,6 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { createMemorySearchTools } from "./memory-tools.js";
 import type { HybridMemorySearch, SearchResult } from "./search.js";
 import type { MemoryStore } from "./store.js";
-import type { EmbeddingProvider } from "./embeddings.js";
 
 describe("MemoryTools", () => {
   const createMockSearch = (results: SearchResult[]): HybridMemorySearch => ({
@@ -22,18 +21,7 @@ describe("MemoryTools", () => {
     close: vi.fn(),
   });
 
-  const createMockEmbeddingProvider = (): EmbeddingProvider => ({
-    embed: vi.fn().mockResolvedValue(new Array(768).fill(0.1)),
-    embedBatch: vi.fn(),
-    dims: 768,
-    ready: true,
-    providerName: "mock",
-    close: vi.fn(),
-  });
-
-  const createMockMemoryManager = (content: string = "") => ({
-    read: vi.fn().mockResolvedValue(content),
-  });
+  const createMockEmbed = () => vi.fn().mockResolvedValue(new Array(768).fill(0.1));
 
   describe("search_memory tool", () => {
     it("returns results for known facts", async () => {
@@ -52,8 +40,7 @@ describe("MemoryTools", () => {
       const tools = createMemorySearchTools(
         mockSearch,
         createMockStore(),
-        createMockEmbeddingProvider(),
-        createMockMemoryManager(),
+        createMockEmbed(),
       );
 
       const searchTool = tools.find((t) => t.name === "search_memory")!;
@@ -69,8 +56,7 @@ describe("MemoryTools", () => {
       const tools = createMemorySearchTools(
         mockSearch,
         createMockStore(),
-        createMockEmbeddingProvider(),
-        createMockMemoryManager(),
+        createMockEmbed(),
       );
 
       const searchTool = tools.find((t) => t.name === "search_memory")!;
@@ -96,8 +82,7 @@ describe("MemoryTools", () => {
       const tools = createMemorySearchTools(
         mockSearch,
         createMockStore(),
-        createMockEmbeddingProvider(),
-        createMockMemoryManager(),
+        createMockEmbed(),
       );
 
       const searchTool = tools.find((t) => t.name === "search_memory")!;
@@ -113,13 +98,12 @@ describe("MemoryTools", () => {
   describe("record_fact tool", () => {
     it("stores a fact that is searchable", async () => {
       const mockStore = createMockStore();
-      const mockEmbeddings = createMockEmbeddingProvider();
+      const mockEmbed = createMockEmbed();
 
       const tools = createMemorySearchTools(
         createMockSearch([]),
         mockStore,
-        mockEmbeddings,
-        createMockMemoryManager(),
+        mockEmbed,
       );
 
       const recordTool = tools.find((t) => t.name === "record_fact")!;
@@ -136,8 +120,7 @@ describe("MemoryTools", () => {
       const tools = createMemorySearchTools(
         createMockSearch([]),
         createMockStore(),
-        createMockEmbeddingProvider(),
-        createMockMemoryManager(),
+        createMockEmbed(),
       );
 
       const recordTool = tools.find((t) => t.name === "record_fact")!;
@@ -147,25 +130,4 @@ describe("MemoryTools", () => {
     });
   });
 
-  describe("reindex_memory tool", () => {
-    it("re-indexes memory.md content", async () => {
-      const mockStore = createMockStore();
-      const mockEmbeddings = createMockEmbeddingProvider();
-      const memoryManager = createMockMemoryManager("# Test\nTest content");
-
-      const tools = createMemorySearchTools(
-        createMockSearch([]),
-        mockStore,
-        mockEmbeddings,
-        memoryManager,
-      );
-
-      const reindexTool = tools.find((t) => t.name === "reindex_memory")!;
-      const result = await reindexTool.execute("tool-call-id", {});
-
-      expect(memoryManager.read).toHaveBeenCalled();
-      expect(mockStore.addFact).toHaveBeenCalled();
-      expect(result.details).toHaveProperty("success", true);
-    });
-  });
 });

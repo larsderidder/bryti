@@ -8,7 +8,6 @@
  */
 
 import type { MemoryStore, ScoredResult } from "./store.js";
-import type { EmbeddingProvider } from "./embeddings.js";
 
 export interface SearchResult extends ScoredResult {
   /** Combined score from both methods. */
@@ -40,7 +39,7 @@ const DEFAULT_OPTIONS: Required<HybridSearchOptions> = {
  */
 export function createHybridSearch(
   store: MemoryStore,
-  embeddingProvider: EmbeddingProvider,
+  embed: (text: string) => Promise<number[]>,
   options: HybridSearchOptions = {},
 ): (query: string) => Promise<SearchResult[]> {
   const opts = { ...DEFAULT_OPTIONS, ...options };
@@ -52,7 +51,7 @@ export function createHybridSearch(
     }
 
     // Get embedding for query
-    const queryEmbedding = await embeddingProvider.embed(query);
+    const queryEmbedding = await embed(query);
 
     // Run both searches in parallel
     const [keywordResults, vectorResults] = await Promise.all([
@@ -125,9 +124,9 @@ export interface HybridMemorySearch {
 
 export function createHybridMemorySearch(
   store: MemoryStore,
-  embeddingProvider: EmbeddingProvider,
+  embed: (text: string) => Promise<number[]>,
 ): HybridMemorySearch {
-  const search = createHybridSearch(store, embeddingProvider);
+  const search = createHybridSearch(store, embed);
 
   return {
     async search(query: string): Promise<SearchResult[]> {

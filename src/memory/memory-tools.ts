@@ -9,8 +9,6 @@ import type { Static } from "@sinclair/typebox";
 import { Type } from "@sinclair/typebox";
 import type { HybridMemorySearch } from "./search.js";
 import type { MemoryStore } from "./store.js";
-import type { EmbeddingProvider } from "./embeddings.js";
-import { createIndexer } from "./indexer.js";
 
 // Schema for search_memory
 const searchMemorySchema = Type.Object({
@@ -32,10 +30,8 @@ type RecordFactInput = Static<typeof recordFactSchema>;
 export function createMemorySearchTools(
   search: HybridMemorySearch,
   store: MemoryStore,
-  embeddingProvider: EmbeddingProvider,
-  memoryManager: { read(): Promise<string> },
+  embed: (text: string) => Promise<number[]>,
 ): AgentTool<any>[] {
-  const indexer = createIndexer(store, embeddingProvider);
 
   const searchMemoryTool: AgentTool<typeof searchMemorySchema> = {
     name: "search_memory",
@@ -93,7 +89,7 @@ export function createMemorySearchTools(
     ): Promise<AgentToolResult<unknown>> {
       try {
         // Generate embedding and store the fact
-        const embedding = await embeddingProvider.embed(fact);
+        const embedding = await embed(fact);
         store.addFact(fact, "recorded", embedding);
 
         const text = JSON.stringify({ success: true, message: "Fact recorded" });
@@ -112,32 +108,5 @@ export function createMemorySearchTools(
     },
   };
 
-  const reindexMemoryTool: AgentTool<typeof searchMemorySchema> = {
-    name: "reindex_memory",
-    label: "reindex_memory",
-    description:
-      "Re-index the memory file. Use this after updating memory.md to ensure new content is searchable.",
-    parameters: Type.Object({}),
-    async execute(): Promise<AgentToolResult<unknown>> {
-      try {
-        const memoryContent = await memoryManager.read();
-        await indexer.indexMemoryFile(memoryContent);
-
-        const text = JSON.stringify({ success: true, message: "Memory re-indexed" });
-        return {
-          content: [{ type: "text", text }],
-          details: { success: true },
-        };
-      } catch (error) {
-        const err = error as Error;
-        const text = JSON.stringify({ error: `Re-index failed: ${err.message}` });
-        return {
-          content: [{ type: "text", text }],
-          details: { error: err.message },
-        };
-      }
-    },
-  };
-
-  return [searchMemoryTool, recordFactTool, reindexMemoryTool];
+  return [searchMemoryTool, recordFactTool];
 }
