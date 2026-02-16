@@ -1,0 +1,9 @@
+# Caddyfile for production
+# Requires domain and email in environment
+
+pibot.example.com {
+    reverse_proxy pibot:8443
+    tls {
+        on_demand
+    }
+}
