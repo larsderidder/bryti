@@ -6,6 +6,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { createMemoryStore, type MemoryStore } from "./store.js";
 import path from "node:path";
 import fs from "node:fs";
+import Database from "better-sqlite3";
 
 describe("MemoryStore", () => {
   const testDir = path.join(process.cwd(), ".test-data", "memory-store");
@@ -39,7 +40,7 @@ describe("MemoryStore", () => {
     it("adds a fact and returns an ID", () => {
       const embedding = new Array(768).fill(0).map(() => Math.random());
       const id = store.addFact("Lars prefers dark mode", "memory.md", embedding);
-      
+
       expect(id).toBeDefined();
       expect(typeof id).toBe("string");
       expect(id.length).toBeGreaterThan(0);
@@ -48,7 +49,7 @@ describe("MemoryStore", () => {
     it("stores fact with correct metadata", () => {
       const embedding = new Array(768).fill(0).map(() => Math.random());
       const id = store.addFact("Test fact", "test-source", embedding);
-      
+
       const results = store.searchKeyword("Test fact", 10);
       expect(results).toHaveLength(1);
       expect(results[0].id).toBe(id);
@@ -56,16 +57,41 @@ describe("MemoryStore", () => {
       expect(results[0].source).toBe("test-source");
       expect(results[0].timestamp).toBeDefined();
     });
+
+    it("stores embeddings as binary blobs", () => {
+      const embedding = new Array(768).fill(0.1);
+      const id = store.addFact("Binary embedding", "test", embedding);
+      store.close();
+
+      const dbPath = path.join(testDir, "users", userId, "memory.db");
+      const db = new Database(dbPath);
+      const row = db
+        .prepare("SELECT embedding FROM fact_embeddings WHERE id = ?")
+        .get(id) as { embedding: Buffer };
+      db.close();
+
+      expect(Buffer.isBuffer(row.embedding)).toBe(true);
+      expect(row.embedding.length).toBe(embedding.length * 4);
+    });
   });
 
   describe("removeFact", () => {
     it("removes a fact", () => {
       const embedding = new Array(768).fill(0).map(() => Math.random());
       const id = store.addFact("Fact to remove", "test", embedding);
-      
+
       store.removeFact(id);
-      
+
       const results = store.searchKeyword("Fact to remove", 10);
+      expect(results).toHaveLength(0);
+    });
+
+    it("removes embeddings from vector search", () => {
+      const embedding = new Array(768).fill(0.2);
+      const id = store.addFact("Vector fact", "test", embedding);
+      store.removeFact(id);
+
+      const results = store.searchVector(embedding, 10);
       expect(results).toHaveLength(0);
     });
   });
@@ -78,7 +104,7 @@ describe("MemoryStore", () => {
         new Array(768).fill(0.2).map((v, i) => v + i * 0.001),
         new Array(768).fill(0.3).map((v, i) => v + i * 0.001),
       ];
-      
+
       store.addFact("Lars likes coffee", "memory.md", embeddings[0]);
       store.addFact("Lars likes tea", "memory.md", embeddings[1]);
       store.addFact("The weather is nice today", "conversation", embeddings[2]);
@@ -86,16 +112,16 @@ describe("MemoryStore", () => {
 
     it("finds facts with matching keywords", () => {
       const results = store.searchKeyword("Lars likes", 10);
-      
+
       expect(results.length).toBeGreaterThanOrEqual(2);
-      const contents = results.map(r => r.content);
+      const contents = results.map((r) => r.content);
       expect(contents).toContain("Lars likes coffee");
       expect(contents).toContain("Lars likes tea");
     });
 
     it("does not return unrelated facts", () => {
       const results = store.searchKeyword("Lars likes", 10);
-      const contents = results.map(r => r.content);
+      const contents = results.map((r) => r.content);
       expect(contents).not.toContain("The weather is nice today");
     });
 
@@ -122,14 +148,14 @@ describe("MemoryStore", () => {
       // Similar embeddings should be found together
       const meetingEmbedding = new Array(768).fill(0).map((_, i) => Math.sin(i * 0.1));
       const groceryEmbedding = new Array(768).fill(0).map((_, i) => Math.cos(i * 0.1));
-      
+
       store.addFact("Meeting with client at 3pm", "calendar", meetingEmbedding);
       store.addFact("Grocery list: milk, eggs", "notes", groceryEmbedding);
-      
+
       // Search with a query similar to "meeting" (similar to meetingEmbedding)
       const queryEmbedding = new Array(768).fill(0).map((_, i) => Math.sin(i * 0.1) + 0.01);
       const results = store.searchVector(queryEmbedding, 10);
-      
+
       expect(results.length).toBeGreaterThanOrEqual(1);
       expect(results[0].content).toContain("Meeting");
     });
@@ -140,10 +166,21 @@ describe("MemoryStore", () => {
     });
   });
 
+  describe("persistence", () => {
+    it("persists facts across instances", () => {
+      const embedding = new Array(768).fill(0.4);
+      store.addFact("Persistent fact", "memory.md", embedding);
+      store.close();
+
+      store = createMemoryStore(userId, testDir);
+      const results = store.searchKeyword("Persistent", 10);
+      expect(results).toHaveLength(1);
+      expect(results[0].content).toBe("Persistent fact");
+    });
+  });
+
   describe("isolated user data", () => {
     it("creates separate databases for different users", () => {
-      // This is implicitly tested by creating the store with userId
-      // The database path should be user-specific
       const dbPath = path.join(testDir, "users", userId, "memory.db");
       expect(dbPath).toContain(userId);
     });

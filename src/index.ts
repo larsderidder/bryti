@@ -19,7 +19,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { loadConfig, ensureDataDirs, type Config } from "./config.js";
-import { createMemoryManager, type MemoryManager } from "./memory.js";
+import { createCoreMemory, type CoreMemory } from "./memory/core-memory.js";
 import { createHistoryManager, type HistoryManager, type ChatMessage } from "./history.js";
 import { createTools } from "./tools/index.js";
 import { createAgentSessionFactory, type AgentSessionFactory } from "./agent.js";
@@ -33,7 +33,7 @@ import type { AgentSession, AgentSessionEvent } from "@mariozechner/pi-coding-ag
  */
 interface AppState {
   config: Config;
-  memoryManager: MemoryManager;
+  coreMemory: CoreMemory;
   historyManager: HistoryManager;
   agentFactory: AgentSessionFactory | null;
   bridge: ChannelBridge;
@@ -56,17 +56,17 @@ async function processMessage(
   }
 
   if (msg.text === "/memory") {
-    const memory = await state.memoryManager.read();
+    const memory = state.coreMemory.read();
     if (memory) {
       await state.bridge.sendMessage(
         msg.channelId,
-        `Your persistent memory:\n\n${memory}`,
+        `Your core memory:\n\n${memory}`,
         { parseMode: "markdown" },
       );
     } else {
       await state.bridge.sendMessage(
         msg.channelId,
-        "Your memory is empty. I haven't saved anything yet.",
+        "Your core memory is empty. I haven't saved anything yet.",
       );
     }
     return;
@@ -79,9 +79,9 @@ async function processMessage(
     // Create a new session for each message (fresh context window)
     const { session, stop } = await createAgentSessionFactory(
       state.config,
-      state.memoryManager,
+      state.coreMemory,
       state.historyManager,
-      createTools(state.config, state.memoryManager),
+      createTools(state.config, state.coreMemory, msg.userId),
     );
 
     // Track streaming state
@@ -180,7 +180,7 @@ async function main(): Promise<void> {
   console.log(`Cron jobs: ${config.cron.length}`);
 
   // Create memory and history managers
-  const memoryManager = createMemoryManager(config.data_dir);
+  const coreMemory = createCoreMemory(config.data_dir);
   const historyManager = createHistoryManager(config.data_dir);
 
   // Create Telegram bridge
@@ -189,7 +189,7 @@ async function main(): Promise<void> {
   // Track if we're currently processing a message
   const state: AppState = {
     config,
-    memoryManager,
+    coreMemory,
     historyManager,
     agentFactory: null,
     bridge,

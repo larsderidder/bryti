@@ -29,7 +29,7 @@ import {
   type AgentSessionEvent,
 } from "@mariozechner/pi-coding-agent";
 import type { Config } from "./config.js";
-import type { MemoryManager } from "./memory.js";
+import type { CoreMemory } from "./memory/core-memory.js";
 import type { HistoryManager, ChatMessage } from "./history.js";
 
 /**
@@ -81,7 +81,7 @@ function generateModelsJson(config: Config, agentDir: string): void {
  */
 function buildSystemPrompt(
   config: Config,
-  memory: string,
+  coreMemory: string,
   history: ChatMessage[],
 ): string {
   const parts: string[] = [];
@@ -89,9 +89,9 @@ function buildSystemPrompt(
   // Main system prompt
   parts.push(config.agent.system_prompt);
 
-  // Persistent memory section
-  if (memory) {
-    parts.push(`## Your Persistent Memory\n${memory}`);
+  // Core memory section
+  if (coreMemory) {
+    parts.push(`## Your Core Memory (always visible)\n${coreMemory}`);
   }
 
   // Recent conversation section
@@ -122,7 +122,7 @@ function buildSystemPrompt(
  */
 export async function createAgentSessionFactory(
   config: Config,
-  memoryManager: MemoryManager,
+  coreMemory: CoreMemory,
   historyManager: HistoryManager,
   customTools: AgentTool[],
   // Optional: pass pre-loaded history to avoid extra read
@@ -173,7 +173,7 @@ export async function createAgentSessionFactory(
   console.log(`Using model: ${model.id} (${model.provider})`);
 
   // Load memory and history
-  const memory = await memoryManager.read();
+  const memory = coreMemory.read();
   const history = preloadedHistory ?? await historyManager.getRecent(20, 4000);
 
   // Create resource loader with custom system prompt (includes memory and history)

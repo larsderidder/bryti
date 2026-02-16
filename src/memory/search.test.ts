@@ -13,7 +13,6 @@ describe("HybridSearch", () => {
     removeFact: vi.fn(),
     searchKeyword: vi.fn().mockResolvedValue(keywordResults),
     searchVector: vi.fn().mockResolvedValue(vectorResults),
-    getAllFacts: vi.fn().mockReturnValue([]),
     close: vi.fn(),
   });
 

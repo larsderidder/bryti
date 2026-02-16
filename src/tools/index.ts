@@ -5,20 +5,29 @@
  * These supplement pi's built-in tools (read/write/edit/bash).
  */
 
-import type { AgentTool, AgentToolResult } from "@mariozechner/pi-agent-core";
-import type { Static } from "@sinclair/typebox";
-import { Type } from "@sinclair/typebox";
+import type { AgentTool } from "@mariozechner/pi-agent-core";
 import { createWebSearchTool } from "./web-search.js";
 import { createFetchUrlTool } from "./fetch-url.js";
 import { createFileTools } from "./files.js";
-import { createMemoryTools } from "./memory-tool.js";
+import {
+  createCoreMemoryTools,
+  createArchivalMemoryTools,
+  createConversationSearchTool,
+} from "../memory/memory-tools.js";
+import { embed } from "../memory/embeddings.js";
+import { createMemoryStore } from "../memory/store.js";
+import path from "node:path";
 import type { Config } from "../config.js";
-import type { MemoryManager } from "../memory.js";
+import type { CoreMemory } from "../memory/core-memory.js";
 
 export { createWebSearchTool };
 export { createFetchUrlTool };
 export { createFileTools };
-export { createMemoryTools };
+export { createCoreMemoryTools };
+export { createArchivalMemoryTools };
+export { createConversationSearchTool };
+
+
 
 /**
  * Type for pibot tools (AgentTool from pi).
@@ -28,7 +37,16 @@ export type PibotTool = AgentTool<any>;
 /**
  * Create all pibot tools based on configuration.
  */
-export function createTools(config: Config, memoryManager: MemoryManager): PibotTool[] {
+function getTogetherApiKey(config: Config): string | null {
+  const provider = config.models.providers.find((item) => item.name === "together");
+  return provider?.api_key || null;
+}
+
+export function createTools(
+  config: Config,
+  coreMemory: CoreMemory,
+  userId: string,
+): PibotTool[] {
   const tools: PibotTool[] = [];
 
   // Web search tool
@@ -47,7 +65,17 @@ export function createTools(config: Config, memoryManager: MemoryManager): Pibot
   }
 
   // Memory tools
-  tools.push(...createMemoryTools(memoryManager));
+  tools.push(...createCoreMemoryTools(coreMemory));
+
+  const togetherApiKey = getTogetherApiKey(config);
+  if (togetherApiKey) {
+    const archivalStore = createMemoryStore(userId, config.data_dir);
+    tools.push(
+      ...createArchivalMemoryTools(archivalStore, (text) => embed(text, togetherApiKey)),
+    );
+  }
+
+  tools.push(createConversationSearchTool(path.join(config.data_dir, "history")));
 
   return tools;
 }

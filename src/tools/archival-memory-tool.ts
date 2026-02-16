@@ -1,0 +1,96 @@
+/**
+ * Archival memory tools.
+ */
+
+import type { AgentTool, AgentToolResult } from "@mariozechner/pi-agent-core";
+import type { Static } from "@sinclair/typebox";
+import { Type } from "@sinclair/typebox";
+import { createHybridSearch } from "../memory/search.js";
+import type { MemoryStore } from "../memory/store.js";
+
+const archivalMemoryInsertSchema = Type.Object({
+  content: Type.String({ description: "Content to store in archival memory" }),
+});
+
+type ArchivalMemoryInsertInput = Static<typeof archivalMemoryInsertSchema>;
+
+const archivalMemorySearchSchema = Type.Object({
+  query: Type.String({ description: "Search query for archival memory" }),
+});
+
+type ArchivalMemorySearchInput = Static<typeof archivalMemorySearchSchema>;
+
+export function createArchivalMemoryTools(
+  store: MemoryStore,
+  embed: (text: string) => Promise<number[]>,
+): AgentTool<any>[] {
+  const hybridSearch = createHybridSearch(store, embed);
+
+  const insertTool: AgentTool<typeof archivalMemoryInsertSchema> = {
+    name: "archival_memory_insert",
+    label: "archival_memory_insert",
+    description:
+      "Store a fact in long-term archival memory. Use for detailed information that does not need to be in core memory.",
+    parameters: archivalMemoryInsertSchema,
+    async execute(
+      _toolCallId: string,
+      { content }: ArchivalMemoryInsertInput,
+    ): Promise<AgentToolResult<unknown>> {
+      try {
+        const embedding = await embed(content);
+        store.addFact(content, "archival", embedding);
+
+        const text = JSON.stringify({ success: true }, null, 2);
+        return {
+          content: [{ type: "text", text }],
+          details: { success: true },
+        };
+      } catch (error) {
+        const err = error as Error;
+        const text = JSON.stringify({ error: err.message });
+        return {
+          content: [{ type: "text", text }],
+          details: { error: err.message },
+        };
+      }
+    },
+  };
+
+  const searchTool: AgentTool<typeof archivalMemorySearchSchema> = {
+    name: "archival_memory_search",
+    label: "archival_memory_search",
+    description:
+      "Search your long-term archival memory for relevant facts. Use when you need detailed information not in core memory.",
+    parameters: archivalMemorySearchSchema,
+    async execute(
+      _toolCallId: string,
+      { query }: ArchivalMemorySearchInput,
+    ): Promise<AgentToolResult<unknown>> {
+      try {
+        const results = await hybridSearch(query);
+        const formatted = results.map((result) => ({
+          id: result.id,
+          content: result.content,
+          source: result.source,
+          score: result.combinedScore,
+          matchedBy: result.matchedBy,
+        }));
+
+        const text = JSON.stringify({ results: formatted }, null, 2);
+        return {
+          content: [{ type: "text", text }],
+          details: { results: formatted },
+        };
+      } catch (error) {
+        const err = error as Error;
+        const text = JSON.stringify({ error: err.message });
+        return {
+          content: [{ type: "text", text }],
+          details: { error: err.message },
+        };
+      }
+    },
+  };
+
+  return [insertTool, searchTool];
+}
