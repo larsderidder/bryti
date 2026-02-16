@@ -1,0 +1,21 @@
+node_modules/
+dist/
+data/
+*.log
+.env
+
+# eval raw results (can be large)
+eval/raw/
+
+# internal analysis docs
+docs/internal/
+
+# Test artifacts
+.test-data/
+.pi/todos/
+
+# Build outputs
+*.tsbuildinfo/
+
+# Planning documents (in gitignored dirs)
+plans/

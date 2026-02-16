@@ -1,0 +1,41 @@
+{
+  "name": "pibot",
+  "version": "0.0.1",
+  "description": "Managed AI agent service built on pi SDK. Open models, flat pricing, EU-hosted.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/index.js",
+    "clean": "rm -rf dist",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "check": "npm test && npm run build"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.74.0",
+    "@mariozechner/pi-coding-agent": "^0.52.12",
+    "@mozilla/readability": "^0.6.0",
+    "@whiskeysockets/baileys": "^7.0.0-rc.9",
+    "axios": "^1.13.5",
+    "better-sqlite3": "^12.6.2",
+    "croner": "^9.0.0",
+    "grammy": "^1.35.0",
+    "linkedom": "^0.18.12",
+    "node-llama-cpp": "^3.15.1",
+    "qrcode-terminal": "^0.12.0",
+    "sqlite-vec": "^0.1.7-alpha.2",
+    "yaml": "^2.7.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22",
+    "@types/qrcode-terminal": "^0.12.2",
+    "typescript": "^5.7",
+    "vitest": "^4.0.18"
+  }
+}
