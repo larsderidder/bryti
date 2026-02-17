@@ -26,7 +26,7 @@ import { createAgentSessionFactory, type AgentSessionFactory } from "./agent.js"
 import { TelegramBridge } from "./channels/telegram.js";
 import { createCronScheduler, type CronScheduler } from "./cron.js";
 import type { IncomingMessage, ChannelBridge } from "./channels/types.js";
-import type { AgentSession, AgentSessionEvent } from "@mariozechner/pi-coding-agent";
+import type { AgentSession } from "@mariozechner/pi-coding-agent";
 
 /**
  * Application state.
@@ -84,31 +84,6 @@ async function processMessage(
       createTools(state.config, state.coreMemory, msg.userId),
     );
 
-    // Track streaming state
-    let currentMessageId: string | null = null;
-    let currentText = "";
-
-    // Subscribe to events for streaming
-    const unsubscribe = session.subscribe((event: AgentSessionEvent) => {
-      if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
-        const delta = event.assistantMessageEvent.delta;
-        currentText += delta;
-
-        // Debounce edits - send initial message, then edit
-        if (!currentMessageId) {
-          // First chunk - send message
-          state.bridge.sendMessage(msg.channelId, currentText, { parseMode: "markdown" }).then((id) => {
-            currentMessageId = id;
-          });
-        } else {
-          // Subsequent chunks - edit message (debounced by caller)
-          state.bridge.editMessage(msg.channelId, currentMessageId, currentText).catch(() => {
-            // Ignore edit errors (may be rate limited)
-          });
-        }
-      }
-    });
-
     try {
       // Add user message to history
       await state.historyManager.append({
@@ -116,44 +91,47 @@ async function processMessage(
         content: msg.text,
       });
 
-      // Send to agent
+      // Send to agent and wait for full response
       await session.prompt(msg.text);
 
-      // Save assistant response to history
+      // Extract assistant response text
       const messages = session.messages;
       const lastAssistantMsg = messages.filter(
-        (m) => m.role === "assistant" && "content" in m && m.content,
-      ).pop();
+        (m) => m.role === "assistant",
+      ).pop() as Record<string, unknown> | undefined;
 
+      // Check for error responses from the model
+      if (lastAssistantMsg?.stopReason === "error") {
+        const errorMsg = String(lastAssistantMsg.errorMessage || "Unknown model error");
+        console.error("Model error:", errorMsg);
+        await state.bridge.sendMessage(msg.channelId, `Model error: ${errorMsg}`);
+        return;
+      }
+
+      let responseText = "";
       if (lastAssistantMsg && "content" in lastAssistantMsg) {
-        const content = Array.isArray(lastAssistantMsg.content)
-          ? lastAssistantMsg.content.map((c) => {
-              const c2 = c as { text?: string };
-              return c2.text || "";
-            }).join("")
-          : lastAssistantMsg.content;
+        const content = lastAssistantMsg.content;
+        if (Array.isArray(content)) {
+          responseText = content
+            .filter((c: Record<string, unknown>) => c.type === "text")
+            .map((c: Record<string, unknown>) => String(c.text || ""))
+            .join("");
+        } else if (typeof content === "string") {
+          responseText = content;
+        }
+      }
 
+      // Save to history and send
+      if (responseText.trim()) {
         await state.historyManager.append({
           role: "assistant",
-          content: typeof content === "string" ? content : "",
+          content: responseText,
         });
-      }
-
-      // Send final response if not already sent
-      if (!currentMessageId && currentText) {
-        await state.bridge.sendMessage(msg.channelId, currentText, { parseMode: "markdown" });
-      } else if (currentMessageId) {
-        // Update with final text
-        await state.bridge.editMessage(msg.channelId, currentMessageId, currentText);
+        await state.bridge.sendMessage(msg.channelId, responseText);
       } else {
-        // No text delta events - just send a completion message
-        await state.bridge.sendMessage(
-          msg.channelId,
-          "Task completed.",
-        );
+        await state.bridge.sendMessage(msg.channelId, "Done (no text response).");
       }
     } finally {
-      unsubscribe();
       await stop();
     }
   } catch (error) {
