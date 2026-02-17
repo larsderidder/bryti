@@ -59,14 +59,16 @@ function generateModelsJson(config: Config, agentDir: string): void {
 
     providers[provider.name] = {
       baseUrl: provider.base_url,
-      api: "openai-completions",
-      apiKey: `${provider.name.toUpperCase()}_API_KEY`,
+      api: provider.api || "openai-completions",
+      apiKey: provider.api_key,
       models: provider.models.map((m) => ({
         id: m.id,
         name: m.name || m.id,
         contextWindow: m.context_window || 131072,
+        ...(m.api && { api: m.api }),
         ...(m.max_tokens && { maxTokens: m.max_tokens }),
         ...(m.cost && { cost: m.cost }),
+        ...(m.compat && { compat: m.compat }),
       })),
     };
   }

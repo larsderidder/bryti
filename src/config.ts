@@ -12,6 +12,7 @@ import { parse as parseYaml } from "yaml";
 export interface ProviderConfig {
   name: string;
   base_url: string;
+  api: string;
   api_key: string;
   models: ModelEntry[];
 }
@@ -19,9 +20,11 @@ export interface ProviderConfig {
 export interface ModelEntry {
   id: string;
   name?: string;
+  api?: string;
   context_window?: number;
   max_tokens?: number;
   cost?: { input: number; output: number };
+  compat?: Record<string, unknown>;
 }
 
 export interface CronJob {
