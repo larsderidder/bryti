@@ -169,8 +169,12 @@ export class TelegramBridge implements ChannelBridge {
       await ctx.reply("Sorry, I can only handle text messages for now.");
     });
 
-    // Start polling
-    await this.bot.start();
+    // Initialize bot (fetches bot info) then start polling in background
+    await this.bot.init();
+    // bot.start() blocks until stopped; run it in background
+    this.bot.start().catch((err) => {
+      console.error("Telegram polling error:", err);
+    });
     console.log("Telegram bridge started (polling mode)");
   }
 
