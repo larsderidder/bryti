@@ -25,7 +25,7 @@ import { createCoreMemory, type CoreMemory } from "./memory/core-memory.js";
 import { createHistoryManager, type HistoryManager } from "./history.js";
 import { warmupEmbeddings } from "./memory/embeddings.js";
 import { createTools } from "./tools/index.js";
-import { loadUserSession, repairSessionTranscript, refreshSystemPrompt, promptWithFallback, type UserSession } from "./agent.js";
+import { loadUserSession, repairSessionTranscript, refreshSystemPrompt, promptWithFallback, SILENT_REPLY_TOKEN, type UserSession } from "./agent.js";
 import { TelegramBridge } from "./channels/telegram.js";
 import { createScheduler, type Scheduler } from "./scheduler.js";
 import { MessageQueue } from "./message-queue.js";
@@ -235,7 +235,10 @@ async function processMessage(
       }
     }
 
-    if (responseText.trim()) {
+    if (responseText.trim() === SILENT_REPLY_TOKEN) {
+      // Scheduled/proactive turn with nothing to surface — swallow silently
+      console.log(`[agent] Silent reply from ${msg.userId}, suppressing message`);
+    } else if (responseText.trim()) {
       // Append to audit log
       await state.historyManager.append({
         role: "assistant",

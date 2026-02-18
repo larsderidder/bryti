@@ -126,6 +126,8 @@ export function buildToolSection(
   return `## Your currently loaded tools\n${lines.join("\n")}`;
 }
 
+export const SILENT_REPLY_TOKEN = "NOOP";
+
 function buildSystemPrompt(
   config: Config,
   coreMemory: string,
@@ -136,6 +138,21 @@ function buildSystemPrompt(
   const parts: string[] = [];
 
   parts.push(config.agent.system_prompt);
+
+  // Current date and time — lets the agent resolve relative time expressions correctly
+  const now = new Date();
+  parts.push(
+    `## Current Date & Time\n${now.toISOString().slice(0, 16).replace("T", " ")} UTC`,
+  );
+
+  // Tool call style — reduces chatty narration
+  parts.push(
+    `## Tool Call Style\n` +
+    `Do not narrate routine tool calls. Just call the tool.\n` +
+    `Narrate only when it helps: multi-step work, sensitive actions (deletions, external sends), or when the user asks.\n` +
+    `Keep narration brief.`,
+  );
+
   parts.push(buildToolSection(tools, extensionToolNames));
 
   if (coreMemory) {
@@ -147,6 +164,13 @@ function buildSystemPrompt(
     `These are things you expect to happen or that the user mentioned about the future.\n` +
     `Connect new information to these when relevant. Proactively help with upcoming events.\n\n` +
     projections,
+  );
+
+  // Silent reply — for scheduled/proactive turns where there's nothing to say
+  parts.push(
+    `## Silent Replies\n` +
+    `When you receive a scheduled or proactive prompt (heartbeat, projection check) and there is nothing that needs the user's attention, respond with ONLY: ${SILENT_REPLY_TOKEN}\n` +
+    `This must be your entire message. Never append it to a real reply. Never use it in a user-initiated conversation.`,
   );
 
   return parts.join("\n\n");
