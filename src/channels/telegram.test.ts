@@ -103,6 +103,23 @@ describe("markdownToHtml", () => {
     // Standalone _word_ with spaces around it should still be italic
     expect(markdownToHtml("this is _italic_ text")).toBe("this is <i>italic</i> text");
   });
+
+  it("converts markdown tables to bullet lists", () => {
+    const table = "| Idea | Why |\n|------|-----|\n| AI writer | Niche |\n| Chatbot | Support |";
+    const result = markdownToHtml(table);
+    // No raw pipe characters or separator rows in output
+    expect(result).not.toContain("|");
+    expect(result).not.toContain("---");
+    // Row labels are bolded, columns are bullets
+    expect(result).toContain("AI writer");
+    expect(result).toContain("Chatbot");
+    expect(result).toContain("•");
+  });
+
+  it("converts links to HTML anchor tags", () => {
+    const result = markdownToHtml("[OpenAI](https://openai.com)");
+    expect(result).toBe('<a href="https://openai.com">OpenAI</a>');
+  });
 });
 
 describe("chunkMessage", () => {

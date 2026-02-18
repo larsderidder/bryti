@@ -12,6 +12,8 @@
 
 import { Bot, type Context } from "grammy";
 import type { ChannelBridge, IncomingMessage, SendOpts } from "./types.js";
+import { markdownToIR, type MarkdownLinkSpan } from "../markdown/ir.js";
+import { renderMarkdownWithMarkers } from "../markdown/render.js";
 
 /**
  * Telegram message handler function.
@@ -36,77 +38,52 @@ function escapeHtml(text: string): string {
     .replace(/>/g, "&gt;");
 }
 
+function escapeHtmlAttr(text: string): string {
+  return escapeHtml(text).replace(/"/g, "&quot;");
+}
+
+function buildTelegramLink(link: MarkdownLinkSpan, _text: string) {
+  const href = link.href.trim();
+  if (!href || link.start === link.end) return null;
+  return {
+    start: link.start,
+    end: link.end,
+    open: `<a href="${escapeHtmlAttr(href)}">`,
+    close: "</a>",
+  };
+}
+
 /**
- * Convert common LLM markdown output to Telegram HTML.
+ * Convert LLM markdown output to Telegram HTML using a proper markdown IR.
  *
- * Handles:
- * - Fenced code blocks (```lang\n...\n```) -> <pre><code>...</code></pre>
- * - Inline code (`...`) -> <code>...</code>
- * - Bold (**text** or __text__) -> <b>text</b>
- * - Italic (*text* or _text_) -> <i>text</i>
+ * Uses markdown-it to parse, then renders to Telegram-compatible HTML tags:
+ * - Bold (**text**) -> <b>text</b>
+ * - Italic (*text*) -> <i>text</i>
  * - Strikethrough (~~text~~) -> <s>text</s>
- * - ATX headings (# / ## / ###) -> <b>text</b> (Telegram has no heading tag)
- * - Horizontal rules (--- / ***) -> stripped
- * - Everything else: HTML-escaped plain text
- *
- * Strategy: HTML-escape the whole segment first, then apply markdown patterns
- * against the already-escaped text. Markdown delimiters (**,  *, __, _, ~~,
- * `) are ASCII and unaffected by HTML escaping, so the patterns still match
- * correctly. Code content is escaped before wrapping.
- *
- * Code blocks are extracted first so their contents skip inline processing.
+ * - Inline code (`...`) -> <code>...</code>
+ * - Code blocks (```...```) -> <pre><code>...</code></pre>
+ * - Headings -> <b>text</b> (Telegram has no heading tags)
+ * - Links -> <a href="...">text</a>
+ * - Tables -> bullet list format (Telegram has no table support)
  */
 export function markdownToHtml(text: string): string {
-  // Split on fenced code blocks; odd-indexed parts are code blocks.
-  const parts = text.split(/(```[\s\S]*?```)/g);
-
-  const converted = parts.map((part, i) => {
-    if (i % 2 === 1) {
-      // Fenced code block
-      const match = part.match(/^```\w*\n?([\s\S]*?)```$/);
-      const code = match ? match[1] : part.replace(/^```\w*\n?|```$/g, "");
-      return `<pre><code>${escapeHtml(code)}</code></pre>`;
-    }
-
-    // Non-code segment: escape HTML first (so plain text is safe), then apply
-    // markdown patterns. Delimiters (**, *, __, _, ~~, `) are ASCII and survive
-    // HTML escaping unchanged, so patterns still match correctly.
-    // Process line by line so heading/hr detection works on full lines.
-    const lines = part.split("\n").map((line) => {
-      const escaped = escapeHtml(line);
-
-      // ATX headings — strip the hashes, bold the rest
-      const headingMatch = escaped.match(/^#{1,6}\s+(.+)$/);
-      if (headingMatch) {
-        return `<b>${headingMatch[1]}</b>`;
-      }
-
-      // Horizontal rules
-      if (/^(-{3,}|\*{3,}|_{3,})$/.test(line.trim())) {
-        return "";
-      }
-
-      return escaped;
-    });
-
-    return lines
-      .join("\n")
-      // Inline code
-      .replace(/`([^`]+)`/g, (_m, code) => `<code>${code}</code>`)
-      // Strikethrough
-      .replace(/~~([^~]+)~~/g, (_m, t) => `<s>${t}</s>`)
-      // Bold (** or __)
-      .replace(/\*\*([^*]+)\*\*/g, (_m, t) => `<b>${t}</b>`)
-      .replace(/__([^_]+)__/g, (_m, t) => `<b>${t}</b>`)
-      // Italic (* or _) — single, must not be preceded/followed by same char.
-      // For *, just avoid matching inside ** pairs.
-      .replace(/(?<!\*)\*(?!\*)([^*]+)(?<!\*)\*(?!\*)/g, (_m, t) => `<i>${t}</i>`)
-      // For _, also require non-word boundaries so identifiers like read_file
-      // are not treated as italic markers.
-      .replace(/(?<![_\w])_(?!_)([^_]+)(?<!_)_(?![_\w])/g, (_m, t) => `<i>${t}</i>`);
+  const ir = markdownToIR(text ?? "", {
+    linkify: true,
+    headingStyle: "bold",
+    blockquotePrefix: "",
+    tableMode: "bullets",
   });
-
-  return converted.join("").trim();
+  return renderMarkdownWithMarkers(ir, {
+    styleMarkers: {
+      bold: { open: "<b>", close: "</b>" },
+      italic: { open: "<i>", close: "</i>" },
+      strikethrough: { open: "<s>", close: "</s>" },
+      code: { open: "<code>", close: "</code>" },
+      code_block: { open: "<pre><code>", close: "</code></pre>" },
+    },
+    escapeText: escapeHtml,
+    buildLink: buildTelegramLink,
+  });
 }
 
 /** Telegram's maximum message length in characters. */
