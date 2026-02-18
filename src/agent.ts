@@ -2,17 +2,24 @@
  * Agent session management.
  *
  * Wraps pi's SDK createAgentSession() with pibot-specific configuration:
+ * - Persistent sessions per user (session file survives across messages)
+ * - Transcript repair before every prompt (fixes tool-call/result pairing)
+ * - Auto-compaction via pi SDK (triggers automatically when context fills)
+ * - Core memory always injected into system prompt
  * - Custom tools (web search, fetch URL, files, memory)
- * - Custom system prompt (template + memory injection)
- * - Model configuration via models.json for open model providers
- * - No pi built-in tools (read/write/edit/bash); we provide our own sandboxed versions
  *
  * The pi SDK handles:
  * - Agent loop (prompt -> tool calls -> response)
  * - Model routing and API communication
- * - Session/message history (internal to pi)
- * - Streaming
- * - Auto-retry on failures
+ * - Session persistence (append-only JSONL)
+ * - Auto-compaction (summarises old turns when context fills)
+ * - Streaming and auto-retry
+ *
+ * Architecture change from v0 (fresh-session-per-message):
+ * - Sessions now persist across messages in data/sessions/<userId>.jsonl
+ * - History is no longer injected into the system prompt as text
+ * - The model sees its actual prior tool calls and results in context
+ * - JSONL history files remain as an audit log for conversation_search
  */
 
 import fs from "node:fs";
@@ -30,17 +37,20 @@ import {
 } from "@mariozechner/pi-coding-agent";
 import type { Config } from "./config.js";
 import type { CoreMemory } from "./memory/core-memory.js";
-import type { HistoryManager, ChatMessage } from "./history.js";
+import { repairToolUseResultPairing } from "./compaction/transcript-repair.js";
 
 /**
- * Agent session configuration.
+ * A loaded, persistent agent session for a single user.
  */
-export interface AgentSessionFactory {
-  /** The created session. */
+export interface UserSession {
+  /** The underlying pi AgentSession. */
   session: AgentSession;
-
-  /** Stop the session and clean up. */
-  stop(): Promise<void>;
+  /** User this session belongs to. */
+  userId: string;
+  /** Path to the session file on disk. */
+  sessionFile: string;
+  /** Clean up event listeners. Does NOT delete the session file. */
+  dispose(): void;
 }
 
 /**
@@ -52,7 +62,6 @@ function generateModelsJson(config: Config, agentDir: string): void {
   const providers: Record<string, unknown> = {};
 
   for (const provider of config.models.providers) {
-    // Skip groq since it's built-in
     if (provider.name === "groq") {
       continue;
     }
@@ -73,88 +82,86 @@ function generateModelsJson(config: Config, agentDir: string): void {
     };
   }
 
-  const modelsJson = { providers };
-  fs.writeFileSync(modelsJsonPath, JSON.stringify(modelsJson, null, 2), "utf-8");
-  console.log(`Generated models.json at ${modelsJsonPath}`);
+  fs.writeFileSync(
+    modelsJsonPath,
+    JSON.stringify({ providers }, null, 2),
+    "utf-8",
+  );
 }
 
 /**
- * Build the system prompt with memory and recent conversation history.
+ * Build the system prompt with core memory.
+ *
+ * History is no longer injected here. The persistent pi session file is the
+ * source of truth for conversation context. The JSONL audit log remains, but
+ * getRecent() is only used by the conversation_search tool now.
  */
-function buildSystemPrompt(
-  config: Config,
-  coreMemory: string,
-  history: ChatMessage[],
-): string {
+function buildSystemPrompt(config: Config, coreMemory: string): string {
   const parts: string[] = [];
 
-  // Main system prompt
   parts.push(config.agent.system_prompt);
 
-  // Core memory section
   if (coreMemory) {
     parts.push(`## Your Core Memory (always visible)\n${coreMemory}`);
   }
 
-  // Recent conversation section
-  if (history.length > 0) {
-    const conversationText = history
-      .map((msg) => {
-        if (msg.role === "user") {
-          return `User: ${msg.content}`;
-        } else if (msg.role === "assistant") {
-          return `Assistant: ${msg.content}`;
-        }
-        return null;
-      })
-      .filter(Boolean)
-      .join("\n\n");
+  parts.push(
+    "You have access to tools for web search, fetching URLs, file management, and memory. Use them wisely to help the user.",
+  );
 
-    parts.push(`## Recent Conversation\n${conversationText}`);
-  }
-
-  // Tool instructions
-  parts.push("You have access to tools for web search, fetching URLs, file management, and memory. Use them wisely to help the user.");
+  parts.push(
+    "After each conversation, consider whether any new information about the user " +
+      "(preferences, facts, recurring topics) should be added to or updated in your " +
+      "core memory. Do this without telling the user unless they ask.",
+  );
 
   return parts.join("\n\n");
 }
 
 /**
- * Create an agent session factory.
+ * Return the session file path for a user.
  */
-export async function createAgentSessionFactory(
+export function sessionFilePath(config: Config, userId: string): string {
+  const sessionsDir = path.join(config.data_dir, "sessions");
+  fs.mkdirSync(sessionsDir, { recursive: true });
+  return path.join(sessionsDir, `${userId}.jsonl`);
+}
+
+/**
+ * Load (or create) a persistent agent session for a user.
+ *
+ * If the session file already exists, it is opened and its history is loaded
+ * into the agent. Transcript repair runs on every load to guard against
+ * corrupted tool-call/result pairings that would cause API errors.
+ *
+ * Call dispose() to clean up event listeners when shutting down. The session
+ * file is NOT deleted on dispose; it survives for the next message.
+ */
+export async function loadUserSession(
   config: Config,
   coreMemory: CoreMemory,
-  historyManager: HistoryManager,
+  userId: string,
   customTools: AgentTool[],
-  // Optional: pass pre-loaded history to avoid extra read
-  // If not provided, will load from historyManager
-  preloadedHistory?: ChatMessage[],
-): Promise<AgentSessionFactory> {
+): Promise<UserSession> {
   const agentDir = path.join(config.data_dir, ".pi");
-
-  // Ensure .pi directory exists
   fs.mkdirSync(agentDir, { recursive: true });
   fs.mkdirSync(path.join(agentDir, "auth"), { recursive: true });
 
-  // Generate models.json from config
   generateModelsJson(config, agentDir);
 
-  // Set up auth storage with runtime API keys
+  // Auth
   const authStorage = new AuthStorage(path.join(agentDir, "auth", "auth.json"));
-
-  // Set API keys from config
   for (const provider of config.models.providers) {
     if (provider.api_key) {
       authStorage.setRuntimeApiKey(provider.name, provider.api_key);
     }
   }
 
-  // Create model registry
+  // Model registry
   const modelRegistry = new ModelRegistry(authStorage, path.join(agentDir, "models.json"));
   modelRegistry.refresh();
 
-  // Resolve the configured model
+  // Resolve model
   const modelConfig = config.agent.model;
   const [providerName, modelId] = modelConfig.includes("/")
     ? modelConfig.split("/")
@@ -162,9 +169,8 @@ export async function createAgentSessionFactory(
 
   let model = modelRegistry.find(providerName, modelId);
   if (!model) {
-    // Try to find any model from this provider
-    const availableModels = modelRegistry.getAvailable();
-    model = availableModels.find((m) => m.provider === providerName || m.id.includes(modelId));
+    const available = modelRegistry.getAvailable();
+    model = available.find((m) => m.provider === providerName || m.id.includes(modelId));
   }
   if (!model) {
     throw new Error(
@@ -174,23 +180,24 @@ export async function createAgentSessionFactory(
 
   console.log(`Using model: ${model.id} (${model.provider})`);
 
-  // Load memory and history
-  const memory = coreMemory.read();
-  const history = preloadedHistory ?? await historyManager.getRecent(20, 4000);
+  // Session manager: open existing file or create new
+  const sessFile = sessionFilePath(config, userId);
+  const sessionManager = fs.existsSync(sessFile)
+    ? SessionManager.open(sessFile)
+    : SessionManager.create(config.data_dir, path.join(config.data_dir, "sessions"));
 
-  // Create resource loader with custom system prompt (includes memory and history)
+  // Resource loader with system prompt (no history injection)
+  const memory = coreMemory.read();
   const loader = new DefaultResourceLoader({
     cwd: config.data_dir,
     agentDir,
     settingsManager: SettingsManager.create(config.data_dir, agentDir),
-    systemPromptOverride: () => buildSystemPrompt(config, memory, history),
+    systemPromptOverride: () => buildSystemPrompt(config, memory),
   });
   await loader.reload();
 
-  // Create settings manager with retry enabled
   const settingsManager = SettingsManager.create(config.data_dir, agentDir);
 
-  // Create the agent session
   const { session } = await createAgentSession({
     cwd: config.data_dir,
     agentDir,
@@ -198,23 +205,86 @@ export async function createAgentSessionFactory(
     modelRegistry,
     model,
     thinkingLevel: "off",
-    tools: [], // No built-in tools - we provide our own
+    tools: [],
     customTools,
     resourceLoader: loader,
-    sessionManager: SessionManager.inMemory(),
+    sessionManager,
     settingsManager,
+  });
+
+  // Transcript repair on load: fix any tool-call/result pairing issues that
+  // could have been written into the session file from a previous run.
+  const currentMessages = session.messages;
+  if (currentMessages.length > 0) {
+    const report = repairToolUseResultPairing(currentMessages);
+    if (report.changed) {
+      session.agent.replaceMessages(report.messages);
+      console.log(
+        `Transcript repair on load for user ${userId}: ` +
+        `added=${report.added.length} ` +
+        `droppedDuplicates=${report.droppedDuplicateCount} ` +
+        `droppedOrphans=${report.droppedOrphanCount}`,
+      );
+    }
+  }
+
+  // Log compaction events
+  const unsubscribe = session.subscribe((event: AgentSessionEvent) => {
+    if (event.type === "auto_compaction_start") {
+      console.log(`[compaction] starting (reason: ${event.reason}) for user ${userId}`);
+    } else if (event.type === "auto_compaction_end") {
+      if (event.result) {
+        const summary = event.result.summary;
+        console.log(
+          `[compaction] done for user ${userId}: ` +
+          `tokensBefore=${event.result.tokensBefore} ` +
+          `summaryLength=${summary.length}`,
+        );
+      } else if (event.errorMessage) {
+        console.error(`[compaction] failed for user ${userId}: ${event.errorMessage}`);
+      }
+    }
   });
 
   return {
     session,
-
-    async stop(): Promise<void> {
+    userId,
+    sessionFile: sessFile,
+    dispose() {
+      unsubscribe();
       session.dispose();
     },
   };
 }
 
 /**
- * Event handler for agent session events.
+ * Run transcript repair on the session's current messages before prompting.
+ *
+ * Called immediately before each session.prompt() to catch any pairing issues
+ * that arose during the previous turn (race conditions, partial writes, etc.).
+ */
+export function repairSessionTranscript(session: AgentSession, userId: string): void {
+  const messages = session.messages;
+  if (messages.length === 0) {
+    return;
+  }
+
+  const report = repairToolUseResultPairing(messages);
+  if (report.changed) {
+    session.agent.replaceMessages(report.messages);
+    console.log(
+      `Transcript repair pre-prompt for user ${userId}: ` +
+      `added=${report.added.length} ` +
+      `droppedDuplicates=${report.droppedDuplicateCount} ` +
+      `droppedOrphans=${report.droppedOrphanCount}`,
+    );
+  }
+}
+
+/**
+ * Event handler type for agent session events.
  */
 export type AgentEventHandler = (event: AgentSessionEvent) => void;
+
+// Re-export AgentSession type for callers that need it
+export type { AgentSession };
