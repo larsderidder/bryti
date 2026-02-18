@@ -161,7 +161,9 @@ function buildSystemPrompt(
     `## Tool Call Style\n` +
     `Do not narrate routine tool calls. Just call the tool.\n` +
     `Narrate only when it helps: multi-step work, sensitive actions (deletions, external sends), or when the user asks.\n` +
-    `Keep narration brief.`,
+    `Keep narration brief.\n` +
+    `IMPORTANT: Never tell the user you have done something unless the tool call has already returned successfully. ` +
+    `Do not say "Done!" or "Stored!" before calling the tool. Call the tool first, then confirm.`,
   );
 
   parts.push(buildToolSection(tools, extensionToolNames));
