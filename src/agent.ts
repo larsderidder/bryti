@@ -39,6 +39,7 @@ import {
 import type { Config } from "./config.js";
 import type { CoreMemory } from "./memory/core-memory.js";
 import { repairToolUseResultPairing } from "./compaction/transcript-repair.js";
+import { createProjectionStore, formatProjectionsForPrompt } from "./projection/index.js";
 
 /**
  * A loaded, persistent agent session for a single user.
@@ -130,6 +131,7 @@ function buildSystemPrompt(
   coreMemory: string,
   tools: ToolSummary[],
   extensionToolNames: Set<string>,
+  projections: string,
 ): string {
   const parts: string[] = [];
 
@@ -139,6 +141,13 @@ function buildSystemPrompt(
   if (coreMemory) {
     parts.push(`## Your Core Memory (always visible)\n${coreMemory}`);
   }
+
+  parts.push(
+    `## Your Projections (upcoming events and commitments)\n` +
+    `These are things you expect to happen or that the user mentioned about the future.\n` +
+    `Connect new information to these when relevant. Proactively help with upcoming events.\n\n` +
+    projections,
+  );
 
   return parts.join("\n\n");
 }
@@ -218,19 +227,30 @@ export async function loadUserSession(
   }));
   const extensionToolNames = new Set<string>();
 
+  // Projection store for this user. Opened once per session, closed on dispose.
+  const projectionStore = createProjectionStore(userId, config.data_dir);
+
   // Resource loader with system prompt (no history injection).
-  // The override closure reads core memory at call time so that session.reload()
-  // picks up any changes made by the agent during the conversation.
+  // The override closure reads core memory and projections at call time so that
+  // session.reload() picks up any changes made by the agent during the conversation.
   const loader = new DefaultResourceLoader({
     cwd: config.data_dir,
     agentDir,
     settingsManager: SettingsManager.create(config.data_dir, agentDir),
-    systemPromptOverride: () => buildSystemPrompt(
-      config,
-      coreMemory.read(),
-      promptTools,
-      extensionToolNames,
-    ),
+    systemPromptOverride: () => {
+      // Auto-expire stale projections before injecting so the agent never
+      // sees items whose time has clearly passed (24+ hours ago).
+      projectionStore.autoExpire(24);
+      const upcoming = projectionStore.getUpcoming(7);
+      const projectionText = formatProjectionsForPrompt(upcoming);
+      return buildSystemPrompt(
+        config,
+        coreMemory.read(),
+        promptTools,
+        extensionToolNames,
+        projectionText,
+      );
+    },
   });
   await loader.reload();
 
@@ -317,6 +337,7 @@ export async function loadUserSession(
     dispose() {
       unsubscribe();
       session.dispose();
+      projectionStore.close();
     },
   };
 }

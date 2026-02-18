@@ -16,6 +16,7 @@ import { randomUUID } from "node:crypto";
 import { Cron } from "croner";
 import type { Config } from "./config.js";
 import type { IncomingMessage } from "./channels/types.js";
+import { createProjectionStore, formatProjectionsForPrompt } from "./projection/index.js";
 
 // ---------------------------------------------------------------------------
 // Schedule record (agent-managed)
@@ -180,11 +181,100 @@ export function createScheduler(
     }
   }
 
+  /**
+   * Start the two projection-aware scheduled jobs for the primary user:
+   *
+   * - Daily review at 8am UTC: surfaces all of today's and this week's
+   *   projections. Auto-expires stale ones first. One LLM call per day.
+   *
+   * - Exact-time check every 15 minutes: queries for 'exact' projections due
+   *   within the next hour. Fires the agent only when something matches.
+   */
+  function startProjectionJobs(): void {
+    const primaryUserId = String(config.telegram.allowed_users[0] ?? "");
+    if (!primaryUserId) {
+      return;
+    }
+
+    const channelId = defaultChannelId();
+
+    // Daily review: 8am UTC every day
+    const dailyJob = new Cron(
+      "0 8 * * *",
+      async () => {
+        console.log("[projections] Daily review triggered");
+        const store = createProjectionStore(primaryUserId, config.data_dir);
+        try {
+          const expired = store.autoExpire(24);
+          if (expired > 0) {
+            console.log(`[projections] Auto-expired ${expired} stale projection(s)`);
+          }
+          const upcoming = store.getUpcoming(7);
+          if (upcoming.length === 0) {
+            console.log("[projections] Daily review: no upcoming projections, skipping");
+            return;
+          }
+          const formatted = formatProjectionsForPrompt(upcoming, 20);
+          const msg: IncomingMessage = {
+            channelId,
+            userId: primaryUserId,
+            text:
+              `[Daily projection review]\n\nHere are your upcoming projections:\n\n${formatted}\n\n` +
+              `Review each one. For items due today or this week, decide whether to message the user, ` +
+              `take an action, or do nothing. For items further out, only act if something needs ` +
+              `attention now. Resolve any that have clearly passed.`,
+            platform: "telegram",
+            raw: { type: "projection_daily_review" },
+          };
+          await onMessage(msg);
+        } finally {
+          store.close();
+        }
+      },
+      { timezone: "UTC" },
+    );
+    cronJobs.set("projection-daily", dailyJob);
+    console.log("[projections] Daily review scheduled at 08:00 UTC");
+
+    // Exact-time check: every 15 minutes
+    const exactJob = new Cron(
+      "*/15 * * * *",
+      async () => {
+        const store = createProjectionStore(primaryUserId, config.data_dir);
+        try {
+          const due = store.getExactDue(60);
+          if (due.length === 0) {
+            return;
+          }
+          console.log(`[projections] Exact-time check: ${due.length} projection(s) due within 1 hour`);
+          const formatted = formatProjectionsForPrompt(due, 10);
+          const msg: IncomingMessage = {
+            channelId,
+            userId: primaryUserId,
+            text:
+              `[Projection time check]\n\nThe following exact-time projection(s) are due within the next hour:\n\n` +
+              `${formatted}\n\n` +
+              `Decide what to do: send a timely message to the user, or do nothing if it's not actionable yet.`,
+            platform: "telegram",
+            raw: { type: "projection_exact_check" },
+          };
+          await onMessage(msg);
+        } finally {
+          store.close();
+        }
+      },
+      { timezone: "UTC" },
+    );
+    cronJobs.set("projection-exact", exactJob);
+    console.log("[projections] Exact-time check scheduled every 15 minutes");
+  }
+
   return {
     start(): void {
       agentRecords = loadSchedules(config.data_dir);
 
       startConfigJobs();
+      startProjectionJobs();
 
       for (const record of agentRecords) {
         try {

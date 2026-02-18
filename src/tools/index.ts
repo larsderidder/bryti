@@ -13,6 +13,7 @@ import { createCoreMemoryTools } from "./core-memory-tool.js";
 import { createArchivalMemoryTools } from "./archival-memory-tool.js";
 import { createConversationSearchTool } from "./conversation-search-tool.js";
 import { createScheduleTools } from "./schedule.js";
+import { createProjectionTools, createProjectionStore } from "../projection/index.js";
 import { embed } from "../memory/embeddings.js";
 import { createMemoryStore } from "../memory/store.js";
 import path from "node:path";
@@ -27,6 +28,7 @@ export { createCoreMemoryTools };
 export { createArchivalMemoryTools };
 export { createConversationSearchTool };
 export { createScheduleTools };
+export { createProjectionTools, createProjectionStore };
 
 /**
  * Type for pibot tools (AgentTool from pi).
@@ -73,6 +75,10 @@ export function createTools(
   );
 
   tools.push(createConversationSearchTool(path.join(config.data_dir, "history")));
+
+  // Projection memory: forward-looking events and commitments.
+  const projectionStore = createProjectionStore(userId, config.data_dir);
+  tools.push(...createProjectionTools(projectionStore));
 
   // Schedule tools: let the agent create/list/delete recurring tasks.
   // Not registered for the synthetic "cron" user (config-driven jobs) since
