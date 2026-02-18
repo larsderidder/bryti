@@ -3,6 +3,11 @@
  *
  * Implements ChannelBridge for Telegram DMs.
  * Long polling for local dev, webhook for production (later).
+ *
+ * Formatting: all outgoing messages use HTML parse mode. LLM output (markdown)
+ * is converted with markdownToHtml() before sending. HTML is far simpler to
+ * produce correctly than MarkdownV2, which requires escaping 18 characters and
+ * is easily broken by LLM output.
  */
 
 import { Bot, type Context } from "grammy";
@@ -22,29 +27,83 @@ export interface TelegramBridgeConfig {
 }
 
 /**
- * Escape text for Markdown V2.
+ * Escape the three HTML special characters that Telegram HTML mode requires.
  */
-function escapeMarkdown(text: string): string {
+function escapeHtml(text: string): string {
   return text
-    .replace(/\\/g, "\\\\")
-    .replace(/_/g, "\\_")
-    .replace(/\*/g, "\\*")
-    .replace(/\[/g, "\\[")
-    .replace(/\]/g, "\\]")
-    .replace(/\(/g, "\\(")
-    .replace(/\)/g, "\\)")
-    .replace(/~/g, "\\~")
-    .replace(/`/g, "\\`")
-    .replace(/>/g, "\\>")
-    .replace(/#/g, "\\#")
-    .replace(/\+/g, "\\+")
-    .replace(/=/g, "\\=")
-    .replace(/-/g, "\\-")
-    .replace(/\{/g, "\\{")
-    .replace(/\}/g, "\\}")
-    .replace(/\|/g, "\\|")
-    .replace(/\./g, "\\.")
-    .replace(/!/g, "\\!");
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+/**
+ * Convert common LLM markdown output to Telegram HTML.
+ *
+ * Handles:
+ * - Fenced code blocks (```lang\n...\n```) -> <pre><code>...</code></pre>
+ * - Inline code (`...`) -> <code>...</code>
+ * - Bold (**text** or __text__) -> <b>text</b>
+ * - Italic (*text* or _text_) -> <i>text</i>
+ * - Strikethrough (~~text~~) -> <s>text</s>
+ * - ATX headings (# / ## / ###) -> <b>text</b> (Telegram has no heading tag)
+ * - Horizontal rules (--- / ***) -> stripped
+ * - Everything else: HTML-escaped plain text
+ *
+ * Strategy: HTML-escape the whole segment first, then apply markdown patterns
+ * against the already-escaped text. Markdown delimiters (**,  *, __, _, ~~,
+ * `) are ASCII and unaffected by HTML escaping, so the patterns still match
+ * correctly. Code content is escaped before wrapping.
+ *
+ * Code blocks are extracted first so their contents skip inline processing.
+ */
+export function markdownToHtml(text: string): string {
+  // Split on fenced code blocks; odd-indexed parts are code blocks.
+  const parts = text.split(/(```[\s\S]*?```)/g);
+
+  const converted = parts.map((part, i) => {
+    if (i % 2 === 1) {
+      // Fenced code block
+      const match = part.match(/^```\w*\n?([\s\S]*?)```$/);
+      const code = match ? match[1] : part.replace(/^```\w*\n?|```$/g, "");
+      return `<pre><code>${escapeHtml(code)}</code></pre>`;
+    }
+
+    // Non-code segment: escape HTML first (so plain text is safe), then apply
+    // markdown patterns. Delimiters (**, *, __, _, ~~, `) are ASCII and survive
+    // HTML escaping unchanged, so patterns still match correctly.
+    // Process line by line so heading/hr detection works on full lines.
+    const lines = part.split("\n").map((line) => {
+      const escaped = escapeHtml(line);
+
+      // ATX headings — strip the hashes, bold the rest
+      const headingMatch = escaped.match(/^#{1,6}\s+(.+)$/);
+      if (headingMatch) {
+        return `<b>${headingMatch[1]}</b>`;
+      }
+
+      // Horizontal rules
+      if (/^(-{3,}|\*{3,}|_{3,})$/.test(line.trim())) {
+        return "";
+      }
+
+      return escaped;
+    });
+
+    return lines
+      .join("\n")
+      // Inline code
+      .replace(/`([^`]+)`/g, (_m, code) => `<code>${code}</code>`)
+      // Strikethrough
+      .replace(/~~([^~]+)~~/g, (_m, t) => `<s>${t}</s>`)
+      // Bold (** or __)
+      .replace(/\*\*([^*]+)\*\*/g, (_m, t) => `<b>${t}</b>`)
+      .replace(/__([^_]+)__/g, (_m, t) => `<b>${t}</b>`)
+      // Italic (* or _) — single, must not be preceded/followed by same char
+      .replace(/(?<!\*)\*(?!\*)([^*]+)(?<!\*)\*(?!\*)/g, (_m, t) => `<i>${t}</i>`)
+      .replace(/(?<!_)_(?!_)([^_]+)(?<!_)_(?!_)/g, (_m, t) => `<i>${t}</i>`);
+  });
+
+  return converted.join("").trim();
 }
 
 /**
@@ -198,17 +257,16 @@ export class TelegramBridge implements ChannelBridge {
     }
 
     const chatId = parseInt(channelId, 10);
-    let parseMode: "MarkdownV2" | "HTML" | undefined;
-
-    if (opts?.parseMode === "markdown") {
-      parseMode = "MarkdownV2";
-    }
 
     // Stop typing indicator for this chat
     this.stopTyping(channelId);
 
-    const message = await this.bot.api.sendMessage(chatId, text, {
-      parse_mode: parseMode,
+    // Always use HTML parse mode. Convert markdown from LLM output unless the
+    // caller explicitly passes pre-formatted HTML or plain text.
+    const html = opts?.parseMode === "html" ? text : markdownToHtml(text);
+
+    const message = await this.bot.api.sendMessage(chatId, html, {
+      parse_mode: "HTML",
     });
 
     return String(message.message_id);
@@ -223,11 +281,11 @@ export class TelegramBridge implements ChannelBridge {
     const msgId = parseInt(messageId, 10);
 
     try {
-      await this.bot.api.editMessageText(chatId, msgId, text, {
-        parse_mode: "MarkdownV2",
+      await this.bot.api.editMessageText(chatId, msgId, markdownToHtml(text), {
+        parse_mode: "HTML",
       });
     } catch (error) {
-      // Ignore message not modified errors
+      // Ignore "message is not modified" errors
       const err = error as Error & { description?: string };
       if (!err.description?.includes("message is not modified")) {
         throw error;

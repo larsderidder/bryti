@@ -62,7 +62,6 @@ async function processMessage(
       await state.bridge.sendMessage(
         msg.channelId,
         `Your core memory:\n\n${memory}`,
-        { parseMode: "markdown" },
       );
     } else {
       await state.bridge.sendMessage(
