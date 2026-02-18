@@ -136,10 +136,10 @@ export function createScheduler(
           { timezone: "UTC" },
         );
         cronJobs.set(key, job);
-        console.log(
-          `[scheduler] Config job scheduled: ${cronJob.schedule} -> ` +
-          `${cronJob.message.substring(0, 50)}...`,
-        );
+        const preview = cronJob.message.length > 50
+          ? `${cronJob.message.substring(0, 50)}...`
+          : cronJob.message;
+        console.log(`[scheduler] Config job scheduled: ${cronJob.schedule} -> ${preview}`);
       } catch (err) {
         console.error(`[scheduler] Failed to schedule config job: ${cronJob.schedule}`, err);
       }
@@ -207,11 +207,14 @@ export function createScheduler(
     },
 
     stop(): void {
-      for (const [key, job] of cronJobs) {
+      for (const job of cronJobs.values()) {
         job.stop();
-        cronJobs.delete(key);
       }
-      console.log("[scheduler] All jobs stopped");
+      const count = cronJobs.size;
+      cronJobs.clear();
+      if (count > 0) {
+        console.log(`[scheduler] Stopped ${count} jobs`);
+      }
     },
 
     create(params): ScheduleRecord {

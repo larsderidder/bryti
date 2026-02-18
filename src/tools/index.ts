@@ -74,8 +74,11 @@ export function createTools(
 
   tools.push(createConversationSearchTool(path.join(config.data_dir, "history")));
 
-  // Schedule tools: let the agent create/list/delete recurring tasks
-  if (scheduler) {
+  // Schedule tools: let the agent create/list/delete recurring tasks.
+  // Not registered for the synthetic "cron" user (config-driven jobs) since
+  // schedules created there would point back to channelId "cron" instead of
+  // a real user's channel.
+  if (scheduler && userId !== "cron") {
     // For Telegram private chats, channelId equals userId (numeric string)
     tools.push(...createScheduleTools(scheduler, userId, userId));
   }
