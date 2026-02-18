@@ -171,16 +171,17 @@ function buildSystemPrompt(
   }
 
   parts.push(
-    `## Your Projections (upcoming events and commitments)\n` +
+    `## Upcoming events and commitments\n` +
     `These are things you expect to happen or that the user mentioned about the future.\n` +
-    `Connect new information to these when relevant. Proactively help with upcoming events.\n\n` +
+    `Connect new information to these when relevant. Proactively help with upcoming events.\n` +
+    `Never mention "projections" to the user — just act on them naturally.\n\n` +
     projections,
   );
 
   // Silent reply — for scheduled/proactive turns where there's nothing to say
   parts.push(
     `## Silent Replies\n` +
-    `When you receive a scheduled or proactive prompt (heartbeat, projection check) and there is nothing that needs the user's attention, respond with ONLY: ${SILENT_REPLY_TOKEN}\n` +
+    `When you receive a scheduled or proactive prompt and there is nothing that needs the user's attention, respond with ONLY: ${SILENT_REPLY_TOKEN}\n` +
     `This must be your entire message. Never append it to a real reply. Never use it in a user-initiated conversation.`,
   );
 

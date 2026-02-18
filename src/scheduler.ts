@@ -128,11 +128,11 @@ export function createScheduler(
             channelId,
             userId: primaryUserId,
             text:
-              `[Daily projection review]\n\nHere are your upcoming projections:\n\n${formatted}\n\n` +
-              `Review each one. For items due today or this week:\n` +
-              `1. Search archival memory for related context (use archival_memory_search with keywords from the projection)\n` +
+              `[Daily review]\n\nHere is what's coming up:\n\n${formatted}\n\n` +
+              `Review each item. For things due today or this week:\n` +
+              `1. Search your memory for related context (use archival_memory_search)\n` +
               `2. Decide whether to message the user, take an action, or do nothing\n` +
-              `For items further out, only act if something needs attention now. Resolve any that have clearly passed.`,
+              `For things further out, only act if something needs attention now. Resolve any that have clearly passed.`,
             platform: "telegram",
             raw: { type: "projection_daily_review" },
           };
@@ -159,17 +159,23 @@ export function createScheduler(
           if (due.length === 0) {
             return;
           }
-          console.log(`[projections] Exact-time check: ${due.length} projection(s) due within 15 minutes`);
+          console.log(`[projections] Exact-time check: ${due.length} item(s) due`);
           const formatted = formatProjectionsForPrompt(due, 10);
+
+          // Mark as passed immediately so they don't re-fire on the next tick.
+          for (const p of due) {
+            store.resolve(p.id, "passed");
+          }
+
           const msg: IncomingMessage = {
             channelId,
             userId: primaryUserId,
             text:
-              `[Projection time check]\n\nThe following exact-time projection(s) are due within the next 15 minutes:\n\n` +
+              `[Scheduled reminder]\n\nThe following reminder(s) are due now:\n\n` +
               `${formatted}\n\n` +
-              `For each projection:\n` +
-              `1. Search archival memory for related context (use archival_memory_search with keywords from the projection)\n` +
-              `2. Decide what to do: send a timely message to the user incorporating any relevant memories, or do nothing if it's not actionable yet.`,
+              `For each item:\n` +
+              `1. Search your memory for related context (use archival_memory_search)\n` +
+              `2. Send the user a helpful, natural message — or reply NOOP if nothing needs to be said.`,
             platform: "telegram",
             raw: { type: "projection_exact_check" },
           };
