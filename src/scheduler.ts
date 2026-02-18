@@ -96,7 +96,8 @@ export function createScheduler(
    */
   function startProjectionJobs(): void {
     const primaryUserId = String(config.telegram.allowed_users[0] ?? "");
-    if (!primaryUserId) {
+    if (!primaryUserId || primaryUserId === "undefined") {
+      console.warn("[projections] No primary user configured (telegram.allowed_users is empty) — projection jobs not started");
       return;
     }
 
