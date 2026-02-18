@@ -96,8 +96,8 @@ function generateModelsJson(config: Config, agentDir: string): void {
  * Build the system prompt with core memory.
  *
  * History is no longer injected here. The persistent pi session file is the
- * source of truth for conversation context. The JSONL audit log remains, but
- * getRecent() is only used by the conversation_search tool now.
+ * source of truth for conversation context. The JSONL audit log remains for
+ * conversation_search, which reads the files directly.
  */
 function buildSystemPrompt(config: Config, coreMemory: string): string {
   const parts: string[] = [];
@@ -191,13 +191,14 @@ export async function loadUserSession(
     ? SessionManager.open(sessFile)
     : SessionManager.create(config.data_dir, path.join(config.data_dir, "sessions"));
 
-  // Resource loader with system prompt (no history injection)
-  const memory = coreMemory.read();
+  // Resource loader with system prompt (no history injection).
+  // The override closure reads core memory at call time so that session.reload()
+  // picks up any changes made by the agent during the conversation.
   const loader = new DefaultResourceLoader({
     cwd: config.data_dir,
     agentDir,
     settingsManager: SettingsManager.create(config.data_dir, agentDir),
-    systemPromptOverride: () => buildSystemPrompt(config, memory),
+    systemPromptOverride: () => buildSystemPrompt(config, coreMemory.read()),
   });
   await loader.reload();
 
@@ -418,6 +419,19 @@ export async function promptWithFallback(
   }
 
   throw lastError ?? new Error("All models in fallback chain failed");
+}
+
+/**
+ * Reload the session's system prompt with the latest core memory content.
+ *
+ * The resource loader's systemPromptOverride closure reads coreMemory.read()
+ * at call time, so session.reload() picks up any changes the agent made during
+ * the previous turn (core_memory_append / core_memory_replace).
+ *
+ * Call this right before promptWithFallback() on every message.
+ */
+export async function refreshSystemPrompt(session: AgentSession): Promise<void> {
+  await session.reload();
 }
 
 /**

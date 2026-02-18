@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { promptWithFallback, resolveModel } from "./agent.js";
+import { promptWithFallback, resolveModel, refreshSystemPrompt } from "./agent.js";
 import type { AgentSession } from "@mariozechner/pi-coding-agent";
 import type { ModelRegistry } from "@mariozechner/pi-coding-agent";
 import type { Config } from "./config.js";
@@ -216,5 +216,34 @@ describe("promptWithFallback", () => {
 
     const result = await promptWithFallback(session, "hi", config, registry, "u");
     expect(result.fallbacksUsed).toBe(0);
+  });
+});
+
+describe("refreshSystemPrompt", () => {
+  it("calls session.reload()", async () => {
+    const session = {
+      reload: vi.fn().mockResolvedValue(undefined),
+    } as unknown as AgentSession;
+
+    await refreshSystemPrompt(session);
+
+    expect(session.reload).toHaveBeenCalledOnce();
+  });
+
+  it("is called before each prompt so core memory changes are visible", async () => {
+    // Verify the ordering contract: reload must be called before prompt.
+    const order: string[] = [];
+    const session = {
+      reload: vi.fn().mockImplementation(async () => { order.push("reload"); }),
+      prompt: vi.fn().mockImplementation(async () => { order.push("prompt"); }),
+      get messages() {
+        return [{ role: "assistant", stopReason: "end_turn", content: [] }];
+      },
+    } as unknown as AgentSession;
+
+    await refreshSystemPrompt(session);
+    await session.prompt("hi");
+
+    expect(order).toEqual(["reload", "prompt"]);
   });
 });

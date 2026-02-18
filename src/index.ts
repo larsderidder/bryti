@@ -25,7 +25,7 @@ import { createCoreMemory, type CoreMemory } from "./memory/core-memory.js";
 import { createHistoryManager, type HistoryManager } from "./history.js";
 import { warmupEmbeddings } from "./memory/embeddings.js";
 import { createTools } from "./tools/index.js";
-import { loadUserSession, repairSessionTranscript, promptWithFallback, type UserSession } from "./agent.js";
+import { loadUserSession, repairSessionTranscript, refreshSystemPrompt, promptWithFallback, type UserSession } from "./agent.js";
 import { TelegramBridge } from "./channels/telegram.js";
 import { createCronScheduler, type CronScheduler } from "./cron.js";
 import { MessageQueue } from "./message-queue.js";
@@ -36,6 +36,7 @@ import {
   resolveModelCost,
   type UsageTracker,
 } from "./usage.js";
+import { createAppLogger, installConsoleFileLogging } from "./logger.js";
 
 /**
  * Application state.
@@ -159,6 +160,10 @@ async function processMessage(
     // Repair transcript before prompting
     repairSessionTranscript(session, msg.userId);
 
+    // Reload the system prompt so the agent sees any core memory changes
+    // it made during the previous turn (core_memory_append / core_memory_replace)
+    await refreshSystemPrompt(session);
+
     // Append user message to audit log
     await state.historyManager.append({
       role: "user",
@@ -249,6 +254,7 @@ async function processMessage(
 async function main(): Promise<void> {
   const config = loadConfig();
   ensureDataDirs(config);
+  installConsoleFileLogging(createAppLogger(config.data_dir));
 
   console.log(`Pibot starting: agent="${config.agent.name}" model="${config.agent.model}"`);
   console.log(`Data directory: ${config.data_dir}`);
