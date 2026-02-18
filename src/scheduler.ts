@@ -220,9 +220,10 @@ export function createScheduler(
             userId: primaryUserId,
             text:
               `[Daily projection review]\n\nHere are your upcoming projections:\n\n${formatted}\n\n` +
-              `Review each one. For items due today or this week, decide whether to message the user, ` +
-              `take an action, or do nothing. For items further out, only act if something needs ` +
-              `attention now. Resolve any that have clearly passed.`,
+              `Review each one. For items due today or this week:\n` +
+              `1. Search archival memory for related context (use archival_memory_search with keywords from the projection)\n` +
+              `2. Decide whether to message the user, take an action, or do nothing\n` +
+              `For items further out, only act if something needs attention now. Resolve any that have clearly passed.`,
             platform: "telegram",
             raw: { type: "projection_daily_review" },
           };
@@ -254,7 +255,9 @@ export function createScheduler(
             text:
               `[Projection time check]\n\nThe following exact-time projection(s) are due within the next hour:\n\n` +
               `${formatted}\n\n` +
-              `Decide what to do: send a timely message to the user, or do nothing if it's not actionable yet.`,
+              `For each projection:\n` +
+              `1. Search archival memory for related context (use archival_memory_search with keywords from the projection)\n` +
+              `2. Decide what to do: send a timely message to the user incorporating any relevant memories, or do nothing if it's not actionable yet.`,
             platform: "telegram",
             raw: { type: "projection_exact_check" },
           };
