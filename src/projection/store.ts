@@ -182,7 +182,7 @@ export function createProjectionStore(userId: string, dataDir: string): Projecti
       AND resolution = 'exact'
       AND resolved_when IS NOT NULL
       AND resolved_when <= datetime('now', ? || ' minutes')
-      AND resolved_when > datetime('now')
+      AND resolved_when > datetime('now', '-10 minutes')
     ORDER BY resolved_when ASC
   `);
 

@@ -3,11 +3,9 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-# Build if dist is missing or source files are newer than the compiled output.
-if [ ! -f dist/index.js ] || find src -type f \( -name '*.ts' -o -name '*.tsx' \) -newer dist/index.js | grep -q .; then
-  echo "Building TypeScript..."
-  npm run build
-fi
+# Always rebuild so the running binary is never stale.
+echo "Building TypeScript..."
+npm run build
 
 # Auto-restart on crashes (non-zero exit). Clean exits do not restart.
 RESTART_DELAY_SECONDS="${RESTART_DELAY_SECONDS:-2}"
