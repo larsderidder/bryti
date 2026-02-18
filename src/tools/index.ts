@@ -72,7 +72,7 @@ export function createTools(
 
   // Projection memory: forward-looking events and commitments.
   const projectionStore = createProjectionStore(userId, config.data_dir);
-  tools.push(...createProjectionTools(projectionStore));
+  tools.push(...createProjectionTools(projectionStore, config.agent.timezone));
 
   return tools;
 }

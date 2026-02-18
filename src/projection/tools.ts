@@ -16,8 +16,10 @@ const projectSchema = Type.Object({
   when: Type.Optional(Type.String({
     description:
       "When this is expected to happen. Use a specific ISO datetime for exact events " +
-      "(e.g. '2026-02-19T10:00'), a date for day-resolution (e.g. '2026-02-19'), " +
-      "'someday' for no specific time, or a natural phrase for the raw_when field.",
+      "(e.g. '2026-02-19T10:00'). IMPORTANT: always express times in UTC. " +
+      "If the user said '13:45' in their local timezone, convert to UTC before storing. " +
+      "Use a date string for day-resolution (e.g. '2026-02-19'), " +
+      "'someday' for no specific time, or a natural phrase if UTC conversion is not possible.",
   })),
   resolution: Type.Optional(Type.Union(
     [
@@ -64,9 +66,48 @@ type ResolveProjectionInput = Static<typeof resolveProjectionSchema>;
 // ---------------------------------------------------------------------------
 
 /**
- * Create the three projection tools backed by the given store.
+ * Convert a naive local datetime string (YYYY-MM-DD HH:MM or YYYY-MM-DDTHH:MM)
+ * to a UTC datetime string (YYYY-MM-DD HH:MM), given an IANA timezone name.
+ *
+ * If the input already has a Z or +/- offset, it is returned as-is (space-separated).
+ * If no timezone is provided, the input is returned unchanged.
  */
-export function createProjectionTools(store: ProjectionStore): AgentTool<any>[] {
+function toUtcDatetime(naive: string, timezone: string | undefined): string {
+  if (!timezone) return naive.replace("T", " ");
+  // If it already carries offset info, just normalise separator and return
+  if (/[Z+\-]\d{2}:?\d{2}$/.test(naive) || naive.endsWith("Z")) {
+    return naive.replace("T", " ");
+  }
+  // Parse as local time in the given timezone using the Temporal-free approach:
+  // construct an ISO string with the timezone, let Date parse it via toLocaleString trick.
+  // We use the "sv-SE" locale which gives YYYY-MM-DD HH:MM:SS format.
+  const normalized = naive.replace(" ", "T");
+  // Append seconds if missing so Date can parse it
+  const withSeconds = /T\d{2}:\d{2}$/.test(normalized) ? normalized + ":00" : normalized;
+  // Parse as if it were UTC, then compute the offset for the target timezone
+  const asUtcDate = new Date(withSeconds + "Z");
+  // Get what the target timezone thinks this UTC moment is
+  const localStr = asUtcDate.toLocaleString("sv-SE", { timeZone: timezone, hour12: false });
+  // localStr is YYYY-MM-DD HH:MM:SS - compare to our input to find the offset
+  const localParsed = new Date(localStr.replace(" ", "T") + "Z");
+  // offset in ms: localParsed - asUtcDate (positive = ahead of UTC)
+  const offsetMs = localParsed.getTime() - asUtcDate.getTime();
+  // The actual UTC time = input local time - offset
+  const inputLocal = new Date(withSeconds + "Z");
+  const utcTime = new Date(inputLocal.getTime() - offsetMs);
+  return utcTime.toISOString().slice(0, 16).replace("T", " ");
+}
+
+/**
+ * Create the three projection tools backed by the given store.
+ *
+ * @param store     Projection store.
+ * @param timezone  Optional IANA timezone (e.g. "Europe/Amsterdam"). When set,
+ *                  naive datetime strings from the agent are treated as local
+ *                  time and converted to UTC before storage. SQLite datetime()
+ *                  comparisons always use UTC, so this keeps times consistent.
+ */
+export function createProjectionTools(store: ProjectionStore, timezone?: string): AgentTool<any>[] {
   const projectTool: AgentTool<typeof projectSchema> = {
     name: "project",
     label: "project",
@@ -89,8 +130,10 @@ export function createProjectionTools(store: ProjectionStore): AgentTool<any>[] 
         if (when) {
           const isoPattern = /^\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2})?/;
           if (isoPattern.test(when)) {
-            resolved_when = when.replace("T", " ");
-            res = (when.includes("T") || when.includes(" ")) ? "exact" : (resolution ?? "day");
+            const hasTime = when.includes("T") || (when.length > 10 && when[10] === " ");
+            // Normalize to UTC if the string contains a time component
+            resolved_when = hasTime ? toUtcDatetime(when, timezone) : when;
+            res = hasTime ? "exact" : (resolution ?? "day");
           } else if (when === "someday") {
             res = "someday";
             raw_when = when;
