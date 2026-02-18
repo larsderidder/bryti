@@ -26,6 +26,7 @@ import { createTools } from "./tools/index.js";
 import { createAgentSessionFactory, type AgentSessionFactory } from "./agent.js";
 import { TelegramBridge } from "./channels/telegram.js";
 import { createCronScheduler, type CronScheduler } from "./cron.js";
+import { MessageQueue } from "./message-queue.js";
 import type { IncomingMessage, ChannelBridge } from "./channels/types.js";
 import type { AgentSession } from "@mariozechner/pi-coding-agent";
 
@@ -39,7 +40,6 @@ interface AppState {
   agentFactory: AgentSessionFactory | null;
   bridge: ChannelBridge;
   cronScheduler: CronScheduler;
-  isProcessing: boolean;
 }
 
 /**
@@ -171,7 +171,6 @@ async function main(): Promise<void> {
   // Create Telegram bridge
   const bridge = new TelegramBridge(config.telegram.token, config.telegram.allowed_users);
 
-  // Track if we're currently processing a message
   const state: AppState = {
     config,
     coreMemory,
@@ -179,24 +178,24 @@ async function main(): Promise<void> {
     agentFactory: null,
     bridge,
     cronScheduler: null!,
-    isProcessing: false,
   };
+
+  // Message queue: serialises processing per channel, merges rapid follow-ups,
+  // and rejects with a notice when the backlog is full.
+  const queue = new MessageQueue(
+    (msg) => processMessage(state, msg),
+    async (msg) => {
+      console.log("Queue full, rejecting message:", msg.text);
+      await bridge.sendMessage(
+        msg.channelId,
+        "I'm a bit overwhelmed right now. Please wait a moment and try again.",
+      );
+    },
+  );
 
   // Handle incoming messages
   bridge.onMessage(async (msg: IncomingMessage) => {
-    // If already processing, tell the user instead of silently dropping
-    if (state.isProcessing) {
-      console.log("Busy, notifying user:", msg.text);
-      await bridge.sendMessage(msg.channelId, "Still processing your previous message, please wait...");
-      return;
-    }
-
-    state.isProcessing = true;
-    try {
-      await processMessage(state, msg);
-    } finally {
-      state.isProcessing = false;
-    }
+    queue.enqueue(msg);
   });
 
   // Start bridge
