@@ -53,6 +53,13 @@ export function calculateCostUsd(
   return roundUsd(input + output);
 }
 
+/**
+ * Look up a model's cost config. Accepts an optional provider hint and a model
+ * id that may be a bare id or a "provider/model" string. Resolution order:
+ *   1. provider hint + bare model id
+ *   2. provider parsed from "provider/model" string
+ *   3. bare model id searched across all providers
+ */
 export function resolveModelCost(
   config: Config,
   provider: string | undefined,
@@ -60,24 +67,26 @@ export function resolveModelCost(
 ): ModelEntry["cost"] | undefined {
   if (!model) return undefined;
 
-  if (provider) {
-    const providerCfg = config.models.providers.find((p) => p.name === provider);
-    const modelCfg = providerCfg?.models.find((m) => m.id === model);
-    if (modelCfg?.cost) return modelCfg.cost;
-  }
+  // Parse an optional "provider/model" prefix from the model string.
+  const slashIdx = model.indexOf("/");
+  const embeddedProvider = slashIdx !== -1 ? model.slice(0, slashIdx) : undefined;
+  const bareModel = slashIdx !== -1 ? model.slice(slashIdx + 1) : model;
 
-  const [providerFromModel, modelFromModel] = model.includes("/")
-    ? model.split("/", 2)
-    : [undefined, model];
-  if (providerFromModel) {
-    const providerCfg = config.models.providers.find((p) => p.name === providerFromModel);
-    const modelCfg = providerCfg?.models.find((m) => m.id === modelFromModel);
-    if (modelCfg?.cost) return modelCfg.cost;
-  }
+  // Candidate (providerName, modelId) pairs to try in order.
+  const candidates: Array<[string | undefined, string]> = [
+    [provider, bareModel],
+    [embeddedProvider, bareModel],
+    [undefined, model], // bare id across all providers
+  ];
 
-  for (const providerCfg of config.models.providers) {
-    const modelCfg = providerCfg.models.find((m) => m.id === model);
-    if (modelCfg?.cost) return modelCfg.cost;
+  for (const [providerName, modelId] of candidates) {
+    const providers = providerName
+      ? config.models.providers.filter((p) => p.name === providerName)
+      : config.models.providers;
+    for (const p of providers) {
+      const cost = p.models.find((m) => m.id === modelId)?.cost;
+      if (cost) return cost;
+    }
   }
 
   return undefined;

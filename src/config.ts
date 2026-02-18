@@ -120,6 +120,30 @@ function substituteDeep(obj: unknown): unknown {
   return obj;
 }
 
+/**
+ * Parse the tools section of the substituted config, applying defaults.
+ */
+function toolsFromConfig(substituted: Record<string, unknown>, dataDir: string): Config["tools"] {
+  const raw = (substituted.tools ?? {}) as Record<string, unknown>;
+  return {
+    web_search: {
+      enabled: true,
+      api_key: "",
+      ...(raw.web_search as object | undefined),
+    },
+    fetch_url: {
+      enabled: true,
+      timeout_ms: 10000,
+      ...(raw.fetch_url as object | undefined),
+    },
+    files: {
+      enabled: true,
+      base_dir: path.join(dataDir, "files"),
+      ...(raw.files as object | undefined),
+    },
+  };
+}
+
 export function loadConfig(configPath?: string): Config {
   const dataDir = path.resolve(process.env.PIBOT_DATA_DIR || "./data");
   const cfgPath = configPath || path.join(dataDir, "config.yml");
@@ -153,11 +177,7 @@ export function loadConfig(configPath?: string): Config {
       providers: [],
       ...(substituted.models as object),
     },
-    tools: {
-      web_search: { enabled: true, api_key: "", ...(substituted.tools as Record<string, unknown>)?.web_search as object },
-      fetch_url: { enabled: true, timeout_ms: 10000, ...(substituted.tools as Record<string, unknown>)?.fetch_url as object },
-      files: { enabled: true, base_dir: path.join(dataDir, "files"), ...(substituted.tools as Record<string, unknown>)?.files as object },
-    },
+    tools: toolsFromConfig(substituted, dataDir),
     cron: (substituted.cron as CronJob[]) || [],
     data_dir: dataDir,
   };
@@ -192,6 +212,7 @@ export function ensureDataDirs(config: Config): void {
     path.join(config.data_dir, "history"),
     path.join(config.data_dir, "files"),
     path.join(config.data_dir, "usage"),
+    path.join(config.data_dir, "logs"),
   ];
 
   // WhatsApp auth directory (always create in case user adds WhatsApp later)

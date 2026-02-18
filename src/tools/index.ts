@@ -9,11 +9,9 @@ import type { AgentTool } from "@mariozechner/pi-agent-core";
 import { createWebSearchTool } from "./web-search.js";
 import { createFetchUrlTool } from "./fetch-url.js";
 import { createFileTools } from "./files.js";
-import {
-  createCoreMemoryTools,
-  createArchivalMemoryTools,
-  createConversationSearchTool,
-} from "../memory/memory-tools.js";
+import { createCoreMemoryTools } from "./core-memory-tool.js";
+import { createArchivalMemoryTools } from "./archival-memory-tool.js";
+import { createConversationSearchTool } from "./conversation-search-tool.js";
 import { embed } from "../memory/embeddings.js";
 import { createMemoryStore } from "../memory/store.js";
 import path from "node:path";

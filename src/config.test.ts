@@ -112,6 +112,7 @@ cron: []
     expect(fs.existsSync(path.join(tempDir, "history"))).toBe(true);
     expect(fs.existsSync(path.join(tempDir, "files"))).toBe(true);
     expect(fs.existsSync(path.join(tempDir, "usage"))).toBe(true);
+    expect(fs.existsSync(path.join(tempDir, "logs"))).toBe(true);
   });
 
   it("should substitute env vars", () => {

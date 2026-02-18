@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import fs from "node:fs";
+import path from "node:path";
 import { createHistoryManager, type HistoryManager } from "../src/history.js";
 
 describe("HistoryManager", () => {
@@ -15,54 +16,45 @@ describe("HistoryManager", () => {
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
-  it("should return empty array for new history", async () => {
-    const messages = await historyManager.getRecent(10, 1000);
-    expect(messages).toEqual([]);
-  });
-
-  it("should append and retrieve messages", async () => {
+  it("should append a message to the history file", async () => {
     await historyManager.append({
       role: "user",
       content: "Hello",
     });
 
-    const messages = await historyManager.getRecent(10, 1000);
-    expect(messages).toHaveLength(1);
-    expect(messages[0].role).toBe("user");
-    expect(messages[0].content).toBe("Hello");
+    const historyDir = path.join(tempDir, "history");
+    const files = fs.readdirSync(historyDir).filter((f) => f.endsWith(".jsonl"));
+    expect(files).toHaveLength(1);
+
+    const line = fs.readFileSync(path.join(historyDir, files[0]), "utf-8").trim();
+    const record = JSON.parse(line);
+    expect(record.role).toBe("user");
+    expect(record.content).toBe("Hello");
+    expect(record.timestamp).toBeDefined();
   });
 
-  it("should respect max messages limit", async () => {
-    for (let i = 0; i < 15; i++) {
-      await historyManager.append({
-        role: "user",
-        content: `Message ${i}`,
-      });
-    }
-
-    const messages = await historyManager.getRecent(5, 10000);
-    expect(messages.length).toBeLessThanOrEqual(5);
-  });
-
-  it("should clear all history", async () => {
-    await historyManager.append({
-      role: "user",
-      content: "Hello",
-    });
-
+  it("should clear all history files", async () => {
+    await historyManager.append({ role: "user", content: "Hello" });
     await historyManager.clear();
 
-    const messages = await historyManager.getRecent(10, 1000);
-    expect(messages).toEqual([]);
+    const historyDir = path.join(tempDir, "history");
+    const files = fs.existsSync(historyDir)
+      ? fs.readdirSync(historyDir).filter((f) => f.endsWith(".jsonl"))
+      : [];
+    expect(files).toHaveLength(0);
   });
 
   it("should add timestamps to messages", async () => {
-    await historyManager.append({
-      role: "user",
-      content: "Hello",
-    });
+    const before = new Date().toISOString();
+    await historyManager.append({ role: "user", content: "Hello" });
+    const after = new Date().toISOString();
 
-    const messages = await historyManager.getRecent(10, 1000);
-    expect(messages[0].timestamp).toBeDefined();
+    const historyDir = path.join(tempDir, "history");
+    const files = fs.readdirSync(historyDir).filter((f) => f.endsWith(".jsonl"));
+    const line = fs.readFileSync(path.join(historyDir, files[0]), "utf-8").trim();
+    const record = JSON.parse(line);
+
+    expect(record.timestamp >= before).toBe(true);
+    expect(record.timestamp <= after).toBe(true);
   });
 });

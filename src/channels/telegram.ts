@@ -98,9 +98,12 @@ export function markdownToHtml(text: string): string {
       // Bold (** or __)
       .replace(/\*\*([^*]+)\*\*/g, (_m, t) => `<b>${t}</b>`)
       .replace(/__([^_]+)__/g, (_m, t) => `<b>${t}</b>`)
-      // Italic (* or _) — single, must not be preceded/followed by same char
+      // Italic (* or _) — single, must not be preceded/followed by same char.
+      // For *, just avoid matching inside ** pairs.
       .replace(/(?<!\*)\*(?!\*)([^*]+)(?<!\*)\*(?!\*)/g, (_m, t) => `<i>${t}</i>`)
-      .replace(/(?<!_)_(?!_)([^_]+)(?<!_)_(?!_)/g, (_m, t) => `<i>${t}</i>`);
+      // For _, also require non-word boundaries so identifiers like read_file
+      // are not treated as italic markers.
+      .replace(/(?<![_\w])_(?!_)([^_]+)(?<!_)_(?![_\w])/g, (_m, t) => `<i>${t}</i>`);
   });
 
   return converted.join("").trim();
@@ -373,19 +376,36 @@ export class TelegramBridge implements ChannelBridge {
     // Stop typing indicator for this chat
     this.stopTyping(channelId);
 
-    // Always use HTML parse mode. Convert markdown from LLM output unless the
-    // caller explicitly passes pre-formatted HTML or plain text.
-    const html = opts?.parseMode === "html" ? text : markdownToHtml(text);
-
-    // Split into chunks if the message exceeds Telegram's limit
-    const chunks = chunkMessage(html);
+    // Always use HTML parse mode. Chunk at the markdown level first so that
+    // no chunk boundary lands inside an HTML tag, then convert each chunk
+    // individually. When the caller passes pre-formatted HTML, chunk after
+    // conversion (same behaviour as before, HTML is typically short).
+    const chunks =
+      opts?.parseMode === "html"
+        ? chunkMessage(text).map((c) => c) // already HTML, chunk as-is
+        : chunkMessage(text).map(markdownToHtml);
 
     let lastMessageId = "";
     for (const chunk of chunks) {
-      const message = await withRetry(() =>
-        bot.api.sendMessage(chatId, chunk, { parse_mode: "HTML" }),
-      );
-      lastMessageId = String(message.message_id);
+      try {
+        const message = await withRetry(() =>
+          bot.api.sendMessage(chatId, chunk, { parse_mode: "HTML" }),
+        );
+        lastMessageId = String(message.message_id);
+      } catch (error) {
+        // If HTML parsing fails, fall back to plain text (strip tags)
+        const err = error as Error & { error_code?: number; description?: string };
+        if (err.error_code === 400 && err.description?.includes("can't parse entities")) {
+          console.warn("HTML parse failed, falling back to plain text:", err.description);
+          const plain = chunk.replace(/<[^>]+>/g, "");
+          const message = await withRetry(() =>
+            bot.api.sendMessage(chatId, plain),
+          );
+          lastMessageId = String(message.message_id);
+        } else {
+          throw error;
+        }
+      }
     }
 
     return lastMessageId;

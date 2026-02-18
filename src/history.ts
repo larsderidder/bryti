@@ -1,7 +1,9 @@
 /**
  * Conversation history management.
  *
- * JSONL files rotated by day. Provides recent context for the agent.
+ * JSONL files rotated by day. Used as an audit log; conversation_search reads
+ * these files directly for semantic search. Persistent pi sessions are the
+ * source of truth for agent context.
  */
 
 import fs from "node:fs";
@@ -24,9 +26,6 @@ export interface ChatMessage {
 }
 
 export interface HistoryManager {
-  /** Get recent messages for context, respecting token budget. */
-  getRecent(maxMessages: number, maxTokens: number): Promise<ChatMessage[]>;
-
   /** Append a message to today's history file. */
   append(message: Omit<ChatMessage, "timestamp">): Promise<void>;
 
@@ -63,43 +62,6 @@ export function createHistoryManager(dataDir: string): HistoryManager {
   }
 
   return {
-    async getRecent(maxMessages: number, maxTokens: number): Promise<ChatMessage[]> {
-      const messages: ChatMessage[] = [];
-      const files = listHistoryFiles();
-      let totalChars = 0;
-
-      for (const file of files) {
-        if (messages.length >= maxMessages || totalChars >= maxTokens * 4) {
-          break;
-        }
-
-        const filePath = getHistoryFilePath(file);
-        const content = fs.readFileSync(filePath, "utf-8");
-        const lines = content.trim().split("\n").reverse(); // Reverse to read from most recent
-
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          if (messages.length >= maxMessages || totalChars >= maxTokens * 4) {
-            break;
-          }
-
-          try {
-            const msg = JSON.parse(line) as ChatMessage;
-            const msgSize = JSON.stringify(msg).length;
-            if (totalChars + msgSize <= maxTokens * 4) {
-              messages.push(msg);
-              totalChars += msgSize;
-            }
-          } catch {
-            // Skip malformed lines
-          }
-        }
-      }
-
-      // Reverse to get chronological order
-      return messages.reverse();
-    },
-
     async append(message: Omit<ChatMessage, "timestamp">): Promise<void> {
       const fullMessage: ChatMessage = {
         ...message,

@@ -91,6 +91,18 @@ describe("markdownToHtml", () => {
     expect(result).toBe("a &amp; b");
     expect(result).not.toContain("&amp;amp;");
   });
+
+  it("does not treat underscores in identifiers as italic", () => {
+    // Tool names, variable names, etc. should not become italic
+    expect(markdownToHtml("read_file")).toBe("read_file");
+    expect(markdownToHtml("core_memory_append")).toBe("core_memory_append");
+    expect(markdownToHtml("**read_file**")).toBe("<b>read_file</b>");
+  });
+
+  it("still converts proper underscore italic", () => {
+    // Standalone _word_ with spaces around it should still be italic
+    expect(markdownToHtml("this is _italic_ text")).toBe("this is <i>italic</i> text");
+  });
 });
 
 describe("chunkMessage", () => {
