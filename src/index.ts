@@ -27,7 +27,7 @@ import { warmupEmbeddings } from "./memory/embeddings.js";
 import { createTools } from "./tools/index.js";
 import { loadUserSession, repairSessionTranscript, refreshSystemPrompt, promptWithFallback, type UserSession } from "./agent.js";
 import { TelegramBridge } from "./channels/telegram.js";
-import { createCronScheduler, type CronScheduler } from "./cron.js";
+import { createScheduler, type Scheduler } from "./scheduler.js";
 import { MessageQueue } from "./message-queue.js";
 import type { IncomingMessage, ChannelBridge } from "./channels/types.js";
 import {
@@ -49,7 +49,7 @@ interface AppState {
   /** Persistent session cache: one session per userId. */
   sessions: Map<string, UserSession>;
   bridge: ChannelBridge;
-  cronScheduler: CronScheduler;
+  scheduler: Scheduler;
 }
 
 interface AssistantMessageLike {
@@ -103,7 +103,7 @@ async function getOrLoadSession(state: AppState, userId: string): Promise<UserSe
     return existing;
   }
 
-  const tools = createTools(state.config, state.coreMemory, userId);
+  const tools = createTools(state.config, state.coreMemory, userId, state.scheduler);
   const userSession = await loadUserSession(
     state.config,
     state.coreMemory,
@@ -263,7 +263,7 @@ async function startApp(): Promise<RunningApp> {
   console.log(`Pibot starting: agent="${config.agent.name}" model="${config.agent.model}"`);
   console.log(`Data directory: ${config.data_dir}`);
   console.log(`Providers: ${config.models.providers.map((p) => p.name).join(", ")}`);
-  console.log(`Cron jobs: ${config.cron.length}`);
+  console.log(`Config cron jobs: ${config.cron.length}`);
 
   // Pre-load embedding model
   const modelsDir = path.join(config.data_dir, ".models");
@@ -284,7 +284,7 @@ async function startApp(): Promise<RunningApp> {
     usageTracker,
     sessions: new Map(),
     bridge,
-    cronScheduler: null!,
+    scheduler: null!,
   };
 
   const queue = new MessageQueue(
@@ -304,15 +304,11 @@ async function startApp(): Promise<RunningApp> {
 
   await bridge.start();
 
-  const cronScheduler = createCronScheduler(config, async (msg: IncomingMessage) => {
-    const channelId = config.telegram.allowed_users[0]
-      ? String(config.telegram.allowed_users[0])
-      : "cron";
-
-    await processMessage(state, { ...msg, channelId });
+  const scheduler = createScheduler(config, async (msg: IncomingMessage) => {
+    await processMessage(state, msg);
   });
-  cronScheduler.start();
-  state.cronScheduler = cronScheduler;
+  scheduler.start();
+  state.scheduler = scheduler;
 
   console.log("Pibot ready!");
 
@@ -324,7 +320,7 @@ async function startApp(): Promise<RunningApp> {
       }
       stopped = true;
       console.log("Shutting down...");
-      state.cronScheduler.stop();
+      state.scheduler.stop();
       await bridge.stop();
       for (const [userId, userSession] of state.sessions) {
         console.log(`Disposing session for user ${userId}`);

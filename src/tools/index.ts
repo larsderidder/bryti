@@ -12,11 +12,13 @@ import { createFileTools } from "./files.js";
 import { createCoreMemoryTools } from "./core-memory-tool.js";
 import { createArchivalMemoryTools } from "./archival-memory-tool.js";
 import { createConversationSearchTool } from "./conversation-search-tool.js";
+import { createScheduleTools } from "./schedule.js";
 import { embed } from "../memory/embeddings.js";
 import { createMemoryStore } from "../memory/store.js";
 import path from "node:path";
 import type { Config } from "../config.js";
 import type { CoreMemory } from "../memory/core-memory.js";
+import type { Scheduler } from "../scheduler.js";
 
 export { createWebSearchTool };
 export { createFetchUrlTool };
@@ -24,6 +26,7 @@ export { createFileTools };
 export { createCoreMemoryTools };
 export { createArchivalMemoryTools };
 export { createConversationSearchTool };
+export { createScheduleTools };
 
 /**
  * Type for pibot tools (AgentTool from pi).
@@ -32,11 +35,15 @@ export type PibotTool = AgentTool<any>;
 
 /**
  * Create all pibot tools based on configuration.
+ *
+ * @param scheduler  Optional Scheduler instance. When provided, the three
+ *                   schedule management tools (create/list/delete) are included.
  */
 export function createTools(
   config: Config,
   coreMemory: CoreMemory,
   userId: string,
+  scheduler?: Scheduler,
 ): PibotTool[] {
   const tools: PibotTool[] = [];
 
@@ -66,6 +73,12 @@ export function createTools(
   );
 
   tools.push(createConversationSearchTool(path.join(config.data_dir, "history")));
+
+  // Schedule tools: let the agent create/list/delete recurring tasks
+  if (scheduler) {
+    // For Telegram private chats, channelId equals userId (numeric string)
+    tools.push(...createScheduleTools(scheduler, userId, userId));
+  }
 
   return tools;
 }

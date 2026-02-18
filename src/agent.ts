@@ -56,6 +56,11 @@ export interface UserSession {
   dispose(): void;
 }
 
+interface ToolSummary {
+  name: string;
+  description?: string;
+}
+
 /**
  * Generate models.json from pibot config.
  */
@@ -99,24 +104,41 @@ function generateModelsJson(config: Config, agentDir: string): void {
  * source of truth for conversation context. The JSONL audit log remains for
  * conversation_search, which reads the files directly.
  */
-function buildSystemPrompt(config: Config, coreMemory: string): string {
+export function buildToolSection(
+  tools: ToolSummary[],
+  extensionToolNames: Set<string>,
+): string {
+  if (tools.length === 0) {
+    return "## Your currently loaded tools\n- None";
+  }
+
+  const lines = [...tools]
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map((tool) => {
+      const description = (tool.description ?? "No description provided.")
+        .replace(/\s+/g, " ")
+        .trim();
+      const sourceSuffix = extensionToolNames.has(tool.name) ? " (extension)" : "";
+      return `- ${tool.name}: ${description}${sourceSuffix}`;
+    });
+
+  return `## Your currently loaded tools\n${lines.join("\n")}`;
+}
+
+function buildSystemPrompt(
+  config: Config,
+  coreMemory: string,
+  tools: ToolSummary[],
+  extensionToolNames: Set<string>,
+): string {
   const parts: string[] = [];
 
   parts.push(config.agent.system_prompt);
+  parts.push(buildToolSection(tools, extensionToolNames));
 
   if (coreMemory) {
     parts.push(`## Your Core Memory (always visible)\n${coreMemory}`);
   }
-
-  parts.push(
-    "You have access to tools for web search, fetching URLs, file management, and memory. Use them wisely to help the user.",
-  );
-
-  parts.push(
-    "After each conversation, consider whether any new information about the user " +
-      "(preferences, facts, recurring topics) should be added to or updated in your " +
-      "core memory. Do this without telling the user unless they ask.",
-  );
 
   return parts.join("\n\n");
 }
@@ -190,6 +212,11 @@ export async function loadUserSession(
   const sessionManager = fs.existsSync(sessFile)
     ? SessionManager.open(sessFile)
     : SessionManager.create(config.data_dir, path.join(config.data_dir, "sessions"));
+  const promptTools: ToolSummary[] = customTools.map((tool) => ({
+    name: tool.name,
+    description: tool.description,
+  }));
+  const extensionToolNames = new Set<string>();
 
   // Resource loader with system prompt (no history injection).
   // The override closure reads core memory at call time so that session.reload()
@@ -198,13 +225,18 @@ export async function loadUserSession(
     cwd: config.data_dir,
     agentDir,
     settingsManager: SettingsManager.create(config.data_dir, agentDir),
-    systemPromptOverride: () => buildSystemPrompt(config, coreMemory.read()),
+    systemPromptOverride: () => buildSystemPrompt(
+      config,
+      coreMemory.read(),
+      promptTools,
+      extensionToolNames,
+    ),
   });
   await loader.reload();
 
   const settingsManager = SettingsManager.create(config.data_dir, agentDir);
 
-  const { session } = await createAgentSession({
+  const { session, extensionsResult } = await createAgentSession({
     cwd: config.data_dir,
     agentDir,
     authStorage,
@@ -217,6 +249,20 @@ export async function loadUserSession(
     sessionManager,
     settingsManager,
   });
+  for (const extension of extensionsResult.extensions) {
+    for (const toolName of extension.tools.keys()) {
+      extensionToolNames.add(toolName);
+    }
+  }
+  promptTools.splice(
+    0,
+    promptTools.length,
+    ...session.getAllTools().map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+    })),
+  );
+  await session.reload();
 
   // Transcript repair on load: fix any tool-call/result pairing issues that
   // could have been written into the session file from a previous run.
