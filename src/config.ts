@@ -42,6 +42,10 @@ export interface Config {
     model: string;
     /** Ordered list of fallback model strings to try when the primary fails. */
     fallback_models: string[];
+    /** IANA timezone string, e.g. "Europe/Amsterdam". Injected into the system
+     *  prompt so the agent resolves relative time expressions correctly.
+     *  Defaults to UTC when omitted. */
+    timezone?: string;
   };
   telegram: {
     token: string;

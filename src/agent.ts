@@ -139,11 +139,22 @@ function buildSystemPrompt(
 
   parts.push(config.agent.system_prompt);
 
-  // Current date and time — lets the agent resolve relative time expressions correctly
+  // Current date and time — lets the agent resolve relative time expressions correctly.
+  // If a user timezone is configured, inject local time alongside UTC.
   const now = new Date();
-  parts.push(
-    `## Current Date & Time\n${now.toISOString().slice(0, 16).replace("T", " ")} UTC`,
-  );
+  const utcStr = now.toISOString().slice(0, 16).replace("T", " ") + " UTC";
+  const tz = config.agent.timezone;
+  let dateTimeBlock: string;
+  if (tz) {
+    const localStr = now
+      .toLocaleString("sv-SE", { timeZone: tz, hour12: false })
+      .slice(0, 16)
+      .replace("T", " ");
+    dateTimeBlock = `## Current Date & Time\n${localStr} (${tz}) / ${utcStr}`;
+  } else {
+    dateTimeBlock = `## Current Date & Time\n${utcStr}`;
+  }
+  parts.push(dateTimeBlock);
 
   // Tool call style — reduces chatty narration
   parts.push(
