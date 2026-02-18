@@ -1,5 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { promptWithFallback, resolveModel, refreshSystemPrompt } from "./agent.js";
+import {
+  buildToolSection,
+  promptWithFallback,
+  resolveModel,
+  refreshSystemPrompt,
+} from "./agent.js";
 import type { AgentSession } from "@mariozechner/pi-coding-agent";
 import type { ModelRegistry } from "@mariozechner/pi-coding-agent";
 import type { Config } from "./config.js";
@@ -72,6 +77,27 @@ describe("resolveModel", () => {
   it("returns null when model not found", () => {
     const registry = makeRegistry({});
     expect(resolveModel("test/missing", registry)).toBeNull();
+  });
+});
+
+describe("buildToolSection", () => {
+  it("renders sorted tools and marks extension tools", () => {
+    const section = buildToolSection(
+      [
+        { name: "z_tool", description: "Z desc" },
+        { name: "a_tool", description: "A desc" },
+      ],
+      new Set(["a_tool"]),
+    );
+
+    expect(section).toContain("## Your currently loaded tools");
+    expect(section).toContain("- a_tool: A desc (extension)");
+    expect(section).toContain("- z_tool: Z desc");
+    expect(section.indexOf("a_tool")).toBeLessThan(section.indexOf("z_tool"));
+  });
+
+  it("renders placeholder when no tools are loaded", () => {
+    expect(buildToolSection([], new Set())).toContain("- None");
   });
 });
 
