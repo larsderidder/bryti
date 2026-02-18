@@ -12,7 +12,7 @@ import { getLlama, resolveModelFile } from "node-llama-cpp";
 import type { LlamaEmbeddingContext } from "node-llama-cpp";
 
 const EMBEDDING_MODEL_URI =
-  "hf:ggml-org/embeddinggemma-300M-GGUF/embeddinggemma-300M-f16.gguf";
+  "hf:ggml-org/embeddinggemma-300M-GGUF/embeddinggemma-300M-Q8_0.gguf";
 
 let embeddingContext: LlamaEmbeddingContext | null = null;
 let initPromise: Promise<LlamaEmbeddingContext> | null = null;
