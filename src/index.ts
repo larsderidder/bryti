@@ -103,7 +103,7 @@ async function getOrLoadSession(state: AppState, userId: string): Promise<UserSe
     return existing;
   }
 
-  const tools = createTools(state.config, state.coreMemory, userId, state.scheduler);
+  const tools = createTools(state.config, state.coreMemory, userId);
   const userSession = await loadUserSession(
     state.config,
     state.coreMemory,

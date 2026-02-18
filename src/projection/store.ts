@@ -65,7 +65,7 @@ export interface ProjectionStore {
 
   /**
    * Get pending projections due in the next window_minutes minutes that have
-   * resolution='exact'. Used by the 15-minute scheduler check.
+   * resolution='exact'. Used by the 5-minute scheduler check.
    */
   getExactDue(window_minutes: number): Projection[];
 
