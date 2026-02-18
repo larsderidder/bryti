@@ -178,6 +178,41 @@ cron:
     expect(config.cron[0].message).toContain("${encodeURIComponent(city)}");
   });
 
+  it("should not treat lowercase template placeholders as env vars", () => {
+    const configContent = `
+agent:
+  name: TestBot
+  model: test/model
+  system_prompt: |
+    Example:
+    \`\`\`ts
+    const s = "\${city}: \${tempC}C";
+    \`\`\`
+telegram:
+  token: test-token
+models:
+  providers:
+    - name: test
+      base_url: https://test.example.com
+      api_key: test-key
+      models: []
+tools:
+  web_search:
+    enabled: false
+    api_key: ""
+  fetch_url:
+    enabled: false
+  files:
+    enabled: false
+cron: []
+`;
+    fs.writeFileSync(path.join(tempDir, "config.yml"), configContent);
+
+    const config = loadConfig();
+    expect(config.agent.system_prompt).toContain("${city}");
+    expect(config.agent.system_prompt).toContain("${tempC}");
+  });
+
   it("should reject missing required fields", () => {
     const configContent = `
 agent:

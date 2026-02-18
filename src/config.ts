@@ -91,7 +91,9 @@ function normalizeModelCost(cost: unknown): ModelEntry["cost"] | undefined {
  * Replace ${VAR} references with values from process.env.
  */
 function substituteEnvVars(text: string): string {
-  return text.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (_match, varName: string) => {
+  // Only substitute uppercase env-style names (e.g. ${TELEGRAM_BOT_TOKEN}).
+  // This avoids clobbering template literals in prompt/examples like ${city}.
+  return text.replace(/\$\{([A-Z_][A-Z0-9_]*)\}/g, (_match, varName: string) => {
     const value = process.env[varName];
     if (value === undefined) {
       throw new Error(`Environment variable ${varName} is not set`);
