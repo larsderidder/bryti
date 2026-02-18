@@ -68,6 +68,10 @@ interface AssistantMessageLike {
   };
 }
 
+interface RunningApp {
+  stop(): Promise<void>;
+}
+
 function toAssistantMessage(message: unknown): AssistantMessageLike | undefined {
   if (!message || typeof message !== "object") {
     return undefined;
@@ -249,9 +253,9 @@ async function processMessage(
 }
 
 /**
- * Main function.
+ * Start one app instance.
  */
-async function main(): Promise<void> {
+async function startApp(): Promise<RunningApp> {
   const config = loadConfig();
   ensureDataDirs(config);
   installConsoleFileLogging(createAppLogger(config.data_dir));
@@ -312,19 +316,118 @@ async function main(): Promise<void> {
 
   console.log("Pibot ready!");
 
-  process.on("SIGINT", async () => {
-    console.log("Shutting down...");
-    state.cronScheduler.stop();
-    await bridge.stop();
-    for (const [userId, userSession] of state.sessions) {
-      console.log(`Disposing session for user ${userId}`);
-      userSession.dispose();
-    }
-    process.exit(0);
-  });
+  let stopped = false;
+  return {
+    async stop(): Promise<void> {
+      if (stopped) {
+        return;
+      }
+      stopped = true;
+      console.log("Shutting down...");
+      state.cronScheduler.stop();
+      await bridge.stop();
+      for (const [userId, userSession] of state.sessions) {
+        console.log(`Disposing session for user ${userId}`);
+        userSession.dispose();
+      }
+    },
+  };
 }
 
-main().catch((error) => {
-  console.error("Fatal error:", error);
+function asError(reason: unknown): Error {
+  if (reason instanceof Error) {
+    return reason;
+  }
+  return new Error(String(reason));
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function runWithSupervisor(): Promise<void> {
+  const restartDelayMs = Number(process.env.PIBOT_RESTART_DELAY_MS ?? 2000);
+  let shutdownRequested = false;
+  let resolver: ((outcome: "shutdown" | "restart") => void) | null = null;
+
+  const resolveOutcome = (outcome: "shutdown" | "restart"): void => {
+    if (!resolver) {
+      return;
+    }
+    const current = resolver;
+    resolver = null;
+    current(outcome);
+  };
+
+  const onSignal = (): void => {
+    shutdownRequested = true;
+    resolveOutcome("shutdown");
+  };
+
+  process.once("SIGINT", onSignal);
+  process.once("SIGTERM", onSignal);
+
+  while (!shutdownRequested) {
+    let app: RunningApp | undefined;
+    let fatalError: Error | undefined;
+    try {
+      app = await startApp();
+    } catch (error) {
+      fatalError = asError(error);
+    }
+
+    if (!app) {
+      console.error("Fatal startup error:", fatalError);
+      if (shutdownRequested) {
+        break;
+      }
+      console.log(`Restarting in ${restartDelayMs}ms...`);
+      await sleep(restartDelayMs);
+      continue;
+    }
+
+    const onUncaughtException = (error: Error): void => {
+      fatalError = error;
+      resolveOutcome("restart");
+    };
+    const onUnhandledRejection = (reason: unknown): void => {
+      fatalError = asError(reason);
+      resolveOutcome("restart");
+    };
+
+    process.once("uncaughtException", onUncaughtException);
+    process.once("unhandledRejection", onUnhandledRejection);
+
+    const outcome = await new Promise<"shutdown" | "restart">((resolve) => {
+      if (shutdownRequested) {
+        resolve("shutdown");
+        return;
+      }
+      resolver = resolve;
+    });
+
+    process.removeListener("uncaughtException", onUncaughtException);
+    process.removeListener("unhandledRejection", onUnhandledRejection);
+
+    await app.stop();
+
+    if (outcome === "shutdown") {
+      break;
+    }
+
+    console.error("Fatal runtime error:", fatalError);
+    if (shutdownRequested) {
+      break;
+    }
+    console.log(`Restarting in ${restartDelayMs}ms...`);
+    await sleep(restartDelayMs);
+  }
+
+  process.removeListener("SIGINT", onSignal);
+  process.removeListener("SIGTERM", onSignal);
+}
+
+runWithSupervisor().catch((error) => {
+  console.error("Supervisor fatal error:", error);
   process.exit(1);
 });

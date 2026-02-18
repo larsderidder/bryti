@@ -18,6 +18,8 @@ export interface AppLogger {
   error(message: string, ...args: unknown[]): void;
 }
 
+let consoleFileLoggingInstalled = false;
+
 function toDateString(date: Date): string {
   return date.toISOString().split("T")[0];
 }
@@ -69,6 +71,11 @@ export function createAppLogger(dataDir: string): AppLogger {
  * Mirror console output to JSONL logs while preserving normal stdout/stderr output.
  */
 export function installConsoleFileLogging(logger: AppLogger): void {
+  if (consoleFileLoggingInstalled) {
+    return;
+  }
+  consoleFileLoggingInstalled = true;
+
   const original = {
     log: console.log.bind(console),
     info: console.info.bind(console),
