@@ -131,9 +131,9 @@ async function processMessage(
     if (existing) {
       existing.dispose();
       state.sessions.delete(msg.userId);
-      // Delete the session file so the next message creates a new one
-      if (fs.existsSync(existing.sessionFile)) {
-        fs.unlinkSync(existing.sessionFile);
+      // Delete the session directory so the next message creates a fresh session
+      if (fs.existsSync(existing.sessionDir)) {
+        fs.rmSync(existing.sessionDir, { recursive: true, force: true });
       }
     }
     await state.bridge.sendMessage(msg.channelId, "Conversation history cleared.");

@@ -51,8 +51,8 @@ export interface UserSession {
   modelRegistry: ModelRegistry;
   /** User this session belongs to. */
   userId: string;
-  /** Path to the session file on disk. */
-  sessionFile: string;
+  /** Path to the per-user session directory on disk. */
+  sessionDir: string;
   /** Clean up event listeners. Does NOT delete the session file. */
   dispose(): void;
 }
@@ -153,12 +153,13 @@ function buildSystemPrompt(
 }
 
 /**
- * Return the session file path for a user.
+ * Return the per-user session directory. Each user gets their own directory
+ * so that SessionManager.continueRecent() picks up the right session.
  */
-export function sessionFilePath(config: Config, userId: string): string {
-  const sessionsDir = path.join(config.data_dir, "sessions");
-  fs.mkdirSync(sessionsDir, { recursive: true });
-  return path.join(sessionsDir, `${userId}.jsonl`);
+export function userSessionDir(config: Config, userId: string): string {
+  const dir = path.join(config.data_dir, "sessions", userId);
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
 }
 
 /**
@@ -216,11 +217,10 @@ export async function loadUserSession(
 
   console.log(`Using model: ${model.id} (${model.provider})`);
 
-  // Session manager: open existing file or create new
-  const sessFile = sessionFilePath(config, userId);
-  const sessionManager = fs.existsSync(sessFile)
-    ? SessionManager.open(sessFile)
-    : SessionManager.create(config.data_dir, path.join(config.data_dir, "sessions"));
+  // Session manager: continue most recent session for this user, or create new.
+  // Each user gets their own session directory so continueRecent finds the right file.
+  const sessDir = userSessionDir(config, userId);
+  const sessionManager = SessionManager.continueRecent(config.data_dir, sessDir);
   const promptTools: ToolSummary[] = customTools.map((tool) => ({
     name: tool.name,
     description: tool.description,
@@ -333,7 +333,7 @@ export async function loadUserSession(
     session,
     modelRegistry,
     userId,
-    sessionFile: sessFile,
+    sessionDir: sessDir,
     dispose() {
       unsubscribe();
       session.dispose();
