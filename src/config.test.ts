@@ -147,6 +147,37 @@ cron: []
     expect(config.models.providers[0].api_key).toBe("my-secret-key");
   });
 
+  it("should not treat template expressions as env vars", () => {
+    const configContent = `
+agent:
+  name: TestBot
+  model: test/model
+telegram:
+  token: test-token
+models:
+  providers:
+    - name: test
+      base_url: https://test.example.com
+      api_key: test-key
+      models: []
+tools:
+  web_search:
+    enabled: false
+    api_key: ""
+  fetch_url:
+    enabled: false
+  files:
+    enabled: false
+cron:
+  - schedule: "0 8 * * *"
+    message: "Weather URL: https://wttr.in/\${encodeURIComponent(city)}?format=j1"
+`;
+    fs.writeFileSync(path.join(tempDir, "config.yml"), configContent);
+
+    const config = loadConfig();
+    expect(config.cron[0].message).toContain("${encodeURIComponent(city)}");
+  });
+
   it("should reject missing required fields", () => {
     const configContent = `
 agent:

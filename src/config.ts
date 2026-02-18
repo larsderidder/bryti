@@ -91,7 +91,7 @@ function normalizeModelCost(cost: unknown): ModelEntry["cost"] | undefined {
  * Replace ${VAR} references with values from process.env.
  */
 function substituteEnvVars(text: string): string {
-  return text.replace(/\$\{([^}]+)\}/g, (_match, varName: string) => {
+  return text.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (_match, varName: string) => {
     const value = process.env[varName];
     if (value === undefined) {
       throw new Error(`Environment variable ${varName} is not set`);
