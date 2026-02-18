@@ -8,6 +8,9 @@
 import fs from "node:fs";
 import path from "node:path";
 import { parse as parseYaml } from "yaml";
+import type { ActiveHoursConfig } from "./active-hours.js";
+
+export type { ActiveHoursConfig };
 
 export interface ProviderConfig {
   name: string;
@@ -56,6 +59,8 @@ export interface Config {
     files: { enabled: boolean; base_dir: string };
   };
   cron: CronJob[];
+  /** Optional active hours window. Scheduler callbacks skip firing outside it. */
+  active_hours?: ActiveHoursConfig;
   data_dir: string;
 }
 
@@ -181,6 +186,7 @@ export function loadConfig(configPath?: string): Config {
     },
     tools: toolsFromConfig(substituted, dataDir),
     cron: (substituted.cron as CronJob[]) || [],
+    active_hours: (substituted.active_hours as ActiveHoursConfig | undefined) ?? undefined,
     data_dir: dataDir,
   };
 

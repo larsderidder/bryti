@@ -17,6 +17,7 @@ import { Cron } from "croner";
 import type { Config } from "./config.js";
 import type { IncomingMessage } from "./channels/types.js";
 import { createProjectionStore, formatProjectionsForPrompt } from "./projection/index.js";
+import { isActiveNow } from "./active-hours.js";
 
 // ---------------------------------------------------------------------------
 // Scheduler interface
@@ -105,6 +106,10 @@ export function createScheduler(
     const dailyJob = new Cron(
       "0 8 * * *",
       async () => {
+        if (!isActiveNow(config.active_hours)) {
+          console.log("[projections] Daily review skipped (outside active hours)");
+          return;
+        }
         console.log("[projections] Daily review triggered");
         const store = createProjectionStore(primaryUserId, config.data_dir);
         try {
@@ -144,6 +149,9 @@ export function createScheduler(
     const exactJob = new Cron(
       "*/5 * * * *",
       async () => {
+        if (!isActiveNow(config.active_hours)) {
+          return; // Silent skip - fires every 5 min, no need to log each one
+        }
         const store = createProjectionStore(primaryUserId, config.data_dir);
         try {
           const due = store.getExactDue(15);
