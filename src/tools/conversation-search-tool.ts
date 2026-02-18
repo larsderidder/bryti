@@ -6,6 +6,7 @@ import type { AgentTool, AgentToolResult } from "@mariozechner/pi-agent-core";
 import type { Static } from "@sinclair/typebox";
 import { Type } from "@sinclair/typebox";
 import { searchConversations } from "../memory/conversation-search.js";
+import { toolError, toolSuccess } from "./result.js";
 
 const conversationSearchSchema = Type.Object({
   query: Type.String({ description: "Search query for conversation history" }),
@@ -26,19 +27,9 @@ export function createConversationSearchTool(historyDir: string): AgentTool<any>
     ): Promise<AgentToolResult<unknown>> {
       try {
         const results = searchConversations(historyDir, query, 10);
-        const text = JSON.stringify({ results }, null, 2);
-
-        return {
-          content: [{ type: "text", text }],
-          details: { results },
-        };
+        return toolSuccess({ results });
       } catch (error) {
-        const err = error as Error;
-        const text = JSON.stringify({ error: err.message });
-        return {
-          content: [{ type: "text", text }],
-          details: { error: err.message },
-        };
+        return toolError(error);
       }
     },
   };

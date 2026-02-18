@@ -10,6 +10,7 @@ import type { AgentTool, AgentToolResult } from "@mariozechner/pi-agent-core";
 import { Type } from "@sinclair/typebox";
 import type { Static } from "@sinclair/typebox";
 import type { Scheduler } from "../scheduler.js";
+import { toolError, toolSuccess } from "./result.js";
 
 // ---------------------------------------------------------------------------
 // Schemas
@@ -70,28 +71,18 @@ export function createScheduleTools(
       _toolCallId: string,
       { schedule, message, description }: CreateScheduleInput,
     ): Promise<AgentToolResult<unknown>> {
-      let record;
       try {
-        record = scheduler.create({ schedule, message, description, userId, channelId });
+        const record = scheduler.create({ schedule, message, description, userId, channelId });
+        return toolSuccess({
+          id: record.id,
+          schedule: record.schedule,
+          message: record.message,
+          description: record.description,
+          created_at: record.created_at,
+        });
       } catch (err) {
-        const error = err instanceof Error ? err.message : String(err);
-        return {
-          content: [{ type: "text", text: JSON.stringify({ error }) }],
-          details: { error },
-        };
+        return toolError(err);
       }
-
-      const result = {
-        id: record.id,
-        schedule: record.schedule,
-        message: record.message,
-        description: record.description,
-        created_at: record.created_at,
-      };
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        details: result,
-      };
     },
   };
 
@@ -107,7 +98,7 @@ export function createScheduleTools(
       _input: Record<string, never>,
     ): Promise<AgentToolResult<unknown>> {
       const records = scheduler.list();
-      const result = records.map((r) => ({
+      const schedules = records.map((r) => ({
         id: r.id,
         schedule: r.schedule,
         message: r.message,
@@ -115,10 +106,7 @@ export function createScheduleTools(
         enabled: r.enabled,
         created_at: r.created_at,
       }));
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        details: { count: result.length, schedules: result },
-      };
+      return toolSuccess({ count: schedules.length, schedules });
     },
   };
 
@@ -134,13 +122,9 @@ export function createScheduleTools(
       { id }: DeleteScheduleInput,
     ): Promise<AgentToolResult<unknown>> {
       const deleted = scheduler.delete(id);
-      const result = deleted
-        ? { deleted: true, id }
-        : { deleted: false, error: `Schedule not found: ${id}` };
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        details: result,
-      };
+      return toolSuccess(
+        deleted ? { deleted: true, id } : { deleted: false, error: `Schedule not found: ${id}` },
+      );
     },
   };
 

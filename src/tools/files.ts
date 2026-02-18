@@ -10,6 +10,7 @@ import path from "node:path";
 import type { AgentTool, AgentToolResult } from "@mariozechner/pi-agent-core";
 import type { Static } from "@sinclair/typebox";
 import { Type } from "@sinclair/typebox";
+import { toolError, toolSuccess } from "./result.js";
 
 const MAX_FILE_SIZE = 50 * 1024; // 50KB
 const MAX_DEPTH = 3;
@@ -68,57 +69,22 @@ export function createFileTools(baseDir: string): AgentTool<any>[] {
       { path: filePath }: ReadFileInput,
     ): Promise<AgentToolResult<unknown>> {
       const resolved = resolveSafePath(baseDir, filePath);
-      if (!resolved) {
-        const text = JSON.stringify({ error: "Invalid path: path traversal not allowed" });
-        return {
-          content: [{ type: "text", text }],
-          details: { error: "Invalid path" },
-        };
-      }
+      if (!resolved) return toolError("Invalid path: path traversal not allowed");
 
       try {
-        if (!fs.existsSync(resolved)) {
-          const text = JSON.stringify({ error: "File not found" });
-          return {
-            content: [{ type: "text", text }],
-            details: { error: "File not found" },
-          };
-        }
+        if (!fs.existsSync(resolved)) return toolError("File not found");
 
         const stats = fs.statSync(resolved);
-        if (stats.isDirectory()) {
-          const text = JSON.stringify({ error: "Path is a directory, not a file" });
-          return {
-            content: [{ type: "text", text }],
-            details: { error: "Is a directory" },
-          };
-        }
+        if (stats.isDirectory()) return toolError("Path is a directory, not a file");
 
         if (stats.size > MAX_FILE_SIZE) {
           const content = fs.readFileSync(resolved, "utf-8").slice(0, MAX_FILE_SIZE);
-          const text = JSON.stringify({
-            content: content + "\n\n[File truncated, was larger than 50KB]",
-            truncated: true,
-          }, null, 2);
-          return {
-            content: [{ type: "text", text }],
-            details: { truncated: true },
-          };
+          return toolSuccess({ content: content + "\n\n[File truncated, was larger than 50KB]", truncated: true });
         }
 
-        const content = fs.readFileSync(resolved, "utf-8");
-        const text = JSON.stringify({ content }, null, 2);
-        return {
-          content: [{ type: "text", text }],
-          details: { content },
-        };
+        return toolSuccess({ content: fs.readFileSync(resolved, "utf-8") });
       } catch (error) {
-        const err = error as Error;
-        const text = JSON.stringify({ error: `Failed to read file: ${err.message}` });
-        return {
-          content: [{ type: "text", text }],
-          details: { error: err.message },
-        };
+        return toolError(error, "Failed to read file");
       }
     },
   };
@@ -133,33 +99,14 @@ export function createFileTools(baseDir: string): AgentTool<any>[] {
       { path: filePath, content }: WriteFileInput,
     ): Promise<AgentToolResult<unknown>> {
       const resolved = resolveSafePath(baseDir, filePath);
-      if (!resolved) {
-        const text = JSON.stringify({ error: "Invalid path: path traversal not allowed" });
-        return {
-          content: [{ type: "text", text }],
-          details: { error: "Invalid path" },
-        };
-      }
+      if (!resolved) return toolError("Invalid path: path traversal not allowed");
 
       try {
-        // Create parent directories if needed
-        const dir = path.dirname(resolved);
-        fs.mkdirSync(dir, { recursive: true });
-
+        fs.mkdirSync(path.dirname(resolved), { recursive: true });
         fs.writeFileSync(resolved, content, "utf-8");
-        const bytes = Buffer.byteLength(content, "utf-8");
-        const text = JSON.stringify({ success: true, bytes }, null, 2);
-        return {
-          content: [{ type: "text", text }],
-          details: { success: true, bytes },
-        };
+        return toolSuccess({ success: true, bytes: Buffer.byteLength(content, "utf-8") });
       } catch (error) {
-        const err = error as Error;
-        const text = JSON.stringify({ error: `Failed to write file: ${err.message}` });
-        return {
-          content: [{ type: "text", text }],
-          details: { error: err.message },
-        };
+        return toolError(error, "Failed to write file");
       }
     },
   };
@@ -177,20 +124,8 @@ export function createFileTools(baseDir: string): AgentTool<any>[] {
 
       if (directory) {
         const resolved = resolveSafePath(baseDir, directory);
-        if (!resolved) {
-          const text = JSON.stringify({ error: "Invalid path: path traversal not allowed" });
-          return {
-            content: [{ type: "text", text }],
-            details: { error: "Invalid path" },
-          };
-        }
-        if (!fs.existsSync(resolved)) {
-          const text = JSON.stringify({ error: "Directory not found" });
-          return {
-            content: [{ type: "text", text }],
-            details: { error: "Directory not found" },
-          };
-        }
+        if (!resolved) return toolError("Invalid path: path traversal not allowed");
+        if (!fs.existsSync(resolved)) return toolError("Directory not found");
         targetDir = resolved;
       }
 
@@ -199,14 +134,10 @@ export function createFileTools(baseDir: string): AgentTool<any>[] {
 
         function walkDir(currentDir: string, depth: number): void {
           if (depth > MAX_DEPTH) return;
-
-          const entries = fs.readdirSync(currentDir, { withFileTypes: true });
-          for (const entry of entries) {
+          for (const entry of fs.readdirSync(currentDir, { withFileTypes: true })) {
             const fullPath = path.join(currentDir, entry.name);
-            const relativePath = path.relative(baseDir, fullPath);
-
             if (entry.isFile()) {
-              files.push(relativePath);
+              files.push(path.relative(baseDir, fullPath));
             } else if (entry.isDirectory()) {
               walkDir(fullPath, depth + 1);
             }
@@ -214,18 +145,9 @@ export function createFileTools(baseDir: string): AgentTool<any>[] {
         }
 
         walkDir(targetDir, 0);
-        const text = JSON.stringify({ files }, null, 2);
-        return {
-          content: [{ type: "text", text }],
-          details: { files },
-        };
+        return toolSuccess({ files });
       } catch (error) {
-        const err = error as Error;
-        const text = JSON.stringify({ error: `Failed to list files: ${err.message}` });
-        return {
-          content: [{ type: "text", text }],
-          details: { error: err.message },
-        };
+        return toolError(error, "Failed to list files");
       }
     },
   };

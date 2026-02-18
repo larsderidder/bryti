@@ -10,6 +10,7 @@ import { parseHTML } from "linkedom";
 import { Readability } from "@mozilla/readability";
 import type { AgentTool, AgentToolResult } from "@mariozechner/pi-agent-core";
 import type { Static } from "@sinclair/typebox";
+import { toolError, toolSuccess } from "./result.js";
 import { Type } from "@sinclair/typebox";
 
 const MAX_CONTENT_LENGTH = 4000;
@@ -113,18 +114,9 @@ export function createFetchUrlTool(timeoutMs: number = 10000): AgentTool<typeof 
           content = content.substring(0, MAX_CONTENT_LENGTH) + "\n\n[Content truncated...]";
         }
 
-        const text = JSON.stringify({ title, content: content.trim() }, null, 2);
-        return {
-          content: [{ type: "text", text }],
-          details: { title, content: content.trim() },
-        };
+        return toolSuccess({ title, content: content.trim() });
       } catch (error) {
-        const err = error as Error;
-        const text = JSON.stringify({ error: `Failed to fetch URL: ${err.message}` });
-        return {
-          content: [{ type: "text", text }],
-          details: { error: err.message },
-        };
+        return toolError(error, "Failed to fetch URL");
       }
     },
   };

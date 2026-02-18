@@ -7,6 +7,7 @@ import type { Static } from "@sinclair/typebox";
 import { Type } from "@sinclair/typebox";
 import { createHybridSearch } from "../memory/search.js";
 import type { MemoryStore } from "../memory/store.js";
+import { toolError, toolSuccess } from "./result.js";
 
 const archivalMemoryInsertSchema = Type.Object({
   content: Type.String({ description: "Content to store in archival memory" }),
@@ -39,19 +40,9 @@ export function createArchivalMemoryTools(
       try {
         const embedding = await embed(content);
         store.addFact(content, "archival", embedding);
-
-        const text = JSON.stringify({ success: true }, null, 2);
-        return {
-          content: [{ type: "text", text }],
-          details: { success: true },
-        };
+        return toolSuccess({ success: true });
       } catch (error) {
-        const err = error as Error;
-        const text = JSON.stringify({ error: err.message });
-        return {
-          content: [{ type: "text", text }],
-          details: { error: err.message },
-        };
+        return toolError(error);
       }
     },
   };
@@ -75,19 +66,9 @@ export function createArchivalMemoryTools(
           score: result.combinedScore,
           matchedBy: result.matchedBy,
         }));
-
-        const text = JSON.stringify({ results: formatted }, null, 2);
-        return {
-          content: [{ type: "text", text }],
-          details: { results: formatted },
-        };
+        return toolSuccess({ results: formatted });
       } catch (error) {
-        const err = error as Error;
-        const text = JSON.stringify({ error: err.message });
-        return {
-          content: [{ type: "text", text }],
-          details: { error: err.message },
-        };
+        return toolError(error);
       }
     },
   };
