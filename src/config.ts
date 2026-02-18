@@ -213,8 +213,10 @@ export function ensureDataDirs(config: Config): void {
     config.data_dir,
     path.join(config.data_dir, "history"),
     path.join(config.data_dir, "files"),
+    path.join(config.data_dir, "files", "extensions"),
     path.join(config.data_dir, "usage"),
     path.join(config.data_dir, "logs"),
+    path.join(config.data_dir, ".pi"),
   ];
 
   // WhatsApp auth directory (always create in case user adds WhatsApp later)
@@ -222,5 +224,36 @@ export function ensureDataDirs(config: Config): void {
 
   for (const dir of dirs) {
     fs.mkdirSync(dir, { recursive: true });
+  }
+
+  // Write .pi/settings.json so pi discovers agent-written extensions.
+  // Pi's discoverAndLoadExtensions reads configuredPaths from settings and
+  // scans directories for .ts/.js files.
+  writeExtensionSettings(config);
+}
+
+/**
+ * Write pi project settings that point to the agent's extension directory.
+ *
+ * Pi reads extensions from settings.extensions[] paths. We point it at
+ * data/files/extensions/ where the agent writes extensions via write_file.
+ */
+function writeExtensionSettings(config: Config): void {
+  const settingsPath = path.join(config.data_dir, ".pi", "settings.json");
+  const extensionsDir = path.resolve(config.data_dir, "files", "extensions");
+
+  let settings: Record<string, unknown> = {};
+  if (fs.existsSync(settingsPath)) {
+    try {
+      settings = JSON.parse(fs.readFileSync(settingsPath, "utf-8"));
+    } catch {
+      // Corrupted settings, overwrite
+    }
+  }
+
+  const currentPaths = Array.isArray(settings.extensions) ? settings.extensions : [];
+  if (!currentPaths.includes(extensionsDir)) {
+    settings.extensions = [...currentPaths, extensionsDir];
+    fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), "utf-8");
   }
 }

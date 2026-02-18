@@ -111,8 +111,52 @@ cron: []
 
     expect(fs.existsSync(path.join(tempDir, "history"))).toBe(true);
     expect(fs.existsSync(path.join(tempDir, "files"))).toBe(true);
+    expect(fs.existsSync(path.join(tempDir, "files", "extensions"))).toBe(true);
     expect(fs.existsSync(path.join(tempDir, "usage"))).toBe(true);
     expect(fs.existsSync(path.join(tempDir, "logs"))).toBe(true);
+
+    // Pi settings should include the extensions directory
+    const settingsPath = path.join(tempDir, ".pi", "settings.json");
+    expect(fs.existsSync(settingsPath)).toBe(true);
+    const settings = JSON.parse(fs.readFileSync(settingsPath, "utf-8"));
+    const extDir = path.resolve(tempDir, "files", "extensions");
+    expect(settings.extensions).toContain(extDir);
+  });
+
+  it("ensureDataDirs should not duplicate extension path on re-run", () => {
+    const configContent = `
+agent:
+  name: TestBot
+  model: test/model
+telegram:
+  token: test-token
+models:
+  providers:
+    - name: test
+      base_url: https://test.example.com
+      api_key: test-key
+      models: []
+tools:
+  web_search:
+    enabled: false
+    api_key: ""
+  fetch_url:
+    enabled: false
+  files:
+    enabled: false
+cron: []
+`;
+    fs.writeFileSync(path.join(tempDir, "config.yml"), configContent);
+
+    const config = loadConfig();
+    ensureDataDirs(config);
+    ensureDataDirs(config);
+
+    const settingsPath = path.join(tempDir, ".pi", "settings.json");
+    const settings = JSON.parse(fs.readFileSync(settingsPath, "utf-8"));
+    const extDir = path.resolve(tempDir, "files", "extensions");
+    const count = settings.extensions.filter((p: string) => p === extDir).length;
+    expect(count).toBe(1);
   });
 
   it("should substitute env vars", () => {

@@ -249,9 +249,20 @@ export async function loadUserSession(
     sessionManager,
     settingsManager,
   });
-  for (const extension of extensionsResult.extensions) {
-    for (const toolName of extension.tools.keys()) {
-      extensionToolNames.add(toolName);
+  // Log extension loading results
+  if (extensionsResult.extensions.length > 0) {
+    for (const extension of extensionsResult.extensions) {
+      const toolNames = [...extension.tools.keys()];
+      console.log(`[extensions] Loaded: ${extension.path} (tools: ${toolNames.join(", ") || "none"})`);
+      for (const toolName of toolNames) {
+        extensionToolNames.add(toolName);
+      }
+    }
+    console.log(`[extensions] ${extensionsResult.extensions.length} extension(s) loaded, ${extensionToolNames.size} tool(s) registered`);
+  }
+  if (extensionsResult.errors.length > 0) {
+    for (const err of extensionsResult.errors) {
+      console.error(`[extensions] Failed to load ${err.path}: ${err.error}`);
     }
   }
   promptTools.splice(
