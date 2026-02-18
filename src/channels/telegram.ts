@@ -12,7 +12,7 @@
 
 import { Bot, type Context } from "grammy";
 import type { ChannelBridge, IncomingMessage, SendOpts } from "./types.js";
-import { markdownToIR, type MarkdownLinkSpan } from "../markdown/ir.js";
+import { markdownToIR, chunkMarkdownIR, type MarkdownLinkSpan } from "../markdown/ir.js";
 import { renderMarkdownWithMarkers } from "../markdown/render.js";
 
 /**
@@ -53,6 +53,28 @@ function buildTelegramLink(link: MarkdownLinkSpan, _text: string) {
   };
 }
 
+/** Telegram's maximum message length in characters. */
+const MAX_MESSAGE_LENGTH = 4096;
+
+const TELEGRAM_RENDER_OPTIONS = {
+  styleMarkers: {
+    bold: { open: "<b>", close: "</b>" },
+    italic: { open: "<i>", close: "</i>" },
+    strikethrough: { open: "<s>", close: "</s>" },
+    code: { open: "<code>", close: "</code>" },
+    code_block: { open: "<pre><code>", close: "</code></pre>" },
+  },
+  escapeText: escapeHtml,
+  buildLink: buildTelegramLink,
+} as const;
+
+const TELEGRAM_IR_OPTIONS = {
+  linkify: true,
+  headingStyle: "bold" as const,
+  blockquotePrefix: "",
+  tableMode: "bullets" as const,
+};
+
 /**
  * Convert LLM markdown output to Telegram HTML using a proper markdown IR.
  *
@@ -67,27 +89,23 @@ function buildTelegramLink(link: MarkdownLinkSpan, _text: string) {
  * - Tables -> bullet list format (Telegram has no table support)
  */
 export function markdownToHtml(text: string): string {
-  const ir = markdownToIR(text ?? "", {
-    linkify: true,
-    headingStyle: "bold",
-    blockquotePrefix: "",
-    tableMode: "bullets",
-  });
-  return renderMarkdownWithMarkers(ir, {
-    styleMarkers: {
-      bold: { open: "<b>", close: "</b>" },
-      italic: { open: "<i>", close: "</i>" },
-      strikethrough: { open: "<s>", close: "</s>" },
-      code: { open: "<code>", close: "</code>" },
-      code_block: { open: "<pre><code>", close: "</code></pre>" },
-    },
-    escapeText: escapeHtml,
-    buildLink: buildTelegramLink,
-  });
+  const ir = markdownToIR(text ?? "", TELEGRAM_IR_OPTIONS);
+  return renderMarkdownWithMarkers(ir, TELEGRAM_RENDER_OPTIONS);
 }
 
-/** Telegram's maximum message length in characters. */
-const MAX_MESSAGE_LENGTH = 4096;
+/**
+ * Parse markdown into an IR, split at semantic boundaries (never mid-fence),
+ * and render each chunk to Telegram HTML.
+ *
+ * This is the safe way to chunk large responses: splitting after IR parsing
+ * means code blocks, bold spans, and links are never cut in half.
+ */
+export function markdownToTelegramChunks(text: string, maxLength = MAX_MESSAGE_LENGTH): string[] {
+  if (!text) return [];
+  const ir = markdownToIR(text, TELEGRAM_IR_OPTIONS);
+  const irChunks = chunkMarkdownIR(ir, maxLength);
+  return irChunks.map((chunk) => renderMarkdownWithMarkers(chunk, TELEGRAM_RENDER_OPTIONS));
+}
 
 /** Maximum retry attempts for send/edit operations. */
 const MAX_SEND_RETRIES = 3;
@@ -353,14 +371,13 @@ export class TelegramBridge implements ChannelBridge {
     // Stop typing indicator for this chat
     this.stopTyping(channelId);
 
-    // Always use HTML parse mode. Chunk at the markdown level first so that
-    // no chunk boundary lands inside an HTML tag, then convert each chunk
-    // individually. When the caller passes pre-formatted HTML, chunk after
-    // conversion (same behaviour as before, HTML is typically short).
+    // Always use HTML parse mode. For markdown input, parse into an IR first
+    // then chunk at semantic boundaries (never mid-fence or mid-tag), then
+    // render each chunk. For pre-formatted HTML, chunk the raw string.
     const chunks =
       opts?.parseMode === "html"
-        ? chunkMessage(text).map((c) => c) // already HTML, chunk as-is
-        : chunkMessage(text).map(markdownToHtml);
+        ? chunkMessage(text)
+        : markdownToTelegramChunks(text);
 
     let lastMessageId = "";
     for (const chunk of chunks) {

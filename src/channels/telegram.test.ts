@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { TelegramBridge, markdownToHtml, chunkMessage } from "./telegram.js";
+import { TelegramBridge, markdownToHtml, chunkMessage, markdownToTelegramChunks } from "./telegram.js";
 
 describe("TelegramBridge", () => {
   it("has correct name and platform", () => {
@@ -181,5 +181,43 @@ describe("chunkMessage", () => {
 
     const long = "a".repeat(4097);
     expect(chunkMessage(long).length).toBe(2);
+  });
+});
+
+describe("markdownToTelegramChunks", () => {
+  it("returns a single HTML chunk for short text", () => {
+    const chunks = markdownToTelegramChunks("**hello**");
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0]).toBe("<b>hello</b>");
+  });
+
+  it("never splits a code block across chunks", () => {
+    // Build a message where a code block would straddle a naive split boundary.
+    const before = "intro\n\n";
+    const codeLines = Array.from({ length: 20 }, (_, i) => `const x${i} = ${i};`).join("\n");
+    const code = "```js\n" + codeLines + "\n```";
+    const after = "\n\noutro";
+    const text = before + code + after;
+
+    // Use a limit just below the full length so chunking is forced
+    const limit = Math.floor(text.length * 0.6);
+    const chunks = markdownToTelegramChunks(text, limit);
+
+    // Every chunk must have balanced <pre><code> / </code></pre> tags
+    for (const chunk of chunks) {
+      const opens = (chunk.match(/<pre><code>/g) ?? []).length;
+      const closes = (chunk.match(/<\/code><\/pre>/g) ?? []).length;
+      expect(opens).toBe(closes);
+    }
+
+    // The full content must be present across all chunks
+    const combined = chunks.join("");
+    expect(combined).toContain("<pre><code>");
+    expect(combined).toContain("intro");
+    expect(combined).toContain("outro");
+  });
+
+  it("returns empty array for empty input", () => {
+    expect(markdownToTelegramChunks("")).toEqual([]);
   });
 });
