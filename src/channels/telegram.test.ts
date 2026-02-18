@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { TelegramBridge, markdownToHtml } from "./telegram.js";
+import { TelegramBridge, markdownToHtml, chunkMessage } from "./telegram.js";
 
 describe("TelegramBridge", () => {
   it("has correct name and platform", () => {
@@ -90,5 +90,67 @@ describe("markdownToHtml", () => {
     const result = markdownToHtml("a & b");
     expect(result).toBe("a &amp; b");
     expect(result).not.toContain("&amp;amp;");
+  });
+});
+
+describe("chunkMessage", () => {
+  it("returns single chunk for short text", () => {
+    const chunks = chunkMessage("hello world", 100);
+    expect(chunks).toEqual(["hello world"]);
+  });
+
+  it("returns single chunk for text exactly at limit", () => {
+    const text = "a".repeat(100);
+    const chunks = chunkMessage(text, 100);
+    expect(chunks).toEqual([text]);
+  });
+
+  it("splits on paragraph boundary", () => {
+    const text = "paragraph one\n\nparagraph two\n\nparagraph three";
+    const chunks = chunkMessage(text, 30);
+    expect(chunks.length).toBeGreaterThan(1);
+    expect(chunks.every((c) => c.length <= 30)).toBe(true);
+    expect(chunks.join("\n\n")).toContain("paragraph one");
+    expect(chunks.join("\n\n")).toContain("paragraph three");
+  });
+
+  it("splits on newline when no paragraph boundary fits", () => {
+    const text = "line one\nline two\nline three\nline four";
+    const chunks = chunkMessage(text, 20);
+    expect(chunks.length).toBeGreaterThan(1);
+    expect(chunks.every((c) => c.length <= 20)).toBe(true);
+  });
+
+  it("splits on sentence boundary as fallback", () => {
+    const text = "First sentence. Second sentence. Third sentence. Fourth sentence.";
+    const chunks = chunkMessage(text, 40);
+    expect(chunks.length).toBeGreaterThan(1);
+    expect(chunks.every((c) => c.length <= 40)).toBe(true);
+  });
+
+  it("hard cuts when no good boundary exists", () => {
+    const text = "a".repeat(200);
+    const chunks = chunkMessage(text, 80);
+    expect(chunks.length).toBe(3);
+    expect(chunks.every((c) => c.length <= 80)).toBe(true);
+    expect(chunks.join("")).toBe(text);
+  });
+
+  it("preserves all content across chunks", () => {
+    const paragraphs = Array.from({ length: 20 }, (_, i) => `Paragraph ${i + 1} with some text.`);
+    const text = paragraphs.join("\n\n");
+    const chunks = chunkMessage(text, 100);
+    const reassembled = chunks.join("\n\n");
+    for (const p of paragraphs) {
+      expect(reassembled).toContain(p);
+    }
+  });
+
+  it("uses default 4096 limit", () => {
+    const short = "a".repeat(4096);
+    expect(chunkMessage(short)).toEqual([short]);
+
+    const long = "a".repeat(4097);
+    expect(chunkMessage(long).length).toBe(2);
   });
 });

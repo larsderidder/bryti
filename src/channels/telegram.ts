@@ -106,6 +106,117 @@ export function markdownToHtml(text: string): string {
   return converted.join("").trim();
 }
 
+/** Telegram's maximum message length in characters. */
+const MAX_MESSAGE_LENGTH = 4096;
+
+/** Maximum retry attempts for send/edit operations. */
+const MAX_SEND_RETRIES = 3;
+
+/** Base delay for retry backoff in milliseconds. */
+const RETRY_BASE_DELAY_MS = 1000;
+
+/**
+ * Split text into chunks that fit within Telegram's message limit.
+ *
+ * Strategy: split on double newlines (paragraphs) first, then single newlines,
+ * then sentence boundaries, then hard-cut at the limit. Tries to keep code
+ * blocks intact when possible.
+ */
+export function chunkMessage(text: string, maxLength = MAX_MESSAGE_LENGTH): string[] {
+  if (text.length <= maxLength) {
+    return [text];
+  }
+
+  const chunks: string[] = [];
+  let remaining = text;
+
+  while (remaining.length > 0) {
+    if (remaining.length <= maxLength) {
+      chunks.push(remaining);
+      break;
+    }
+
+    // Find best split point within the limit
+    let splitAt = -1;
+
+    // Try double newline (paragraph boundary)
+    const lastPara = remaining.lastIndexOf("\n\n", maxLength);
+    if (lastPara > maxLength * 0.3) {
+      splitAt = lastPara;
+    }
+
+    // Try single newline
+    if (splitAt === -1) {
+      const lastNl = remaining.lastIndexOf("\n", maxLength);
+      if (lastNl > maxLength * 0.3) {
+        splitAt = lastNl;
+      }
+    }
+
+    // Try sentence boundary (. ! ?)
+    if (splitAt === -1) {
+      const slice = remaining.slice(0, maxLength);
+      const sentenceMatch = slice.match(/.*[.!?]\s/s);
+      if (sentenceMatch && sentenceMatch[0].length > maxLength * 0.3) {
+        splitAt = sentenceMatch[0].length;
+      }
+    }
+
+    // Hard cut as last resort
+    if (splitAt === -1) {
+      splitAt = maxLength;
+    }
+
+    chunks.push(remaining.slice(0, splitAt).trimEnd());
+    remaining = remaining.slice(splitAt).trimStart();
+  }
+
+  return chunks;
+}
+
+/**
+ * Retry a Telegram API call with exponential backoff.
+ * Respects Telegram's retry_after header on 429 responses.
+ */
+async function withRetry<T>(
+  fn: () => Promise<T>,
+  maxRetries = MAX_SEND_RETRIES,
+  baseDelay = RETRY_BASE_DELAY_MS,
+): Promise<T> {
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      lastError = error;
+
+      if (attempt === maxRetries) break;
+
+      const err = error as Error & {
+        error_code?: number;
+        parameters?: { retry_after?: number };
+      };
+
+      // Only retry on rate limits (429) and server errors (5xx)
+      const code = err.error_code;
+      if (code && code !== 429 && (code < 500 || code >= 600)) {
+        throw error;
+      }
+
+      // Use Telegram's retry_after if provided, otherwise exponential backoff
+      const retryAfter = err.parameters?.retry_after;
+      const delayMs = retryAfter
+        ? retryAfter * 1000
+        : baseDelay * 2 ** attempt;
+
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+
+  throw lastError;
+}
+
 /**
  * Telegram bridge implementation.
  */
@@ -257,6 +368,7 @@ export class TelegramBridge implements ChannelBridge {
     }
 
     const chatId = parseInt(channelId, 10);
+    const bot = this.bot;
 
     // Stop typing indicator for this chat
     this.stopTyping(channelId);
@@ -265,11 +377,18 @@ export class TelegramBridge implements ChannelBridge {
     // caller explicitly passes pre-formatted HTML or plain text.
     const html = opts?.parseMode === "html" ? text : markdownToHtml(text);
 
-    const message = await this.bot.api.sendMessage(chatId, html, {
-      parse_mode: "HTML",
-    });
+    // Split into chunks if the message exceeds Telegram's limit
+    const chunks = chunkMessage(html);
 
-    return String(message.message_id);
+    let lastMessageId = "";
+    for (const chunk of chunks) {
+      const message = await withRetry(() =>
+        bot.api.sendMessage(chatId, chunk, { parse_mode: "HTML" }),
+      );
+      lastMessageId = String(message.message_id);
+    }
+
+    return lastMessageId;
   }
 
   async editMessage(channelId: string, messageId: string, text: string): Promise<void> {
@@ -279,11 +398,14 @@ export class TelegramBridge implements ChannelBridge {
 
     const chatId = parseInt(channelId, 10);
     const msgId = parseInt(messageId, 10);
+    const bot = this.bot;
 
     try {
-      await this.bot.api.editMessageText(chatId, msgId, markdownToHtml(text), {
-        parse_mode: "HTML",
-      });
+      await withRetry(() =>
+        bot.api.editMessageText(chatId, msgId, markdownToHtml(text), {
+          parse_mode: "HTML",
+        }),
+      );
     } catch (error) {
       // Ignore "message is not modified" errors
       const err = error as Error & { description?: string };
