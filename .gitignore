@@ -17,5 +17,12 @@ docs/internal/
 # Build outputs
 *.tsbuildinfo/
 
+# IDE
+.idea/
+
+# Scratch files
+out.txt
+out2.txt
+
 # Planning documents (in gitignored dirs)
 plans/
