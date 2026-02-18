@@ -21,6 +21,7 @@ import path from "node:path";
 import { loadConfig, ensureDataDirs, type Config } from "./config.js";
 import { createCoreMemory, type CoreMemory } from "./memory/core-memory.js";
 import { createHistoryManager, type HistoryManager, type ChatMessage } from "./history.js";
+import { warmupEmbeddings } from "./memory/embeddings.js";
 import { createTools } from "./tools/index.js";
 import { createAgentSessionFactory, type AgentSessionFactory } from "./agent.js";
 import { TelegramBridge } from "./channels/telegram.js";
@@ -157,6 +158,12 @@ async function main(): Promise<void> {
   console.log(`Providers: ${config.models.providers.map((p) => p.name).join(", ")}`);
   console.log(`Cron jobs: ${config.cron.length}`);
 
+  // Pre-load embedding model to avoid latency on the first memory operation
+  const modelsDir = path.join(config.data_dir, ".models");
+  console.log("Loading embedding model (downloading on first run)...");
+  await warmupEmbeddings(modelsDir);
+  console.log("Embedding model ready.");
+
   // Create memory and history managers
   const coreMemory = createCoreMemory(config.data_dir);
   const historyManager = createHistoryManager(config.data_dir);
@@ -177,9 +184,10 @@ async function main(): Promise<void> {
 
   // Handle incoming messages
   bridge.onMessage(async (msg: IncomingMessage) => {
-    // If already processing, queue or skip (v1: just skip)
+    // If already processing, tell the user instead of silently dropping
     if (state.isProcessing) {
-      console.log("Skipping message - already processing");
+      console.log("Busy, notifying user:", msg.text);
+      await bridge.sendMessage(msg.channelId, "Still processing your previous message, please wait...");
       return;
     }
 

@@ -27,8 +27,6 @@ export { createCoreMemoryTools };
 export { createArchivalMemoryTools };
 export { createConversationSearchTool };
 
-
-
 /**
  * Type for pibot tools (AgentTool from pi).
  */
@@ -37,11 +35,6 @@ export type PibotTool = AgentTool<any>;
 /**
  * Create all pibot tools based on configuration.
  */
-function getTogetherApiKey(config: Config): string | null {
-  const provider = config.models.providers.find((item) => item.name === "together");
-  return provider?.api_key || null;
-}
-
 export function createTools(
   config: Config,
   coreMemory: CoreMemory,
@@ -67,13 +60,12 @@ export function createTools(
   // Memory tools
   tools.push(...createCoreMemoryTools(coreMemory));
 
-  const togetherApiKey = getTogetherApiKey(config);
-  if (togetherApiKey) {
-    const archivalStore = createMemoryStore(userId, config.data_dir);
-    tools.push(
-      ...createArchivalMemoryTools(archivalStore, (text) => embed(text, togetherApiKey)),
-    );
-  }
+  // Archival memory: always available, uses local embeddings (no API key needed)
+  const modelsDir = path.join(config.data_dir, ".models");
+  const archivalStore = createMemoryStore(userId, config.data_dir);
+  tools.push(
+    ...createArchivalMemoryTools(archivalStore, (text) => embed(text, modelsDir)),
+  );
 
   tools.push(createConversationSearchTool(path.join(config.data_dir, "history")));
 

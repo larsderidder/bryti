@@ -1,90 +1,60 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { embed, embedBatch } from "./embeddings.js";
+import { describe, it, expect, vi, beforeEach } from "vitest";
+
+// Mock node-llama-cpp before importing the module under test
+vi.mock("node-llama-cpp", () => {
+  const mockVector = new Array(768).fill(0.1);
+
+  const mockCtx = {
+    getEmbeddingFor: vi.fn().mockResolvedValue({ vector: mockVector }),
+  };
+
+  const mockModel = {
+    createEmbeddingContext: vi.fn().mockResolvedValue(mockCtx),
+  };
+
+  const mockLlama = {
+    loadModel: vi.fn().mockResolvedValue(mockModel),
+  };
+
+  return {
+    getLlama: vi.fn().mockResolvedValue(mockLlama),
+    resolveModelFile: vi.fn().mockResolvedValue("/fake/path/model.gguf"),
+  };
+});
+
+// Import after mocking
+const { embed, embedBatch } = await import("./embeddings.js");
 
 describe("embeddings", () => {
-  const apiKey = "test-key";
-
   beforeEach(() => {
-    vi.restoreAllMocks();
+    vi.clearAllMocks();
   });
 
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
-  it("returns embedding vector of expected length", async () => {
-    const embedding = new Array(768).fill(0.1);
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ data: [{ embedding }] }),
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    const result = await embed("hello world", apiKey);
-
-    expect(result).toHaveLength(768);
-    expect(fetchMock).toHaveBeenCalledOnce();
-  });
-
-  it("supports batch embeddings", async () => {
-    const embeddingA = new Array(768).fill(0.2);
-    const embeddingB = new Array(768).fill(0.3);
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ data: [{ embedding: embeddingA }, { embedding: embeddingB }] }),
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    const result = await embedBatch(["one", "two"], apiKey);
-
-    expect(result).toHaveLength(2);
-    expect(result[0]).toHaveLength(768);
+  it("returns embedding vector", async () => {
+    const result = await embed("hello world");
+    expect(Array.isArray(result)).toBe(true);
+    expect(result.length).toBeGreaterThan(0);
   });
 
   it("throws on empty input", async () => {
-    await expect(embed("", apiKey)).rejects.toThrow("Embedding input is empty");
+    await expect(embed("")).rejects.toThrow("Embedding input is empty");
+    await expect(embed("   ")).rejects.toThrow("Embedding input is empty");
   });
 
-  it("throws on API error response", async () => {
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: false,
-      status: 401,
-      statusText: "Unauthorized",
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    await expect(embed("hello", apiKey)).rejects.toThrow("Embedding API error: 401 Unauthorized");
+  it("embedBatch returns one vector per text", async () => {
+    const result = await embedBatch(["one", "two", "three"]);
+    expect(result).toHaveLength(3);
+    for (const vec of result) {
+      expect(Array.isArray(vec)).toBe(true);
+    }
   });
 
-  it("throws on network error", async () => {
-    const fetchMock = vi.fn().mockRejectedValue(new Error("Network down"));
-    vi.stubGlobal("fetch", fetchMock);
-
-    await expect(embed("hello", apiKey)).rejects.toThrow(
-      "Embedding API request failed: Network down",
-    );
+  it("embedBatch returns empty array for empty input", async () => {
+    const result = await embedBatch([]);
+    expect(result).toEqual([]);
   });
 
-  it("throws on timeout", async () => {
-    vi.useFakeTimers();
-    const fetchMock = vi.fn().mockImplementation((_url: string, options: RequestInit) => {
-      return new Promise((_resolve, reject) => {
-        const signal = options.signal as AbortSignal | undefined;
-        if (signal) {
-          signal.addEventListener("abort", () => {
-            const error = new Error("Aborted");
-            error.name = "AbortError";
-            reject(error);
-          });
-        }
-      });
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    const promise = embed("hello", apiKey);
-    const expectation = expect(promise).rejects.toThrow("Embedding API request timed out");
-
-    await vi.advanceTimersByTimeAsync(15000);
-    await expectation;
+  it("embedBatch throws if any text is empty", async () => {
+    await expect(embedBatch(["valid", ""])).rejects.toThrow("Embedding input is empty");
   });
 });

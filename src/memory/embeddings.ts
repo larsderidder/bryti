@@ -1,84 +1,106 @@
 /**
- * Generate embeddings via Together API.
+ * Local embeddings via node-llama-cpp.
+ *
+ * Uses a small GGUF embedding model downloaded on first use.
+ * No external API key required.
+ *
+ * The model and embedding context are loaded once and reused across calls.
+ * Model files are stored in `<dataDir>/.models/`.
  */
 
-const EMBEDDING_MODEL = "togethercomputer/m2-bert-80M-8k-retrieval";
-const REQUEST_TIMEOUT_MS = 15000;
+import { getLlama, resolveModelFile } from "node-llama-cpp";
+import type { LlamaEmbeddingContext } from "node-llama-cpp";
 
-interface TogetherEmbeddingResponse {
-  data: Array<{ embedding: number[] }>;
-}
+const EMBEDDING_MODEL_URI =
+  "hf:ggml-org/embeddinggemma-300M-GGUF/embeddinggemma-300M-f16.gguf";
 
-function ensureNonEmpty(text: string): void {
-  if (!text.trim()) {
-    throw new Error("Embedding input is empty");
+let embeddingContext: LlamaEmbeddingContext | null = null;
+let initPromise: Promise<LlamaEmbeddingContext> | null = null;
+
+/**
+ * Initialize and return the embedding context, loading the model on first call.
+ * Subsequent calls return the cached context.
+ */
+async function getEmbeddingContext(modelsDir?: string): Promise<LlamaEmbeddingContext> {
+  if (embeddingContext !== null) {
+    return embeddingContext;
   }
-}
 
-async function requestEmbeddings(input: string | string[], apiKey: string): Promise<number[][]> {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  if (initPromise !== null) {
+    return initPromise;
+  }
 
-  try {
-    const response = await fetch("https://api.together.xyz/v1/embeddings", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
+  initPromise = (async () => {
+    const llama = await getLlama({ gpu: "auto" });
+
+    const modelPath = await resolveModelFile(EMBEDDING_MODEL_URI, {
+      directory: modelsDir,
+      cli: false,
+      onProgress({ totalSize, downloadedSize }) {
+        const pct = totalSize > 0 ? Math.round((downloadedSize / totalSize) * 100) : 0;
+        process.stdout.write(`\rDownloading embedding model: ${pct}%`);
       },
-      body: JSON.stringify({
-        model: EMBEDDING_MODEL,
-        input,
-      }),
-      signal: controller.signal,
     });
+    process.stdout.write("\n");
 
-    if (!response.ok) {
-      throw new Error(`Embedding API error: ${response.status} ${response.statusText}`);
-    }
+    const model = await llama.loadModel({ modelPath });
+    const ctx = await model.createEmbeddingContext();
 
-    const data = (await response.json()) as TogetherEmbeddingResponse;
-    if (!data.data || data.data.length === 0) {
-      throw new Error("Embedding API returned no data");
-    }
+    embeddingContext = ctx;
+    return ctx;
+  })();
 
-    return data.data.map((item) => item.embedding);
-  } catch (error) {
-    const err = error as Error;
-    if (err.name === "AbortError") {
-      throw new Error("Embedding API request timed out");
-    }
-
-    if (err.message.startsWith("Embedding API error:")) {
-      throw err;
-    }
-
-    throw new Error(`Embedding API request failed: ${err.message}`);
-  } finally {
-    clearTimeout(timeoutId);
-  }
+  return initPromise;
 }
 
 /**
  * Generate an embedding for a single text.
+ *
+ * @param text Input text (must be non-empty)
+ * @param modelsDir Directory to store/load the model (defaults to node-llama-cpp global dir)
  */
-export async function embed(text: string, apiKey: string): Promise<number[]> {
-  ensureNonEmpty(text);
-  const embeddings = await requestEmbeddings(text, apiKey);
-  return embeddings[0];
+export async function embed(text: string, modelsDir?: string): Promise<number[]> {
+  if (!text.trim()) {
+    throw new Error("Embedding input is empty");
+  }
+
+  const ctx = await getEmbeddingContext(modelsDir);
+  const result = await ctx.getEmbeddingFor(text);
+  return Array.from(result.vector);
 }
 
 /**
- * Batch embed multiple texts in one call.
+ * Generate embeddings for multiple texts.
+ * Calls embed() sequentially; the model is fast enough on CPU that batching
+ * provides no meaningful advantage here.
+ *
+ * @param texts Array of input texts (each must be non-empty)
+ * @param modelsDir Directory to store/load the model
  */
-export async function embedBatch(texts: string[], apiKey: string): Promise<number[][]> {
+export async function embedBatch(texts: string[], modelsDir?: string): Promise<number[][]> {
   if (texts.length === 0) {
     return [];
   }
 
   for (const text of texts) {
-    ensureNonEmpty(text);
+    if (!text.trim()) {
+      throw new Error("Embedding input is empty");
+    }
   }
 
-  return requestEmbeddings(texts, apiKey);
+  const results: number[][] = [];
+  for (const text of texts) {
+    results.push(await embed(text, modelsDir));
+  }
+  return results;
+}
+
+/**
+ * Pre-load the embedding model. Call this at startup to avoid latency on the
+ * first memory operation.
+ *
+ * @param modelsDir Directory to store/load the model
+ */
+export async function warmupEmbeddings(modelsDir?: string): Promise<void> {
+  await getEmbeddingContext(modelsDir);
 }
