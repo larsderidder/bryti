@@ -25,11 +25,17 @@ import { createCoreMemory, type CoreMemory } from "./memory/core-memory.js";
 import { createHistoryManager, type HistoryManager } from "./history.js";
 import { warmupEmbeddings } from "./memory/embeddings.js";
 import { createTools } from "./tools/index.js";
-import { loadUserSession, repairSessionTranscript, type UserSession } from "./agent.js";
+import { loadUserSession, repairSessionTranscript, promptWithFallback, type UserSession } from "./agent.js";
 import { TelegramBridge } from "./channels/telegram.js";
 import { createCronScheduler, type CronScheduler } from "./cron.js";
 import { MessageQueue } from "./message-queue.js";
 import type { IncomingMessage, ChannelBridge } from "./channels/types.js";
+import {
+  calculateCostUsd,
+  createUsageTracker,
+  resolveModelCost,
+  type UsageTracker,
+} from "./usage.js";
 
 /**
  * Application state.
@@ -38,10 +44,49 @@ interface AppState {
   config: Config;
   coreMemory: CoreMemory;
   historyManager: HistoryManager;
+  usageTracker: UsageTracker;
   /** Persistent session cache: one session per userId. */
   sessions: Map<string, UserSession>;
   bridge: ChannelBridge;
   cronScheduler: CronScheduler;
+}
+
+interface AssistantMessageLike {
+  role: "assistant";
+  content?: unknown;
+  stopReason?: string;
+  errorMessage?: string;
+  provider?: string;
+  model?: string;
+  usage?: {
+    input?: number;
+    output?: number;
+    cost?: {
+      total?: number;
+    };
+  };
+}
+
+function toAssistantMessage(message: unknown): AssistantMessageLike | undefined {
+  if (!message || typeof message !== "object") {
+    return undefined;
+  }
+  const candidate = message as { role?: unknown };
+  if (candidate.role !== "assistant") {
+    return undefined;
+  }
+  return message as AssistantMessageLike;
+}
+
+function modelNameForLog(
+  provider: string | undefined,
+  model: string | undefined,
+  fallback: string,
+): string {
+  if (provider && model) {
+    return `${provider}/${model}`;
+  }
+  return model || fallback;
 }
 
 /**
@@ -120,14 +165,46 @@ async function processMessage(
       content: msg.text,
     });
 
-    // Prompt the agent (session persists automatically via SessionManager)
-    await session.prompt(msg.text);
+    // Prompt the agent, with automatic fallback to other models if the primary fails
+    const promptStart = Date.now();
+    await promptWithFallback(
+      session,
+      msg.text,
+      state.config,
+      userSession.modelRegistry,
+      msg.userId,
+    );
+    const latencyMs = Date.now() - promptStart;
 
     // Extract the last assistant response
-    const messages = session.messages;
-    const lastAssistant = messages
-      .filter((m) => m.role === "assistant")
-      .pop() as Record<string, unknown> | undefined;
+    const lastAssistant = toAssistantMessage(
+      session.messages.filter((m) => m.role === "assistant").pop(),
+    );
+
+    const inputTokens = lastAssistant?.usage?.input ?? 0;
+    const outputTokens = lastAssistant?.usage?.output ?? 0;
+    const model = modelNameForLog(
+      lastAssistant?.provider,
+      lastAssistant?.model,
+      state.config.agent.model,
+    );
+    const costConfig = resolveModelCost(
+      state.config,
+      lastAssistant?.provider,
+      lastAssistant?.model ?? state.config.agent.model,
+    );
+    const costUsd = costConfig
+      ? calculateCostUsd(inputTokens, outputTokens, costConfig)
+      : (lastAssistant?.usage?.cost?.total ?? 0);
+
+    await state.usageTracker.append({
+      user_id: msg.userId,
+      model,
+      input_tokens: inputTokens,
+      output_tokens: outputTokens,
+      cost_usd: costUsd,
+      latency_ms: latencyMs,
+    });
 
     if (lastAssistant?.stopReason === "error") {
       const errorMsg = String(lastAssistant.errorMessage ?? "Unknown model error");
@@ -186,6 +263,7 @@ async function main(): Promise<void> {
 
   const coreMemory = createCoreMemory(config.data_dir);
   const historyManager = createHistoryManager(config.data_dir);
+  const usageTracker = createUsageTracker(config.data_dir);
 
   const bridge = new TelegramBridge(config.telegram.token, config.telegram.allowed_users);
 
@@ -193,6 +271,7 @@ async function main(): Promise<void> {
     config,
     coreMemory,
     historyManager,
+    usageTracker,
     sessions: new Map(),
     bridge,
     cronScheduler: null!,

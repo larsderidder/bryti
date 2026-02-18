@@ -37,6 +37,8 @@ export interface Config {
     name: string;
     system_prompt: string;
     model: string;
+    /** Ordered list of fallback model strings to try when the primary fails. */
+    fallback_models: string[];
   };
   telegram: {
     token: string;
@@ -55,6 +57,34 @@ export interface Config {
   };
   cron: CronJob[];
   data_dir: string;
+}
+
+function toFiniteNumber(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+  return undefined;
+}
+
+function normalizeModelCost(cost: unknown): ModelEntry["cost"] | undefined {
+  if (!cost || typeof cost !== "object") {
+    return undefined;
+  }
+  const raw = cost as { input?: unknown; output?: unknown };
+  const hasAny = raw.input !== undefined || raw.output !== undefined;
+  if (!hasAny) {
+    return undefined;
+  }
+  return {
+    input: toFiniteNumber(raw.input) ?? 0,
+    output: toFiniteNumber(raw.output) ?? 0,
+  };
 }
 
 /**
@@ -108,6 +138,7 @@ export function loadConfig(configPath?: string): Config {
       name: "Pibot",
       system_prompt: "You are a helpful personal assistant.",
       model: "",
+      fallback_models: [],
       ...(substituted.agent as object),
     },
     telegram: {
@@ -131,6 +162,13 @@ export function loadConfig(configPath?: string): Config {
     data_dir: dataDir,
   };
 
+  for (const provider of config.models.providers) {
+    provider.models = provider.models.map((model) => ({
+      ...model,
+      cost: normalizeModelCost(model.cost),
+    }));
+  }
+
   // Validate required fields
   if (!config.telegram.token && !config.whatsapp.enabled) {
     throw new Error("Config: telegram.token is required (or enable whatsapp)");
@@ -153,6 +191,7 @@ export function ensureDataDirs(config: Config): void {
     config.data_dir,
     path.join(config.data_dir, "history"),
     path.join(config.data_dir, "files"),
+    path.join(config.data_dir, "usage"),
   ];
 
   // WhatsApp auth directory (always create in case user adds WhatsApp later)

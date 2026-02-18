@@ -24,7 +24,8 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import type { AgentTool } from "@mariozechner/pi-agent-core";
+import type { AgentMessage, AgentTool } from "@mariozechner/pi-agent-core";
+import type { Model } from "@mariozechner/pi-ai";
 import {
   createAgentSession,
   AuthStorage,
@@ -45,6 +46,8 @@ import { repairToolUseResultPairing } from "./compaction/transcript-repair.js";
 export interface UserSession {
   /** The underlying pi AgentSession. */
   session: AgentSession;
+  /** Model registry, used by promptWithFallback() to resolve fallback models. */
+  modelRegistry: ModelRegistry;
   /** User this session belongs to. */
   userId: string;
   /** Path to the session file on disk. */
@@ -170,7 +173,9 @@ export async function loadUserSession(
   let model = modelRegistry.find(providerName, modelId);
   if (!model) {
     const available = modelRegistry.getAvailable();
-    model = available.find((m) => m.provider === providerName || m.id.includes(modelId));
+    model = available.find(
+      (m) => m.provider === providerName && m.id.includes(modelId),
+    );
   }
   if (!model) {
     throw new Error(
@@ -248,6 +253,7 @@ export async function loadUserSession(
 
   return {
     session,
+    modelRegistry,
     userId,
     sessionFile: sessFile,
     dispose() {
@@ -279,6 +285,139 @@ export function repairSessionTranscript(session: AgentSession, userId: string): 
       `droppedOrphans=${report.droppedOrphanCount}`,
     );
   }
+}
+
+/**
+ * Resolve a "provider/modelId" string against the model registry.
+ * Returns null if the model is not found in the registry.
+ */
+export function resolveModel(
+  modelString: string,
+  modelRegistry: ModelRegistry,
+): Model<any> | null {
+  const [providerName, modelId] = modelString.includes("/")
+    ? modelString.split("/")
+    : [modelString, modelString];
+
+  let model = modelRegistry.find(providerName, modelId);
+  if (!model) {
+    const available = modelRegistry.getAvailable();
+    // Secondary lookup: same provider + model id substring match
+    model = available.find(
+      (m) => m.provider === providerName && m.id.includes(modelId),
+    );
+  }
+  return model ?? null;
+}
+
+/**
+ * Result of a prompt attempt in the fallback chain.
+ */
+export interface FallbackResult {
+  /** The model string that ultimately succeeded. */
+  modelUsed: string;
+  /** Number of models tried before success (0 = primary succeeded). */
+  fallbacksUsed: number;
+}
+
+/**
+ * Detect whether pi gave up on a prompt.
+ *
+ * Two failure signals from pi:
+ * - `session.prompt()` throws (network-level failure after all retries)
+ * - Last assistant message has `stopReason === "error"` (model-level failure)
+ *
+ * We treat both as "try the next model."
+ */
+function didPromptFail(
+  session: AgentSession,
+  thrownError: unknown,
+): { failed: boolean; reason: string } {
+  if (thrownError) {
+    const msg = thrownError instanceof Error ? thrownError.message : String(thrownError);
+    return { failed: true, reason: msg };
+  }
+
+  const lastAssistant = session.messages
+    .filter((m: AgentMessage) => m.role === "assistant")
+    .pop() as Record<string, unknown> | undefined;
+
+  if (lastAssistant?.stopReason === "error") {
+    return {
+      failed: true,
+      reason: String(lastAssistant.errorMessage ?? "model error"),
+    };
+  }
+
+  return { failed: false, reason: "" };
+}
+
+/**
+ * Send a prompt, trying the primary model first then each fallback in order.
+ *
+ * On failure the session's model is switched via `session.setModel()` so the
+ * persistent session file stays intact. If all candidates fail, the last error
+ * is thrown.
+ *
+ * @param session   The user's persistent session
+ * @param text      The prompt text
+ * @param config    App config (for the fallback list)
+ * @param modelRegistry  Registry used to resolve model strings to Model objects
+ * @param userId    For logging
+ */
+export async function promptWithFallback(
+  session: AgentSession,
+  text: string,
+  config: Config,
+  modelRegistry: ModelRegistry,
+  userId: string,
+): Promise<FallbackResult> {
+  const candidates = [config.agent.model, ...(config.agent.fallback_models ?? [])];
+  let lastError: unknown;
+  let lastReason = "";
+
+  for (let i = 0; i < candidates.length; i++) {
+    const modelString = candidates[i];
+
+    // Switch the session to this model if it's not already using it
+    if (i > 0) {
+      const model = resolveModel(modelString, modelRegistry);
+      if (!model) {
+        console.warn(`Fallback model not found in registry, skipping: ${modelString}`);
+        continue;
+      }
+      console.log(
+        `[fallback] Switching to model ${modelString} for user ${userId} ` +
+        `(previous error: ${lastReason})`,
+      );
+      await session.setModel(model);
+    }
+
+    let thrownError: unknown = null;
+    try {
+      await session.prompt(text);
+    } catch (err) {
+      thrownError = err;
+    }
+
+    const { failed, reason } = didPromptFail(session, thrownError);
+
+    if (!failed) {
+      if (i > 0) {
+        console.log(`[fallback] Succeeded with model ${modelString} for user ${userId}`);
+      }
+      return { modelUsed: modelString, fallbacksUsed: i };
+    }
+
+    lastError = thrownError ?? new Error(reason);
+    lastReason = reason;
+    console.warn(
+      `[fallback] Model ${modelString} failed for user ${userId}: ${reason}` +
+      (i < candidates.length - 1 ? ", trying next..." : ", all models exhausted"),
+    );
+  }
+
+  throw lastError ?? new Error("All models in fallback chain failed");
 }
 
 /**
