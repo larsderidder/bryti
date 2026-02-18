@@ -198,7 +198,13 @@ export function createProjectionStore(userId: string, dataDir: string): Projecti
     WHERE status = 'pending'
       AND resolution != 'someday'
       AND resolved_when IS NOT NULL
-      AND resolved_when < datetime('now', ? || ' hours')
+      AND (
+        -- Exact-time items expire after 1 hour (they either fired or were missed)
+        (resolution = 'exact' AND resolved_when < datetime('now', '-1 hours'))
+        OR
+        -- Day/week/month items expire after the configured threshold
+        (resolution != 'exact' AND resolved_when < datetime('now', ? || ' hours'))
+      )
   `);
 
   return {

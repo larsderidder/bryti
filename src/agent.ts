@@ -347,7 +347,8 @@ export async function loadUserSession(
     }
   }
 
-  // Log compaction events
+  // Log compaction and tool call events
+  const toolCallCounts = new Map<string, number>();
   const unsubscribe = session.subscribe((event: AgentSessionEvent) => {
     if (event.type === "auto_compaction_start") {
       console.log(`[compaction] starting (reason: ${event.reason}) for user ${userId}`);
@@ -362,6 +363,10 @@ export async function loadUserSession(
       } else if (event.errorMessage) {
         console.error(`[compaction] failed for user ${userId}: ${event.errorMessage}`);
       }
+    } else if (event.type === "tool_execution_start") {
+      const name = event.toolName ?? "unknown";
+      toolCallCounts.set(name, (toolCallCounts.get(name) ?? 0) + 1);
+      console.log(`[tool] ${name} called (total this session: ${toolCallCounts.get(name)})`);
     }
   });
 
