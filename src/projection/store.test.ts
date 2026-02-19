@@ -214,58 +214,58 @@ describe("createProjectionStore", () => {
   // checkTriggers
   // ---------------------------------------------------------------------------
 
-  it("checkTriggers activates a projection when fact contains all trigger keywords", () => {
+  it("checkTriggers activates a projection when fact contains all trigger keywords", async () => {
     const id = store.add({
       summary: "Book time off after dentist confirms",
       trigger_on_fact: "dentist confirmed",
     });
 
-    const activated = store.checkTriggers("dentist confirmed for Thursday 11am");
+    const activated = await store.checkTriggers("dentist confirmed for Thursday 11am");
     expect(activated).toHaveLength(1);
     expect(activated[0].id).toBe(id);
     expect(activated[0].resolution).toBe("exact");
     expect(activated[0].trigger_on_fact).toBeNull();
   });
 
-  it("checkTriggers does not activate when keywords are missing", () => {
+  it("checkTriggers does not activate when keywords are missing", async () => {
     store.add({
       summary: "Book time off",
       trigger_on_fact: "dentist confirmed",
     });
 
-    const activated = store.checkTriggers("doctor appointment scheduled");
+    const activated = await store.checkTriggers("doctor appointment scheduled");
     expect(activated).toHaveLength(0);
   });
 
-  it("checkTriggers is case-insensitive", () => {
+  it("checkTriggers is case-insensitive", async () => {
     const id = store.add({
       summary: "Follow-up call",
       trigger_on_fact: "Contract Signed",
     });
 
-    const activated = store.checkTriggers("contract signed by both parties");
+    const activated = await store.checkTriggers("contract signed by both parties");
     expect(activated).toHaveLength(1);
     expect(activated[0].id).toBe(id);
   });
 
-  it("checkTriggers requires all keywords to be present", () => {
+  it("checkTriggers requires all keywords to be present", async () => {
     store.add({
       summary: "Send invoice",
       trigger_on_fact: "project complete",
     });
 
     // Only one of the two keywords present
-    const activated = store.checkTriggers("project started today");
+    const activated = await store.checkTriggers("project started today");
     expect(activated).toHaveLength(0);
   });
 
-  it("checkTriggers clears trigger_on_fact after activation", () => {
+  it("checkTriggers clears trigger_on_fact after activation", async () => {
     const id = store.add({
       summary: "Buy flowers",
       trigger_on_fact: "anniversary",
     });
 
-    store.checkTriggers("wedding anniversary confirmed for Saturday");
+    await store.checkTriggers("wedding anniversary confirmed for Saturday");
 
     // The projection is now pending with resolved_when=now — it should still
     // appear in upcoming but with no trigger_on_fact.
@@ -275,21 +275,59 @@ describe("createProjectionStore", () => {
     expect(p!.trigger_on_fact).toBeNull();
   });
 
-  it("checkTriggers does not activate already-resolved projections", () => {
+  it("checkTriggers does not activate already-resolved projections", async () => {
     const id = store.add({
       summary: "Send thank-you",
       trigger_on_fact: "meeting done",
     });
     store.resolve(id, "done");
 
-    const activated = store.checkTriggers("meeting done yesterday");
+    const activated = await store.checkTriggers("meeting done yesterday");
     expect(activated).toHaveLength(0);
   });
 
-  it("checkTriggers returns empty array when no projections have triggers", () => {
+  it("checkTriggers returns empty array when no projections have triggers", async () => {
     store.add({ summary: "Time-based event", resolved_when: isoHoursFromNow(2), resolution: "exact" });
 
-    const activated = store.checkTriggers("anything");
+    const activated = await store.checkTriggers("anything");
+    expect(activated).toHaveLength(0);
+  });
+
+  it("checkTriggers falls back to embedding similarity when keywords miss", async () => {
+    const id = store.add({
+      summary: "Send invoice",
+      trigger_on_fact: "project complete",
+    });
+
+    // "completed the project" doesn't keyword-match "project complete"
+    // but embedding similarity should catch it.
+    const fakeEmbed = async (_text: string) => {
+      // Return similar vectors regardless of input for this test.
+      return new Array(768).fill(0.5);
+    };
+
+    const activated = await store.checkTriggers("completed the project successfully", fakeEmbed, 0.5);
+    expect(activated).toHaveLength(1);
+    expect(activated[0].id).toBe(id);
+  });
+
+  it("checkTriggers does not activate via embedding when similarity is below threshold", async () => {
+    store.add({
+      summary: "Send invoice",
+      trigger_on_fact: "project complete",
+    });
+
+    // Return orthogonal vectors to simulate low similarity.
+    let callCount = 0;
+    const fakeEmbed = async (_text: string) => {
+      callCount++;
+      const vec = new Array(768).fill(0);
+      // First call (fact) and second call (trigger) get different vectors.
+      vec[callCount % 768] = 1;
+      return vec;
+    };
+
+    const activated = await store.checkTriggers("something completely unrelated", fakeEmbed, 0.5);
     expect(activated).toHaveLength(0);
   });
 

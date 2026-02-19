@@ -44,7 +44,8 @@ export function createArchivalMemoryTools(
         store.addFact(content, "archival", embedding);
 
         // Check whether the new fact activates any waiting trigger-based projections.
-        const triggered = projectionStore ? projectionStore.checkTriggers(content) : [];
+        // Pass embed for cosine similarity fallback when keyword matching fails.
+        const triggered = projectionStore ? await projectionStore.checkTriggers(content, embed) : [];
 
         if (triggered.length > 0) {
           const summaries = triggered.map((p) => p.summary);

@@ -10,6 +10,7 @@
  */
 
 import Database from "better-sqlite3";
+import { cosineSimilarity } from "../math.js";
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
@@ -39,26 +40,7 @@ export interface MemoryStore {
   close(): void;
 }
 
-/**
- * Compute cosine similarity between two vectors.
- */
-function cosineSimilarity(a: number[], b: number[]): number {
-  let dotProduct = 0;
-  let normA = 0;
-  let normB = 0;
 
-  for (let i = 0; i < a.length; i++) {
-    dotProduct += a[i] * b[i];
-    normA += a[i] * a[i];
-    normB += b[i] * b[i];
-  }
-
-  if (normA === 0 || normB === 0) {
-    return 0;
-  }
-
-  return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
-}
 
 function serializeEmbedding(embedding: number[]): Buffer {
   return Buffer.from(new Float32Array(embedding).buffer);

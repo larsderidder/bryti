@@ -17,7 +17,7 @@ const createMockProjectionStore = (triggered: Projection[] = []): ProjectionStor
   getExactDue: vi.fn().mockReturnValue([]),
   resolve: vi.fn().mockReturnValue(true),
   rearm: vi.fn().mockReturnValue(true),
-  checkTriggers: vi.fn().mockReturnValue(triggered),
+  checkTriggers: vi.fn().mockResolvedValue(triggered),
   autoExpire: vi.fn().mockReturnValue(0),
   linkDependency: vi.fn().mockReturnValue("dep-id"),
   evaluateDependencies: vi.fn().mockReturnValue(0),
@@ -47,7 +47,7 @@ describe("ArchivalMemoryTools", () => {
     const insertTool = tools.find((tool) => tool.name === "archival_memory_insert")!;
     await insertTool.execute("call1", { content: "dentist confirmed for Thursday" });
 
-    expect(projStore.checkTriggers).toHaveBeenCalledWith("dentist confirmed for Thursday");
+    expect(projStore.checkTriggers).toHaveBeenCalledWith("dentist confirmed for Thursday", embed);
   });
 
   it("returns triggered projection summaries in the result when triggers fire", async () => {

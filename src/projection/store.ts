@@ -28,6 +28,7 @@ import Database from "better-sqlite3";
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
+import { cosineSimilarity } from "../math.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -108,11 +109,17 @@ export interface ProjectionStore {
 
   /**
    * Check pending projections whose trigger_on_fact condition matches the given
-   * fact content (keyword match). Activate each match by setting resolved_when
-   * to now and resolution to 'exact', then clear its trigger_on_fact.
+   * fact content. First tries keyword matching (all keywords present). For
+   * non-matches, falls back to embedding cosine similarity if an embed function
+   * is provided. Activate each match by setting resolved_when to now and
+   * resolution to 'exact', then clear its trigger_on_fact.
    * Returns the list of projections that were activated.
    */
-  checkTriggers(factContent: string): Projection[];
+  checkTriggers(
+    factContent: string,
+    embed?: (text: string) => Promise<number[]>,
+    similarityThreshold?: number,
+  ): Promise<Projection[]>;
 
   /**
    * Auto-expire projections whose resolved_when has passed by more than
@@ -541,7 +548,7 @@ export function createProjectionStore(userId: string, dataDir: string): Projecti
       return result.changes > 0;
     },
 
-    checkTriggers(factContent) {
+    async checkTriggers(factContent, embed?, similarityThreshold = 0.55) {
       const candidates = stmtPendingWithTriggers.all() as ProjectionRow[];
       if (candidates.length === 0) return [];
 
@@ -549,24 +556,43 @@ export function createProjectionStore(userId: string, dataDir: string): Projecti
       const factLower = factContent.toLowerCase();
 
       const activated: Projection[] = [];
+      const embeddingFallback: ProjectionRow[] = [];
+
       for (const row of candidates) {
         const trigger = row.trigger_on_fact!.toLowerCase().trim();
         if (!trigger) continue;
 
-        // Split trigger into individual keywords (non-alpha sequences are delimiters).
-        // A match fires when ALL keywords appear in the fact content.
+        // Fast path: keyword match (all keywords present in fact content).
         const keywords = trigger.split(/\W+/).filter(Boolean);
         const allPresent = keywords.every((kw) => factLower.includes(kw));
 
         if (allPresent) {
           const result = stmtActivateTrigger.run(row.id) as { changes: number };
           if (result.changes > 0) {
-            // Re-read the updated row so the returned projection reflects the new state.
             const updated = { ...row, resolved_when: new Date().toISOString().slice(0, 16).replace("T", " "), resolution: "exact", trigger_on_fact: null };
             activated.push(rowToProjection(updated as ProjectionRow));
           }
+        } else if (embed) {
+          embeddingFallback.push(row);
         }
       }
+
+      // Slow path: embedding similarity for keyword misses.
+      if (embeddingFallback.length > 0 && embed) {
+        const factVec = await embed(factContent);
+        for (const row of embeddingFallback) {
+          const triggerVec = await embed(row.trigger_on_fact!);
+          const sim = cosineSimilarity(factVec, triggerVec);
+          if (sim >= similarityThreshold) {
+            const result = stmtActivateTrigger.run(row.id) as { changes: number };
+            if (result.changes > 0) {
+              const updated = { ...row, resolved_when: new Date().toISOString().slice(0, 16).replace("T", " "), resolution: "exact", trigger_on_fact: null };
+              activated.push(rowToProjection(updated as ProjectionRow));
+            }
+          }
+        }
+      }
+
       return activated;
     },
 
