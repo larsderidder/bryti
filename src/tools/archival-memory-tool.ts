@@ -7,6 +7,7 @@ import type { Static } from "@sinclair/typebox";
 import { Type } from "@sinclair/typebox";
 import { createHybridSearch } from "../memory/search.js";
 import type { MemoryStore } from "../memory/store.js";
+import type { ProjectionStore } from "../projection/store.js";
 import { toolError, toolSuccess } from "./result.js";
 
 const archivalMemoryInsertSchema = Type.Object({
@@ -24,6 +25,7 @@ type ArchivalMemorySearchInput = Static<typeof archivalMemorySearchSchema>;
 export function createArchivalMemoryTools(
   store: MemoryStore,
   embed: (text: string) => Promise<number[]>,
+  projectionStore?: ProjectionStore,
 ): AgentTool<any>[] {
   const hybridSearch = createHybridSearch(store, embed);
 
@@ -40,6 +42,15 @@ export function createArchivalMemoryTools(
       try {
         const embedding = await embed(content);
         store.addFact(content, "archival", embedding);
+
+        // Check whether the new fact activates any waiting trigger-based projections.
+        const triggered = projectionStore ? projectionStore.checkTriggers(content) : [];
+
+        if (triggered.length > 0) {
+          const summaries = triggered.map((p) => p.summary);
+          return toolSuccess({ success: true, triggered: summaries });
+        }
+
         return toolSuccess({ success: true });
       } catch (error) {
         return toolError(error);

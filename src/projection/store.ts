@@ -20,6 +20,8 @@
  *   status        - pending | done | cancelled | passed
  *   created_at    - ISO datetime
  *   resolved_at   - ISO datetime when status changed from pending
+ *   trigger_on_fact - keyword/phrase that activates this projection when a matching
+ *                     fact is archived, or null for time-driven projections
  */
 
 import Database from "better-sqlite3";
@@ -57,6 +59,7 @@ export interface Projection {
   resolved_when: string | null;
   resolution: ProjectionResolution;
   recurrence: string | null;
+  trigger_on_fact: string | null;
   context: string | null;
   linked_ids: string[];
   status: ProjectionStatus;
@@ -72,6 +75,7 @@ export interface ProjectionStore {
     resolved_when?: string;
     resolution?: ProjectionResolution;
     recurrence?: string;
+    trigger_on_fact?: string;
     context?: string;
     linked_ids?: string[];
     depends_on?: ProjectionDependencyInput[];
@@ -101,6 +105,14 @@ export interface ProjectionStore {
    * Returns false if the id does not exist.
    */
   rearm(id: string, nextResolvedWhen: string): boolean;
+
+  /**
+   * Check pending projections whose trigger_on_fact condition matches the given
+   * fact content (keyword match). Activate each match by setting resolved_when
+   * to now and resolution to 'exact', then clear its trigger_on_fact.
+   * Returns the list of projections that were activated.
+   */
+  checkTriggers(factContent: string): Projection[];
 
   /**
    * Auto-expire projections whose resolved_when has passed by more than
@@ -143,6 +155,7 @@ interface ProjectionRow {
   resolved_when: string | null;
   resolution: string;
   recurrence: string | null;
+  trigger_on_fact: string | null;
   context: string | null;
   linked_ids: string | null;
   status: string;
@@ -175,6 +188,7 @@ function rowToProjection(row: ProjectionRow): Projection {
     resolved_when: row.resolved_when,
     resolution: row.resolution as ProjectionResolution,
     recurrence: row.recurrence,
+    trigger_on_fact: row.trigger_on_fact,
     context: row.context,
     linked_ids,
     status: row.status as ProjectionStatus,
@@ -212,17 +226,18 @@ export function createProjectionStore(userId: string, dataDir: string): Projecti
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS projections (
-      id           TEXT PRIMARY KEY,
-      summary      TEXT NOT NULL,
-      raw_when     TEXT,
-      resolved_when TEXT,
-      resolution   TEXT NOT NULL DEFAULT 'day',
-      recurrence   TEXT,
-      context      TEXT,
-      linked_ids   TEXT,
-      status       TEXT NOT NULL DEFAULT 'pending',
-      created_at   TEXT NOT NULL,
-      resolved_at  TEXT
+      id              TEXT PRIMARY KEY,
+      summary         TEXT NOT NULL,
+      raw_when        TEXT,
+      resolved_when   TEXT,
+      resolution      TEXT NOT NULL DEFAULT 'day',
+      recurrence      TEXT,
+      trigger_on_fact TEXT,
+      context         TEXT,
+      linked_ids      TEXT,
+      status          TEXT NOT NULL DEFAULT 'pending',
+      created_at      TEXT NOT NULL,
+      resolved_at     TEXT
     );
   `);
   db.exec(`
@@ -236,18 +251,23 @@ export function createProjectionStore(userId: string, dataDir: string): Projecti
     );
   `);
 
-  // Migrate: add recurrence column to existing databases that predate this feature.
-  try {
-    db.exec(`ALTER TABLE projections ADD COLUMN recurrence TEXT;`);
-  } catch {
-    // Column already exists — ignore
+  // Migrate: add columns to existing databases that predate these features.
+  for (const ddl of [
+    `ALTER TABLE projections ADD COLUMN recurrence TEXT;`,
+    `ALTER TABLE projections ADD COLUMN trigger_on_fact TEXT;`,
+  ]) {
+    try {
+      db.exec(ddl);
+    } catch {
+      // Column already exists — ignore
+    }
   }
 
   const stmtInsert = db.prepare(`
     INSERT INTO projections
-      (id, summary, raw_when, resolved_when, resolution, recurrence, context, linked_ids, status, created_at)
+      (id, summary, raw_when, resolved_when, resolution, recurrence, trigger_on_fact, context, linked_ids, status, created_at)
     VALUES
-      (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+      (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
   `);
   const stmtInsertDependency = db.prepare(`
     INSERT INTO projection_dependencies
@@ -323,6 +343,22 @@ export function createProjectionStore(userId: string, dataDir: string): Projecti
     UPDATE projections
     SET status = 'pending', resolved_when = ?, resolved_at = NULL
     WHERE id = ?
+  `);
+
+  // Fetch all pending projections that have a trigger_on_fact set.
+  const stmtPendingWithTriggers = db.prepare(`
+    SELECT * FROM projections
+    WHERE status = 'pending'
+      AND trigger_on_fact IS NOT NULL
+      AND trigger_on_fact != ''
+  `);
+
+  // Activate a trigger-matched projection: set resolved_when to now, resolution
+  // to 'exact', and clear trigger_on_fact so it won't re-match on future inserts.
+  const stmtActivateTrigger = db.prepare(`
+    UPDATE projections
+    SET resolved_when = datetime('now'), resolution = 'exact', trigger_on_fact = NULL
+    WHERE id = ? AND status = 'pending'
   `);
 
   const stmtExpire = db.prepare(`
@@ -444,6 +480,7 @@ export function createProjectionStore(userId: string, dataDir: string): Projecti
     resolved_when?: string;
     resolution?: ProjectionResolution;
     recurrence?: string;
+    trigger_on_fact?: string;
     context?: string;
     linked_ids?: string[];
     depends_on?: ProjectionDependencyInput[];
@@ -457,6 +494,7 @@ export function createProjectionStore(userId: string, dataDir: string): Projecti
       params.resolved_when ?? null,
       params.resolution ?? "day",
       params.recurrence ?? null,
+      params.trigger_on_fact ?? null,
       params.context ?? null,
       params.linked_ids ? JSON.stringify(params.linked_ids) : null,
       now,
@@ -469,13 +507,14 @@ export function createProjectionStore(userId: string, dataDir: string): Projecti
   });
 
   return {
-    add({ summary, raw_when, resolved_when, resolution, recurrence, context, linked_ids, depends_on }) {
+    add({ summary, raw_when, resolved_when, resolution, recurrence, trigger_on_fact, context, linked_ids, depends_on }) {
       return addWithDependencies({
         summary,
         raw_when,
         resolved_when,
         resolution,
         recurrence,
+        trigger_on_fact,
         context,
         linked_ids,
         depends_on,
@@ -500,6 +539,35 @@ export function createProjectionStore(userId: string, dataDir: string): Projecti
     rearm(id, nextResolvedWhen) {
       const result = stmtRearm.run(nextResolvedWhen, id) as { changes: number };
       return result.changes > 0;
+    },
+
+    checkTriggers(factContent) {
+      const candidates = stmtPendingWithTriggers.all() as ProjectionRow[];
+      if (candidates.length === 0) return [];
+
+      // Normalise the incoming fact to lowercase words for matching.
+      const factLower = factContent.toLowerCase();
+
+      const activated: Projection[] = [];
+      for (const row of candidates) {
+        const trigger = row.trigger_on_fact!.toLowerCase().trim();
+        if (!trigger) continue;
+
+        // Split trigger into individual keywords (non-alpha sequences are delimiters).
+        // A match fires when ALL keywords appear in the fact content.
+        const keywords = trigger.split(/\W+/).filter(Boolean);
+        const allPresent = keywords.every((kw) => factLower.includes(kw));
+
+        if (allPresent) {
+          const result = stmtActivateTrigger.run(row.id) as { changes: number };
+          if (result.changes > 0) {
+            // Re-read the updated row so the returned projection reflects the new state.
+            const updated = { ...row, resolved_when: new Date().toISOString().slice(0, 16).replace("T", " "), resolution: "exact", trigger_on_fact: null };
+            activated.push(rowToProjection(updated as ProjectionRow));
+          }
+        }
+      }
+      return activated;
     },
 
     autoExpire(threshold_hours = 24) {

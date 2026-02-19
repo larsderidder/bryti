@@ -39,6 +39,13 @@ const projectSchema = Type.Object({
       "'0 9 * * 5' (every Friday at 09:00 UTC). " +
       "Only set this for genuinely recurring events. Leave unset for one-off events.",
   })),
+  trigger_on_fact: Type.Optional(Type.String({
+    description:
+      "Keyword or short phrase that will activate this projection when a matching fact is archived. " +
+      "Use for 'when X happens, do Y' situations where X is an external event, not a time. " +
+      "Example: 'dentist confirmed' activates a projection when the user archives a fact containing those words. " +
+      "Keep it short and distinctive. Leave unset for time-driven projections.",
+  })),
   context: Type.Optional(Type.String({
     description: "Optional notes: related events, implications, what to watch for",
   })),
@@ -149,7 +156,7 @@ export function createProjectionTools(store: ProjectionStore, timezone?: string)
     parameters: projectSchema,
     async execute(
       _toolCallId: string,
-      { summary, when, resolution, recurrence, context, linked_ids, depends_on }: ProjectInput,
+      { summary, when, resolution, recurrence, trigger_on_fact, context, linked_ids, depends_on }: ProjectInput,
     ): Promise<AgentToolResult<unknown>> {
       try {
         let resolved_when: string | undefined;
@@ -178,6 +185,7 @@ export function createProjectionTools(store: ProjectionStore, timezone?: string)
           resolved_when,
           resolution: res,
           recurrence,
+          trigger_on_fact,
           context,
           linked_ids,
           depends_on: depends_on?.map((dep) => ({

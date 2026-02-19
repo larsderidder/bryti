@@ -15,11 +15,13 @@ export function formatProjectionsForPrompt(projections: Projection[], maxItems =
 
   const capped = projections.slice(0, maxItems);
   const lines = capped.map((p) => {
-    const when = p.resolved_when
-      ? `[${p.resolved_when.slice(0, 16)}, ${p.resolution}]`
-      : p.raw_when
-        ? `[${p.raw_when}, ${p.resolution}]`
-        : `[someday]`;
+    const when = p.trigger_on_fact
+      ? `[waiting for: "${p.trigger_on_fact}"]`
+      : p.resolved_when
+        ? `[${p.resolved_when.slice(0, 16)}, ${p.resolution}]`
+        : p.raw_when
+          ? `[${p.raw_when}, ${p.resolution}]`
+          : `[someday]`;
     const recur = p.recurrence ? ` [recurring: ${p.recurrence}]` : "";
     const ctx = p.context ? ` — ${p.context}` : "";
     return `- ${when}${recur} ${p.summary}${ctx} (id: ${p.id})`;

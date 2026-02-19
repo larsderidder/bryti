@@ -181,6 +181,11 @@ function buildSystemPrompt(
     `monthly review, daily check-in, etc.), set the \`recurrence\` field using a cron expression. ` +
     `The scheduler will automatically rearm the projection after each occurrence. ` +
     `One-off events must NOT have a recurrence set.\n\n` +
+    `Event-triggered commitments: when the user says "when X happens, do Y" and X is an external event ` +
+    `(not a time), set \`trigger_on_fact\` to a short keyword phrase that describes X. ` +
+    `When you later archive a fact that contains those keywords, the projection activates automatically ` +
+    `and the tool result will tell you which commitments were triggered — act on them immediately. ` +
+    `Example: "when the dentist confirms, remind me to book time off" → trigger_on_fact: "dentist confirmed".\n\n` +
     projections,
   );
 

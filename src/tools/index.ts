@@ -61,18 +61,20 @@ export function createTools(
   // Memory tools
   tools.push(...createCoreMemoryTools(coreMemory));
 
-  // Archival memory: always available, uses local embeddings (no API key needed)
+  // Projection memory: forward-looking events and commitments.
+  // Created before archival tools so we can pass it in for trigger checking.
+  const projectionStore = createProjectionStore(userId, config.data_dir);
+  tools.push(...createProjectionTools(projectionStore, config.agent.timezone));
+
+  // Archival memory: always available, uses local embeddings (no API key needed).
+  // Receives the projection store so archival inserts can activate trigger-based projections.
   const modelsDir = path.join(config.data_dir, ".models");
   const archivalStore = createMemoryStore(userId, config.data_dir);
   tools.push(
-    ...createArchivalMemoryTools(archivalStore, (text) => embed(text, modelsDir)),
+    ...createArchivalMemoryTools(archivalStore, (text) => embed(text, modelsDir), projectionStore),
   );
 
   tools.push(createConversationSearchTool(path.join(config.data_dir, "history")));
-
-  // Projection memory: forward-looking events and commitments.
-  const projectionStore = createProjectionStore(userId, config.data_dir);
-  tools.push(...createProjectionTools(projectionStore, config.agent.timezone));
 
   return tools;
 }

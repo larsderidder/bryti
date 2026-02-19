@@ -210,6 +210,98 @@ describe("createProjectionStore", () => {
     expect(p!.recurrence).toBeNull();
   });
 
+  // ---------------------------------------------------------------------------
+  // checkTriggers
+  // ---------------------------------------------------------------------------
+
+  it("checkTriggers activates a projection when fact contains all trigger keywords", () => {
+    const id = store.add({
+      summary: "Book time off after dentist confirms",
+      trigger_on_fact: "dentist confirmed",
+    });
+
+    const activated = store.checkTriggers("dentist confirmed for Thursday 11am");
+    expect(activated).toHaveLength(1);
+    expect(activated[0].id).toBe(id);
+    expect(activated[0].resolution).toBe("exact");
+    expect(activated[0].trigger_on_fact).toBeNull();
+  });
+
+  it("checkTriggers does not activate when keywords are missing", () => {
+    store.add({
+      summary: "Book time off",
+      trigger_on_fact: "dentist confirmed",
+    });
+
+    const activated = store.checkTriggers("doctor appointment scheduled");
+    expect(activated).toHaveLength(0);
+  });
+
+  it("checkTriggers is case-insensitive", () => {
+    const id = store.add({
+      summary: "Follow-up call",
+      trigger_on_fact: "Contract Signed",
+    });
+
+    const activated = store.checkTriggers("contract signed by both parties");
+    expect(activated).toHaveLength(1);
+    expect(activated[0].id).toBe(id);
+  });
+
+  it("checkTriggers requires all keywords to be present", () => {
+    store.add({
+      summary: "Send invoice",
+      trigger_on_fact: "project complete",
+    });
+
+    // Only one of the two keywords present
+    const activated = store.checkTriggers("project started today");
+    expect(activated).toHaveLength(0);
+  });
+
+  it("checkTriggers clears trigger_on_fact after activation", () => {
+    const id = store.add({
+      summary: "Buy flowers",
+      trigger_on_fact: "anniversary",
+    });
+
+    store.checkTriggers("wedding anniversary confirmed for Saturday");
+
+    // The projection is now pending with resolved_when=now — it should still
+    // appear in upcoming but with no trigger_on_fact.
+    const upcoming = store.getUpcoming(1);
+    const p = upcoming.find((item) => item.id === id);
+    expect(p).toBeDefined();
+    expect(p!.trigger_on_fact).toBeNull();
+  });
+
+  it("checkTriggers does not activate already-resolved projections", () => {
+    const id = store.add({
+      summary: "Send thank-you",
+      trigger_on_fact: "meeting done",
+    });
+    store.resolve(id, "done");
+
+    const activated = store.checkTriggers("meeting done yesterday");
+    expect(activated).toHaveLength(0);
+  });
+
+  it("checkTriggers returns empty array when no projections have triggers", () => {
+    store.add({ summary: "Time-based event", resolved_when: isoHoursFromNow(2), resolution: "exact" });
+
+    const activated = store.checkTriggers("anything");
+    expect(activated).toHaveLength(0);
+  });
+
+  it("projections with trigger_on_fact have null recurrence by default", () => {
+    const id = store.add({ summary: "Trigger event", trigger_on_fact: "something happens" });
+    const upcoming = store.getUpcoming(30);
+    const p = upcoming.find((item) => item.id === id);
+    expect(p).toBeDefined();
+    expect(p!.trigger_on_fact).toBe("something happens");
+    expect(p!.recurrence).toBeNull();
+  });
+
   it("activates dependent projections when status_change condition is met", () => {
     const subjectId = store.add({ summary: "Client call", resolution: "day", resolved_when: isoDateFromNow(1) });
     const observerId = store.add({
@@ -287,6 +379,7 @@ describe("formatProjectionsForPrompt", () => {
       resolved_when: "2026-02-19 10:00",
       resolution: "exact",
       recurrence: null,
+      trigger_on_fact: null,
       context: "bring insurance card",
       linked_ids: [],
       status: "pending",
@@ -300,6 +393,26 @@ describe("formatProjectionsForPrompt", () => {
     expect(result).toContain("abc123");
   });
 
+  it("formats trigger_on_fact projections with waiting-for prefix", () => {
+    const p: Projection = {
+      id: "trig1",
+      summary: "Book time off",
+      raw_when: null,
+      resolved_when: null,
+      resolution: "someday",
+      recurrence: null,
+      trigger_on_fact: "dentist confirmed",
+      context: null,
+      linked_ids: [],
+      status: "pending",
+      created_at: new Date().toISOString(),
+      resolved_at: null,
+    };
+    const result = formatProjectionsForPrompt([p]);
+    expect(result).toContain('waiting for: "dentist confirmed"');
+    expect(result).toContain("Book time off");
+  });
+
   it("formats recurrence in the projection line", () => {
     const p: Projection = {
       id: "rec1",
@@ -308,6 +421,7 @@ describe("formatProjectionsForPrompt", () => {
       resolved_when: "2026-02-23 09:00",
       resolution: "exact",
       recurrence: "0 9 * * 1",
+      trigger_on_fact: null,
       context: null,
       linked_ids: [],
       status: "pending",
@@ -326,6 +440,7 @@ describe("formatProjectionsForPrompt", () => {
       resolved_when: null,
       resolution: "week",
       recurrence: null,
+      trigger_on_fact: null,
       context: null,
       linked_ids: [],
       status: "pending",
@@ -344,6 +459,7 @@ describe("formatProjectionsForPrompt", () => {
       resolved_when: null,
       resolution: "day" as const,
       recurrence: null,
+      trigger_on_fact: null,
       context: null,
       linked_ids: [],
       status: "pending" as const,
