@@ -14,10 +14,33 @@
  */
 
 import { Cron } from "croner";
+import type { Projection } from "./projection/index.js";
 import type { Config } from "./config.js";
 import type { IncomingMessage } from "./channels/types.js";
-import { createProjectionStore, formatProjectionsForPrompt } from "./projection/index.js";
+import { createProjectionStore, formatProjectionsForPrompt, runReflection } from "./projection/index.js";
 import { isActiveNow } from "./active-hours.js";
+import { getUserTimezone } from "./time.js";
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Given a cron expression, calculate the next fire time after `after` and
+ * return it as a UTC datetime string suitable for SQLite ("YYYY-MM-DD HH:MM").
+ * Returns null if the expression is invalid or produces no next occurrence.
+ */
+function nextCronOccurrence(cronExpr: string, after: Date): string | null {
+  try {
+    const job = new Cron(cronExpr, { timezone: "UTC", startAt: after });
+    const next = job.nextRun(after);
+    job.stop();
+    if (!next) return null;
+    return next.toISOString().slice(0, 16).replace("T", " ");
+  } catch {
+    return null;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Scheduler interface
@@ -118,6 +141,10 @@ export function createScheduler(
           if (expired > 0) {
             console.log(`[projections] Auto-expired ${expired} stale projection(s)`);
           }
+          const activated = store.evaluateDependencies();
+          if (activated > 0) {
+            console.log(`[projections] Activated ${activated} projection(s) via dependencies`);
+          }
           const upcoming = store.getUpcoming(7);
           if (upcoming.length === 0) {
             console.log("[projections] Daily review: no upcoming projections, skipping");
@@ -155,6 +182,7 @@ export function createScheduler(
         }
         const store = createProjectionStore(primaryUserId, config.data_dir);
         try {
+          store.evaluateDependencies();
           const due = store.getExactDue(15);
           if (due.length === 0) {
             return;
@@ -162,9 +190,22 @@ export function createScheduler(
           console.log(`[projections] Exact-time check: ${due.length} item(s) due`);
           const formatted = formatProjectionsForPrompt(due, 10);
 
-          // Mark as passed immediately so they don't re-fire on the next tick.
+          // Settle each projection: rearm recurring ones, mark one-offs as passed.
+          const now = new Date();
           for (const p of due) {
-            store.resolve(p.id, "passed");
+            if (p.recurrence) {
+              const next = nextCronOccurrence(p.recurrence, now);
+              if (next) {
+                store.rearm(p.id, next);
+                console.log(`[projections] Rearmed recurring projection ${p.id} → next: ${next}`);
+              } else {
+                // Cron produced no future occurrence — treat as one-off.
+                store.resolve(p.id, "passed");
+                console.warn(`[projections] Recurring projection ${p.id} produced no next occurrence, marked passed`);
+              }
+            } else {
+              store.resolve(p.id, "passed");
+            }
           }
 
           const msg: IncomingMessage = {
@@ -190,10 +231,52 @@ export function createScheduler(
     console.log("[projections] Exact-time check scheduled every 5 minutes");
   }
 
+  /**
+   * Start the reflection cron job.
+   *
+   * Runs every 30 minutes and scans the last 30 minutes of conversation
+   * history for future references the agent may have missed. Writes new
+   * projections directly to SQLite — no agent loop involved.
+   *
+   * Skips automatically when there are no new messages since the last run.
+   */
+  function startReflectionJob(): void {
+    const primaryUserId = String(config.telegram.allowed_users[0] ?? "");
+    if (!primaryUserId || primaryUserId === "undefined") {
+      return;
+    }
+
+    const job = new Cron(
+      "*/30 * * * *",
+      async () => {
+        try {
+          const result = await runReflection(config, primaryUserId, 30);
+          if (result.skipped) {
+            // Only log at debug level — this fires often and is usually a no-op
+            return;
+          }
+          if (result.projectionsAdded > 0) {
+            console.log(
+              `[reflection] Added ${result.projectionsAdded} projection(s) from recent conversation`,
+            );
+          } else {
+            console.log("[reflection] No new projections found in recent conversation");
+          }
+        } catch (err) {
+          console.error("[reflection] Unhandled error:", (err as Error).message);
+        }
+      },
+      { timezone: "UTC" },
+    );
+    cronJobs.set("projection-reflection", job);
+    console.log("[projections] Reflection pass scheduled every 30 minutes");
+  }
+
   return {
     start(): void {
       startConfigJobs();
       startProjectionJobs();
+      startReflectionJob();
 
       const total = cronJobs.size;
       if (total > 0) {

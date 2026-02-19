@@ -20,8 +20,9 @@ export function formatProjectionsForPrompt(projections: Projection[], maxItems =
       : p.raw_when
         ? `[${p.raw_when}, ${p.resolution}]`
         : `[someday]`;
+    const recur = p.recurrence ? ` [recurring: ${p.recurrence}]` : "";
     const ctx = p.context ? ` — ${p.context}` : "";
-    return `- ${when} ${p.summary}${ctx} (id: ${p.id})`;
+    return `- ${when}${recur} ${p.summary}${ctx} (id: ${p.id})`;
   });
 
   const overflow = projections.length > maxItems

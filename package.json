@@ -8,6 +8,7 @@
     "build": "tsc",
     "dev": "tsc --watch",
     "start": "node --env-file=.env dist/index.js",
+    "cli": "node --env-file=.env dist/cli.js",
     "clean": "rm -rf dist",
     "test": "vitest run",
     "test:watch": "vitest",

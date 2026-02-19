@@ -177,6 +177,10 @@ function buildSystemPrompt(
     `These are things you expect to happen or that the user mentioned about the future.\n` +
     `Connect new information to these when relevant. Proactively help with upcoming events.\n` +
     `Never mention "projections" to the user — just act on them naturally.\n\n` +
+    `Recurring events: when the user mentions something that repeats on a schedule (weekly standup, ` +
+    `monthly review, daily check-in, etc.), set the \`recurrence\` field using a cron expression. ` +
+    `The scheduler will automatically rearm the projection after each occurrence. ` +
+    `One-off events must NOT have a recurrence set.\n\n` +
     projections,
   );
 

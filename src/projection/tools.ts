@@ -1,11 +1,11 @@
 /**
- * Projection agent tools: project, get_projections, resolve_projection.
+ * Projection agent tools: project, get_projections, resolve_projection, link_projection.
  */
 
 import type { AgentTool, AgentToolResult } from "@mariozechner/pi-agent-core";
 import type { Static } from "@sinclair/typebox";
 import { Type } from "@sinclair/typebox";
-import type { ProjectionResolution, ProjectionStore } from "./store.js";
+import type { DependencyConditionType, ProjectionResolution, ProjectionStore } from "./store.js";
 
 // ---------------------------------------------------------------------------
 // Tool schemas
@@ -31,11 +31,29 @@ const projectSchema = Type.Object({
     ],
     { description: "Granularity of the time expression: exact | day | week | month | someday" },
   )),
+  recurrence: Type.Optional(Type.String({
+    description:
+      "Cron expression for repeating events. " +
+      "Use standard 5-field cron syntax (minute hour day month weekday). " +
+      "Examples: '0 9 * * 1' (every Monday at 09:00 UTC), '0 9 1 * *' (first of each month at 09:00 UTC), " +
+      "'0 9 * * 5' (every Friday at 09:00 UTC). " +
+      "Only set this for genuinely recurring events. Leave unset for one-off events.",
+  })),
   context: Type.Optional(Type.String({
     description: "Optional notes: related events, implications, what to watch for",
   })),
   linked_ids: Type.Optional(Type.Array(Type.String(), {
     description: "IDs of related projections",
+  })),
+  depends_on: Type.Optional(Type.Array(Type.Object({
+    projection_id: Type.String({ description: "Projection id this new projection depends on" }),
+    condition: Type.String({ description: "Condition to satisfy (e.g. done, cancelled, or natural language)" }),
+    condition_type: Type.Optional(Type.Union([
+      Type.Literal("status_change"),
+      Type.Literal("llm"),
+    ])),
+  }), {
+    description: "Optional dependency rules that must be met before this projection activates",
   })),
 });
 
@@ -57,9 +75,20 @@ const resolveProjectionSchema = Type.Object({
   ),
 });
 
+const linkProjectionSchema = Type.Object({
+  observer_id: Type.String({ description: "Projection that waits for a condition" }),
+  subject_id: Type.String({ description: "Projection being observed" }),
+  condition: Type.String({ description: "Condition to satisfy (e.g. done, cancelled, or natural language)" }),
+  condition_type: Type.Optional(Type.Union([
+    Type.Literal("status_change"),
+    Type.Literal("llm"),
+  ])),
+});
+
 type ProjectInput = Static<typeof projectSchema>;
 type GetProjectionsInput = Static<typeof getProjectionsSchema>;
 type ResolveProjectionInput = Static<typeof resolveProjectionSchema>;
+type LinkProjectionInput = Static<typeof linkProjectionSchema>;
 
 // ---------------------------------------------------------------------------
 // Tool factory
@@ -99,7 +128,7 @@ function toUtcDatetime(naive: string, timezone: string | undefined): string {
 }
 
 /**
- * Create the three projection tools backed by the given store.
+ * Create projection tools backed by the given store.
  *
  * @param store     Projection store.
  * @param timezone  Optional IANA timezone (e.g. "Europe/Amsterdam"). When set,
@@ -120,7 +149,7 @@ export function createProjectionTools(store: ProjectionStore, timezone?: string)
     parameters: projectSchema,
     async execute(
       _toolCallId: string,
-      { summary, when, resolution, context, linked_ids }: ProjectInput,
+      { summary, when, resolution, recurrence, context, linked_ids, depends_on }: ProjectInput,
     ): Promise<AgentToolResult<unknown>> {
       try {
         let resolved_when: string | undefined;
@@ -148,8 +177,14 @@ export function createProjectionTools(store: ProjectionStore, timezone?: string)
           raw_when,
           resolved_when,
           resolution: res,
+          recurrence,
           context,
           linked_ids,
+          depends_on: depends_on?.map((dep) => ({
+            subject_id: dep.projection_id,
+            condition: dep.condition,
+            condition_type: dep.condition_type as DependencyConditionType | undefined,
+          })),
         });
 
         const text = JSON.stringify({ success: true, id }, null, 2);
@@ -216,5 +251,33 @@ export function createProjectionTools(store: ProjectionStore, timezone?: string)
     },
   };
 
-  return [projectTool, getProjectionsTool, resolveProjectionTool];
+  const linkProjectionTool: AgentTool<typeof linkProjectionSchema> = {
+    name: "link_projection",
+    label: "link_projection",
+    description:
+      "Create a dependency between two existing projections. " +
+      "Use this when the dependency is discovered after both projections already exist.",
+    parameters: linkProjectionSchema,
+    async execute(
+      _toolCallId: string,
+      { observer_id, subject_id, condition, condition_type }: LinkProjectionInput,
+    ): Promise<AgentToolResult<unknown>> {
+      try {
+        const id = store.linkDependency(
+          observer_id,
+          subject_id,
+          condition,
+          condition_type as DependencyConditionType | undefined,
+        );
+        const text = JSON.stringify({ success: true, id }, null, 2);
+        return { content: [{ type: "text", text }], details: { success: true, id } };
+      } catch (error) {
+        const err = error as Error;
+        const text = JSON.stringify({ error: err.message });
+        return { content: [{ type: "text", text }], details: { error: err.message } };
+      }
+    },
+  };
+
+  return [projectTool, getProjectionsTool, resolveProjectionTool, linkProjectionTool];
 }
