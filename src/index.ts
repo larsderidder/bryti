@@ -308,7 +308,7 @@ async function startApp(): Promise<RunningApp> {
   await bridge.start();
 
   const scheduler = createScheduler(config, async (msg: IncomingMessage) => {
-    await processMessage(state, msg);
+    queue.enqueue(msg);
   });
   scheduler.start();
   state.scheduler = scheduler;
