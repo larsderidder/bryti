@@ -39,7 +39,7 @@ function makeConfig(dataDir: string): Config {
       ],
     },
     tools: {
-      web_search: { enabled: false, api_key: "" },
+      web_search: { enabled: false, searxng_url: "" },
       fetch_url: { enabled: false, timeout_ms: 10000 },
       files: { enabled: false, base_dir: "" },
     },

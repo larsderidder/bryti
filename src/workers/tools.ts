@@ -34,7 +34,7 @@ import type { MemoryStore } from "../memory/store.js";
 import { embed } from "../memory/embeddings.js";
 import { createWebSearchTool } from "../tools/web-search.js";
 import { createFetchUrlTool } from "../tools/fetch-url.js";
-import { createFileTools } from "../tools/files.js";
+import { createWorkerScopedTools } from "./scoped-tools.js";
 import { toolError, toolSuccess } from "../tools/result.js";
 import type { WorkerRegistry } from "./registry.js";
 
@@ -214,21 +214,18 @@ async function spawnWorkerSession(opts: {
     throw new Error(`Worker model not found: ${modelString}`);
   }
 
-  // Build scoped tools: only the requested ones + write_file (always)
+  // Build scoped tools: only the requested ones + scoped file tools (always)
   const workerTools: AgentTool<any>[] = [];
 
-  if (toolNames.includes("web_search") && config.tools.web_search.enabled && config.tools.web_search.api_key) {
-    workerTools.push(createWebSearchTool(config.tools.web_search.api_key));
+  if (toolNames.includes("web_search") && config.tools.web_search.enabled) {
+    workerTools.push(createWebSearchTool(config.tools.web_search.searxng_url));
   }
   if (toolNames.includes("fetch_url") && config.tools.fetch_url.enabled) {
     workerTools.push(createFetchUrlTool(config.tools.fetch_url.timeout_ms));
   }
 
-  // File tools scoped to the worker's directory (read + write, no list beyond worker dir)
-  const fileTools = createFileTools(workerDir);
-  // Only expose read_file and write_file — not list_files (unnecessary for workers)
-  const filteredFileTools = fileTools.filter((t) => t.name === "read_file" || t.name === "write_file");
-  workerTools.push(...filteredFileTools);
+  // Scoped file tools: worker can only write to its own directory (flat, no subdirs)
+  workerTools.push(...createWorkerScopedTools(workerDir));
 
   // Minimal resource loader — just the system prompt, no extensions
   const systemPrompt = buildWorkerSystemPrompt(task, workerDir);

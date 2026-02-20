@@ -121,7 +121,7 @@ describe("usage cost helpers", () => {
       ],
     },
     tools: {
-      web_search: { enabled: false, api_key: "" },
+      web_search: { enabled: false, searxng_url: "" },
       fetch_url: { enabled: false, timeout_ms: 1000 },
       files: { enabled: false, base_dir: "/tmp" },
     },

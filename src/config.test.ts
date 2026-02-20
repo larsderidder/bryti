@@ -35,7 +35,7 @@ models:
 tools:
   web_search:
     enabled: true
-    api_key: ""
+    searxng_url: "https://search.xithing.eu"
   fetch_url:
     enabled: true
   files:
@@ -67,7 +67,7 @@ models:
       models: []
 tools:
   web_search:
-    api_key: ""
+    searxng_url: "https://search.xithing.eu"
   fetch_url: {}
   files: {}
 cron: []
@@ -97,7 +97,7 @@ models:
 tools:
   web_search:
     enabled: false
-    api_key: ""
+    searxng_url: "https://search.xithing.eu"
   fetch_url:
     enabled: false
   files:
@@ -139,7 +139,7 @@ models:
 tools:
   web_search:
     enabled: false
-    api_key: ""
+    searxng_url: "https://search.xithing.eu"
   fetch_url:
     enabled: false
   files:
@@ -177,7 +177,7 @@ models:
 tools:
   web_search:
     enabled: false
-    api_key: ""
+    searxng_url: "https://search.xithing.eu"
   fetch_url:
     enabled: false
   files:
@@ -207,7 +207,7 @@ models:
 tools:
   web_search:
     enabled: false
-    api_key: ""
+    searxng_url: "https://search.xithing.eu"
   fetch_url:
     enabled: false
   files:
@@ -243,7 +243,7 @@ models:
 tools:
   web_search:
     enabled: false
-    api_key: ""
+    searxng_url: "https://search.xithing.eu"
   fetch_url:
     enabled: false
   files:
@@ -294,7 +294,7 @@ models:
 tools:
   web_search:
     enabled: false
-    api_key: ""
+    searxng_url: "https://search.xithing.eu"
   fetch_url:
     enabled: false
   files:

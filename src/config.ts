@@ -58,7 +58,11 @@ export interface Config {
     providers: ProviderConfig[];
   };
   tools: {
-    web_search: { enabled: boolean; api_key: string };
+    web_search: {
+      enabled: boolean;
+      /** SearXNG instance URL (no trailing slash). Workers only. */
+      searxng_url: string;
+    };
     fetch_url: { enabled: boolean; timeout_ms: number };
     files: { enabled: boolean; base_dir: string };
   };
@@ -136,11 +140,11 @@ function substituteDeep(obj: unknown): unknown {
  */
 function toolsFromConfig(substituted: Record<string, unknown>, dataDir: string): Config["tools"] {
   const raw = (substituted.tools ?? {}) as Record<string, unknown>;
+  const webRaw = (raw.web_search ?? {}) as Record<string, unknown>;
   return {
     web_search: {
-      enabled: true,
-      api_key: "",
-      ...(raw.web_search as object | undefined),
+      enabled: webRaw.enabled !== false,
+      searxng_url: (webRaw.searxng_url as string) ?? "https://search.xithing.eu",
     },
     fetch_url: {
       enabled: true,

@@ -6,8 +6,6 @@
  */
 
 import type { AgentTool } from "@mariozechner/pi-agent-core";
-import { createWebSearchTool } from "./web-search.js";
-import { createFetchUrlTool } from "./fetch-url.js";
 import { createFileTools } from "./files.js";
 import { createCoreMemoryTools } from "./core-memory-tool.js";
 import { createArchivalMemoryTools } from "./archival-memory-tool.js";
@@ -20,9 +18,6 @@ import path from "node:path";
 import type { Config } from "../config.js";
 import type { CoreMemory } from "../memory/core-memory.js";
 
-
-export { createWebSearchTool };
-export { createFetchUrlTool };
 export { createFileTools };
 export { createCoreMemoryTools };
 export { createArchivalMemoryTools };
@@ -45,20 +40,14 @@ export function createTools(
 ): PibotTool[] {
   const tools: PibotTool[] = [];
 
-  // Web search tool
-  if (config.tools.web_search.enabled && config.tools.web_search.api_key) {
-    tools.push(createWebSearchTool(config.tools.web_search.api_key));
-  }
-
-  // Fetch URL tool
-  if (config.tools.fetch_url.enabled) {
-    tools.push(createFetchUrlTool(config.tools.fetch_url.timeout_ms));
-  }
-
-  // File tools
+  // File tools (main agent can read/write in its sandbox)
   if (config.tools.files.enabled) {
     tools.push(...createFileTools(config.tools.files.base_dir));
   }
+
+  // NOTE: web_search and fetch_url are NOT given to the main agent.
+  // External content is processed by workers in isolation (security boundary).
+  // The main agent reads worker results via read_file.
 
   // Memory tools
   tools.push(...createCoreMemoryTools(coreMemory));

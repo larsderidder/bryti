@@ -22,7 +22,7 @@ function makeConfig(model: string, fallbacks: string[] = []): Config {
     whatsapp: { enabled: false },
     models: { providers: [] },
     tools: {
-      web_search: { enabled: false, api_key: "" },
+      web_search: { enabled: false, searxng_url: "" },
       fetch_url: { enabled: false, timeout_ms: 5000 },
       files: { enabled: false, base_dir: "/tmp" },
     },
