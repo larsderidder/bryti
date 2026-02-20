@@ -189,6 +189,21 @@ function buildSystemPrompt(
     projections,
   );
 
+  // Workers — background task execution
+  parts.push(
+    `## Background Workers\n` +
+    `Use \`dispatch_worker\` for long-running research tasks (10-60 minutes) that would block the conversation. ` +
+    `Workers run independently in the background. You continue chatting normally while they work.\n\n` +
+    `Standard pattern after dispatching a worker:\n` +
+    `1. Call dispatch_worker — it returns a worker_id immediately.\n` +
+    `2. Create a projection: \`project({ summary: "Inform user about <task> results", trigger_on_fact: "worker <id> complete" })\`\n` +
+    `3. Tell the user what you started and that you'll let them know when it's done.\n\n` +
+    `When the trigger fires: read result.md with read_file, summarize for the user, resolve the projection.\n\n` +
+    `Use check_worker only when the user asks for a progress update.\n` +
+    `Do NOT use workers for quick tasks (a few web searches). Use web_search directly instead.\n` +
+    `Workers cannot spawn other workers.`,
+  );
+
   // Silent reply — for scheduled/proactive turns where there's nothing to say
   parts.push(
     `## Silent Replies\n` +

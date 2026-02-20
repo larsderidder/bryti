@@ -156,10 +156,20 @@ export function createScheduler(
             userId: primaryUserId,
             text:
               `[Daily review]\n\nHere is what's coming up:\n\n${formatted}\n\n` +
-              `Review each item. For things due today or this week:\n` +
+              `Review each item. For each projection, decide whether to surface it TODAY:\n` +
               `1. Search your memory for related context (use archival_memory_search)\n` +
-              `2. Decide whether to message the user, take an action, or do nothing\n` +
-              `For things further out, only act if something needs attention now. Resolve any that have clearly passed.`,
+              `2. If due today or overdue: compose a message or take action.\n` +
+              `3. If due later this week: surface only if today is the right day for it.\n` +
+              `4. If further out: only act if something needs attention now.\n` +
+              `5. If cancelled, resolved, or clearly passed: resolve it and move on.\n` +
+              `6. If nothing needs to happen: say nothing (NOOP is fine).\n\n` +
+              `Timing rules:\n` +
+              `- If a task has a hard deadline AND an unresolved blocker (waiting on someone, missing info), ` +
+              `surface it EARLY so the user can start unblocking. Don't wait for the blocker to resolve itself.\n` +
+              `- If today is a light day and a task is due this week, today is probably a good day to surface it. ` +
+              `Don't skip it just because other days look busy.\n` +
+              `- Only defer if today is genuinely a bad day (too busy, user is overwhelmed, or a later day is ` +
+              `clearly better for a specific reason).`,
             platform: "telegram",
             raw: { type: "projection_daily_review" },
           };

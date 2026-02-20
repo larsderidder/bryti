@@ -13,6 +13,7 @@ import { createCoreMemoryTools } from "./core-memory-tool.js";
 import { createArchivalMemoryTools } from "./archival-memory-tool.js";
 import { createConversationSearchTool } from "./conversation-search-tool.js";
 import { createProjectionTools, createProjectionStore } from "../projection/index.js";
+import { createWorkerTools, createWorkerRegistry } from "../workers/index.js";
 import { embed } from "../memory/embeddings.js";
 import { createMemoryStore } from "../memory/store.js";
 import path from "node:path";
@@ -27,6 +28,7 @@ export { createCoreMemoryTools };
 export { createArchivalMemoryTools };
 export { createConversationSearchTool };
 export { createProjectionTools, createProjectionStore };
+export { createWorkerTools, createWorkerRegistry };
 
 /**
  * Type for pibot tools (AgentTool from pi).
@@ -75,6 +77,12 @@ export function createTools(
   );
 
   tools.push(createConversationSearchTool(path.join(config.data_dir, "history")));
+
+  // Worker tools: dispatch and check background research sessions.
+  // The registry lives for the lifetime of this tool set (one per user session).
+  // Workers write completion facts to the user's archival memory store.
+  const workerRegistry = createWorkerRegistry();
+  tools.push(...createWorkerTools(config, archivalStore, workerRegistry));
 
   return tools;
 }
