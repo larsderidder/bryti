@@ -17,6 +17,7 @@
  *   fill-context [--count <n>] [--dataset <path>] [--dry-run]
  *                                          Inject synthetic conversations into history
  *                                          to fill the context window (for compaction testing)
+ *   archive-fact "<content>"               Insert a fact and check trigger-based projections
  *
  * Global options:
  *   --user-id <id>     User ID (default: first allowed_users entry or PIBOT_USER_ID env)
@@ -539,6 +540,51 @@ function cmdFillContext(
 }
 
 // ---------------------------------------------------------------------------
+// Command: archive-fact
+// ---------------------------------------------------------------------------
+
+async function cmdArchiveFact(dataDir: string, userId: string, content: string): Promise<void> {
+  console.log(`Archiving fact for user ${userId}...`);
+  console.log(`Content: "${content}"\n`);
+
+  // Lazy-import heavy modules only when this command is used.
+  const { embed } = await import("./memory/embeddings.js");
+  const { createMemoryStore } = await import("./memory/store.js");
+  const { createProjectionStore } = await import("./projection/index.js");
+
+  const modelsDir = path.join(dataDir, ".models");
+  const memoryStore = createMemoryStore(userId, dataDir);
+  const projStore = createProjectionStore(userId, dataDir);
+
+  try {
+    // Embed and store the fact.
+    const embedding = await embed(content, modelsDir);
+    memoryStore.addFact(content, "cli", embedding);
+    console.log("Fact archived.");
+
+    // Check triggers (keyword + embedding fallback).
+    const triggered = await projStore.checkTriggers(
+      content,
+      (text) => embed(text, modelsDir),
+    );
+
+    if (triggered.length > 0) {
+      console.log(`\nTriggered ${triggered.length} projection(s):`);
+      for (const p of triggered) {
+        console.log(`  ✅ ${p.summary} (id: ${p.id})`);
+      }
+      console.log("\nThese projections are now active (resolution=exact, resolved_when=now).");
+      console.log("The scheduler will fire them on the next 5-minute tick.");
+    } else {
+      console.log("\nNo triggers matched.");
+    }
+  } finally {
+    memoryStore.close();
+    projStore.close();
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Help
 // ---------------------------------------------------------------------------
 
@@ -589,6 +635,11 @@ Commands:
     Used to test compaction and archival memory retrieval under context pressure.
     Prioritises context-window-pressure conversations from the dataset.
     Default count: 10. Default dataset: synthetic-agent-conversations/dataset/memory-context.jsonl
+
+  archive-fact "<content>"
+    Insert a fact into archival memory and check if any trigger-based
+    projections fire. Uses keyword matching + embedding similarity fallback.
+    Useful for testing trigger_on_fact without going through the agent.
 
 Global options:
   --user-id <id>     User ID (default: first entry in telegram.allowed_users)
@@ -666,6 +717,16 @@ async function main(): Promise<void> {
       const count = Number(opt("--count", "10"));
       const dataset = opt("--dataset", DEFAULT_DATASET)!;
       cmdFillContext(dataDir, count, dataset, flag("--dry-run"));
+      break;
+    }
+
+    case "archive-fact": {
+      const content = positional(1);
+      if (!content) {
+        console.error('Usage: archive-fact "<content>"');
+        process.exit(1);
+      }
+      await cmdArchiveFact(dataDir, userId, content);
       break;
     }
 
