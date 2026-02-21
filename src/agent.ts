@@ -77,6 +77,14 @@ function generateModelsJson(config: Config, agentDir: string): void {
       continue;
     }
 
+    // Skip providers without an api_key — these are built-in OAuth providers
+    // (e.g. anthropic) whose credentials come from ~/.pi/agent/auth.json.
+    // The ModelRegistry already knows their models natively; adding them here
+    // without a valid apiKey would fail schema validation.
+    if (!provider.api_key) {
+      continue;
+    }
+
     providers[provider.name] = {
       baseUrl: provider.base_url,
       api: provider.api || "openai-completions",
@@ -257,12 +265,14 @@ export async function loadUserSession(
 ): Promise<UserSession> {
   const agentDir = path.join(config.data_dir, ".pi");
   fs.mkdirSync(agentDir, { recursive: true });
-  fs.mkdirSync(path.join(agentDir, "auth"), { recursive: true });
 
   generateModelsJson(config, agentDir);
 
-  // Auth
-  const authStorage = new AuthStorage(path.join(agentDir, "auth", "auth.json"));
+  // Auth — share ~/.pi/agent/auth.json so pibot uses the same OAuth creds as
+  // the pi CLI (Anthropic OAuth, etc.). AuthStorage uses file-level locking so
+  // concurrent token refreshes from pi CLI and pibot are safe.
+  // Calling new AuthStorage() with no args defaults to ~/.pi/agent/auth.json.
+  const authStorage = new AuthStorage();
   for (const provider of config.models.providers) {
     if (provider.api_key) {
       authStorage.setRuntimeApiKey(provider.name, provider.api_key);
