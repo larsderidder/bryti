@@ -210,6 +210,17 @@ async function processMessage(
     return;
   }
 
+  // Input validation: reject excessively long messages before they waste context
+  const MAX_MESSAGE_LENGTH = 10_000;
+  if (msg.text.length > MAX_MESSAGE_LENGTH) {
+    await getBridge(state, msg.platform).sendMessage(
+      msg.channelId,
+      `That message is too long (${msg.text.length.toLocaleString()} characters). ` +
+      `Could you break it into smaller pieces? I can handle up to ${MAX_MESSAGE_LENGTH.toLocaleString()} characters at a time.`,
+    );
+    return;
+  }
+
   // Check for pending trust approvals (user responding to "Can I use X?" prompt)
   const approvedTool = checkPendingApproval(msg.userId, msg.text);
   if (approvedTool) {
