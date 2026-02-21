@@ -166,7 +166,11 @@ function buildSystemPrompt(
 
   // Tool call style — reduces chatty narration
   parts.push(
-    `## Tool Call Style\n` +
+    `## Communication Style\n` +
+    `When talking to the user, use plain language. Never mention tool names, function names, ` +
+    `or internal concepts like "projections." Say "I'll remember that" not "I'll call memory_core_append." ` +
+    `Say "I'll look into that in the background" not "I'll use worker_dispatch." ` +
+    `Say "I've set a reminder" not "I've created a projection."\n\n` +
     `Do not narrate routine tool calls. Just call the tool.\n` +
     `Narrate only when it helps: multi-step work, sensitive actions (deletions, external sends), or when the user asks.\n` +
     `Keep narration brief.\n` +
