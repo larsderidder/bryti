@@ -4,9 +4,14 @@
  * We test the tool's validation logic, concurrency enforcement, and
  * check_worker disk-fallback. We do not test actual session spawning
  * (that requires a live model).
+ *
+ * interrupt_worker tests cover:
+ * - cancelling a running worker (abort called, status set to cancelled)
+ * - no-op on already-terminal workers
+ * - not-found handling with disk fallback
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -15,6 +20,12 @@ import { createWorkerRegistry } from "./registry.js";
 import type { WorkerRegistry } from "./registry.js";
 import type { MemoryStore, ScoredResult } from "../memory/store.js";
 import type { Config } from "../config.js";
+
+// Mock the embedding module so interrupt_worker (and any future completion
+// paths) don't try to download/load a GGUF model during tests.
+vi.mock("../memory/embeddings.js", () => ({
+  embed: vi.fn().mockResolvedValue(new Array(768).fill(0)),
+}));
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -324,5 +335,231 @@ describe("check_worker", () => {
     const details = result.details as any;
     expect(details.status).toBe("failed");
     expect(details.error).toBe("Model error: context overflow");
+  });
+});
+
+describe("interrupt_worker", () => {
+  let tempDir: string;
+  let config: Config;
+  let registry: WorkerRegistry;
+  let memoryStore: MemoryStore;
+
+  beforeEach(() => {
+    tempDir = makeTempDir();
+    config = makeMockConfig(tempDir);
+    registry = createWorkerRegistry();
+    memoryStore = makeMockMemoryStore();
+  });
+
+  afterEach(() => {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("returns error for unknown worker_id with no status.json", async () => {
+    const tools = createWorkerTools(config, memoryStore, registry);
+    const interrupt = tools.find((t) => t.name === "interrupt_worker")!;
+
+    const result = await interrupt.execute("call1", { worker_id: "w-notexist" });
+    expect((result.details as any).error).toMatch(/worker not found/i);
+  });
+
+  it("returns no-op for a worker already in a terminal state", async () => {
+    const tools = createWorkerTools(config, memoryStore, registry);
+    const interrupt = tools.find((t) => t.name === "interrupt_worker")!;
+
+    for (const status of ["complete", "failed", "timeout", "cancelled"] as const) {
+      const workerId = `w-terminal-${status}`;
+      registry.register({
+        workerId,
+        status,
+        task: "Some task",
+        resultPath: "",
+        workerDir: "",
+        startedAt: new Date(),
+        error: null,
+        model: "m",
+        abort: null,
+        timeoutHandle: null,
+      });
+
+      const result = await interrupt.execute("call1", { worker_id: workerId });
+      const details = result.details as any;
+      expect(details.status).toBe(status);
+      expect(details.note).toMatch(/terminal state/i);
+    }
+  });
+
+  it("calls abort() on a running worker and sets status to cancelled", async () => {
+    const tools = createWorkerTools(config, memoryStore, registry);
+    const interrupt = tools.find((t) => t.name === "interrupt_worker")!;
+
+    let abortCalled = false;
+    const workerDir = path.join(tempDir, "files", "workers", "w-running");
+    fs.mkdirSync(workerDir, { recursive: true });
+
+    registry.register({
+      workerId: "w-running",
+      status: "running",
+      task: "Long research task",
+      resultPath: path.join(workerDir, "result.md"),
+      workerDir,
+      startedAt: new Date(),
+      error: null,
+      model: "test-provider/test-model",
+      abort: async () => { abortCalled = true; },
+      timeoutHandle: null,
+    });
+
+    const result = await interrupt.execute("call1", { worker_id: "w-running" });
+    const details = result.details as any;
+
+    expect(details.status).toBe("cancelled");
+    expect(abortCalled).toBe(true);
+
+    const entry = registry.get("w-running");
+    expect(entry!.status).toBe("cancelled");
+    expect(entry!.completedAt).not.toBeNull();
+  });
+
+  it("clears the timeout handle when cancelling", async () => {
+    const tools = createWorkerTools(config, memoryStore, registry);
+    const interrupt = tools.find((t) => t.name === "interrupt_worker")!;
+
+    const workerDir = path.join(tempDir, "files", "workers", "w-timeout");
+    fs.mkdirSync(workerDir, { recursive: true });
+
+    let timeoutFired = false;
+    const handle = setTimeout(() => { timeoutFired = true; }, 50);
+
+    registry.register({
+      workerId: "w-timeout",
+      status: "running",
+      task: "Task with timeout",
+      resultPath: path.join(workerDir, "result.md"),
+      workerDir,
+      startedAt: new Date(),
+      error: null,
+      model: "test-provider/test-model",
+      abort: async () => {},
+      timeoutHandle: handle,
+    });
+
+    await interrupt.execute("call1", { worker_id: "w-timeout" });
+
+    // Wait longer than the timeout — it should not fire
+    await new Promise((r) => setTimeout(r, 100));
+    expect(timeoutFired).toBe(false);
+  });
+
+  it("writes status.json with cancelled status", async () => {
+    const tools = createWorkerTools(config, memoryStore, registry);
+    const interrupt = tools.find((t) => t.name === "interrupt_worker")!;
+
+    const workerDir = path.join(tempDir, "files", "workers", "w-disk");
+    fs.mkdirSync(workerDir, { recursive: true });
+
+    registry.register({
+      workerId: "w-disk",
+      status: "running",
+      task: "Disk test task",
+      resultPath: path.join(workerDir, "result.md"),
+      workerDir,
+      startedAt: new Date(),
+      error: null,
+      model: "test-provider/test-model",
+      abort: async () => {},
+      timeoutHandle: null,
+    });
+
+    await interrupt.execute("call1", { worker_id: "w-disk" });
+
+    const statusFile = path.join(workerDir, "status.json");
+    expect(fs.existsSync(statusFile)).toBe(true);
+    const data = JSON.parse(fs.readFileSync(statusFile, "utf-8"));
+    expect(data.status).toBe("cancelled");
+    expect(data.completed_at).not.toBeNull();
+  });
+
+  it("handles abort() throwing gracefully (still marks cancelled)", async () => {
+    const tools = createWorkerTools(config, memoryStore, registry);
+    const interrupt = tools.find((t) => t.name === "interrupt_worker")!;
+
+    const workerDir = path.join(tempDir, "files", "workers", "w-abort-throws");
+    fs.mkdirSync(workerDir, { recursive: true });
+
+    registry.register({
+      workerId: "w-abort-throws",
+      status: "running",
+      task: "Task where abort throws",
+      resultPath: path.join(workerDir, "result.md"),
+      workerDir,
+      startedAt: new Date(),
+      error: null,
+      model: "test-provider/test-model",
+      abort: async () => { throw new Error("session already disposed"); },
+      timeoutHandle: null,
+    });
+
+    // Should not throw — abort errors are best-effort
+    const result = await interrupt.execute("call1", { worker_id: "w-abort-throws" });
+    expect((result.details as any).status).toBe("cancelled");
+
+    const entry = registry.get("w-abort-throws");
+    expect(entry!.status).toBe("cancelled");
+  });
+
+  it("handles no abort function (session not yet started)", async () => {
+    const tools = createWorkerTools(config, memoryStore, registry);
+    const interrupt = tools.find((t) => t.name === "interrupt_worker")!;
+
+    const workerDir = path.join(tempDir, "files", "workers", "w-no-abort");
+    fs.mkdirSync(workerDir, { recursive: true });
+
+    // abort is null — session registered but not yet spawned
+    registry.register({
+      workerId: "w-no-abort",
+      status: "running",
+      task: "Task not yet spawned",
+      resultPath: path.join(workerDir, "result.md"),
+      workerDir,
+      startedAt: new Date(),
+      error: null,
+      model: "test-provider/test-model",
+      abort: null,
+      timeoutHandle: null,
+    });
+
+    const result = await interrupt.execute("call1", { worker_id: "w-no-abort" });
+    expect((result.details as any).status).toBe("cancelled");
+
+    const entry = registry.get("w-no-abort");
+    expect(entry!.status).toBe("cancelled");
+  });
+
+  it("falls back to status.json on disk when worker is not in registry", async () => {
+    const tools = createWorkerTools(config, memoryStore, registry);
+    const interrupt = tools.find((t) => t.name === "interrupt_worker")!;
+
+    const workerDir = path.join(tempDir, "files", "workers", "w-old-complete");
+    fs.mkdirSync(workerDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(workerDir, "status.json"),
+      JSON.stringify({
+        worker_id: "w-old-complete",
+        status: "complete",
+        task: "Old task",
+        started_at: new Date(Date.now() - 3600000).toISOString(),
+        completed_at: new Date().toISOString(),
+        model: "test-provider/test-model",
+        error: null,
+        result_path: path.join(workerDir, "result.md"),
+      }),
+      "utf-8",
+    );
+
+    const result = await interrupt.execute("call1", { worker_id: "w-old-complete" });
+    const details = result.details as any;
+    expect(details.status).toBe("complete");
+    expect(details.note).toMatch(/already finished/i);
   });
 });

@@ -222,6 +222,7 @@ function buildSystemPrompt(
     `3. Tell the user you've started looking into it and will share results when ready.\n\n` +
     `When the trigger fires: read the result.md file with read_file, summarize the key findings for the user, resolve the projection.\n\n` +
     `Use check_worker only when the user asks for a progress update.\n` +
+    `Use interrupt_worker to cancel a running worker when the task is no longer needed or the user asks to stop it.\n` +
     `Workers cannot spawn other workers.\n` +
     `Workers use a cheaper model by default. You can override with the model parameter if needed.`,
   );

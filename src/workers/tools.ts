@@ -1,5 +1,5 @@
 /**
- * Worker tools: dispatch_worker and check_worker.
+ * Worker tools: dispatch_worker, check_worker, and interrupt_worker.
  *
  * Workers are stateless background LLM sessions that run independently of the
  * main agent. They have a scoped tool set, write results to a file, and signal
@@ -9,10 +9,11 @@
  * Lifecycle:
  *   1. dispatch_worker → creates worker dir, writes task.md, spawns session
  *   2. Worker runs (web search, fetch URL, write to result.md)
- *   3. On completion (or failure/timeout), pibot:
+ *   3. On completion (or failure/timeout/cancellation), pibot:
  *      - writes status.json
- *      - archives a completion fact into the user's memory store
+ *      - archives a fact into the user's memory store
  *   4. check_worker → query current status of a worker
+ *   5. interrupt_worker → cancel a running worker immediately
  */
 
 import fs from "node:fs";
@@ -136,8 +137,13 @@ const checkWorkerSchema = Type.Object({
   worker_id: Type.String({ description: "The worker_id returned by dispatch_worker." }),
 });
 
+const interruptWorkerSchema = Type.Object({
+  worker_id: Type.String({ description: "The worker_id returned by dispatch_worker." }),
+});
+
 type DispatchWorkerInput = Static<typeof dispatchWorkerSchema>;
 type CheckWorkerInput = Static<typeof checkWorkerSchema>;
+type InterruptWorkerInput = Static<typeof interruptWorkerSchema>;
 
 // ---------------------------------------------------------------------------
 // Models.json for worker sessions
@@ -352,9 +358,11 @@ async function spawnWorkerSession(opts: {
     }
   } catch (error) {
     const errMsg = (error as Error).message;
-    // Don't overwrite a timeout status that was set by the timeout handler
+    // Don't overwrite a terminal status set externally (timeout handler or
+    // interrupt_worker). Both set their own status before aborting the session,
+    // so the error thrown by abort() here would otherwise clobber it.
     const currentEntry = registry.get(workerId);
-    if (currentEntry?.status === "timeout") {
+    if (currentEntry?.status === "timeout" || currentEntry?.status === "cancelled") {
       session.dispose();
       return;
     }
@@ -598,5 +606,103 @@ export function createWorkerTools(
     },
   };
 
-  return [dispatchTool, checkTool];
+  const interruptTool: AgentTool<typeof interruptWorkerSchema> = {
+    name: "interrupt_worker",
+    label: "interrupt_worker",
+    description:
+      "Cancel a running background worker immediately. " +
+      "Use when the task is no longer needed, the user asks you to stop it, or the worker is taking too long. " +
+      "If the worker has already finished, this is a no-op and returns the current status.",
+    parameters: interruptWorkerSchema,
+    async execute(
+      _toolCallId: string,
+      { worker_id }: InterruptWorkerInput,
+    ): Promise<AgentToolResult<unknown>> {
+      const entry = registry.get(worker_id);
+
+      if (!entry) {
+        // Check disk as a fallback (worker may have been cleaned up from registry)
+        const workerDir = path.join(config.data_dir, "files", "workers", worker_id);
+        const statusFile = path.join(workerDir, "status.json");
+        if (fs.existsSync(statusFile)) {
+          try {
+            const data = JSON.parse(fs.readFileSync(statusFile, "utf-8")) as WorkerStatusFile;
+            return toolSuccess({
+              worker_id,
+              status: data.status,
+              note: `Worker already finished with status "${data.status}". Nothing to interrupt.`,
+            });
+          } catch {
+            // Fall through
+          }
+        }
+        return toolError(`Worker not found: ${worker_id}`);
+      }
+
+      // Already in a terminal state — nothing to do
+      if (entry.status !== "running") {
+        return toolSuccess({
+          worker_id,
+          status: entry.status,
+          note: `Worker already in terminal state "${entry.status}". Nothing to interrupt.`,
+        });
+      }
+
+      // Cancel the timeout so it doesn't fire after we've already cancelled
+      if (entry.timeoutHandle) {
+        clearTimeout(entry.timeoutHandle);
+      }
+
+      // Mark cancelled before calling abort() so the spawnWorkerSession catch
+      // block sees the terminal status and skips overwriting it
+      const cancelledAt = new Date();
+      registry.update(worker_id, {
+        status: "cancelled",
+        completedAt: cancelledAt,
+        error: null,
+        timeoutHandle: null,
+      });
+
+      writeStatusFile(path.join(config.data_dir, "files", "workers", worker_id), {
+        worker_id,
+        status: "cancelled",
+        task: entry.task,
+        started_at: entry.startedAt.toISOString(),
+        completed_at: cancelledAt.toISOString(),
+        model: entry.model,
+        error: null,
+        result_path: entry.resultPath,
+      });
+
+      // Abort the session if it's running. abort() may throw — treat as best-effort
+      if (entry.abort) {
+        try {
+          await entry.abort();
+        } catch {
+          // Best-effort — the status is already set to cancelled
+        }
+      }
+
+      // Archive a cancellation fact so any projections watching this worker can clean up
+      const modelsDir = path.join(config.data_dir, ".models");
+      const factContent = `Worker ${worker_id} cancelled`;
+      try {
+        const embedding = await embed(factContent, modelsDir);
+        memoryStore.addFact(factContent, "worker", embedding);
+        console.log(`[worker] ${worker_id} cancellation fact archived`);
+      } catch (err) {
+        console.error(`[worker] ${worker_id} failed to archive cancellation fact:`, (err as Error).message);
+      }
+
+      console.log(`[worker] ${worker_id} cancelled`);
+
+      return toolSuccess({
+        worker_id,
+        status: "cancelled",
+        note: "Worker has been cancelled. Any partial results may still exist in the worker directory.",
+      });
+    },
+  };
+
+  return [dispatchTool, checkTool, interruptTool];
 }
