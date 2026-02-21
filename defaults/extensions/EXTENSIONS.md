@@ -66,15 +66,29 @@ return {
 
 ## Using environment variables
 
-Config and secrets go in `.env`, not hardcoded:
+Non-secret config (URLs, feature flags) goes in `config.yml` under `integrations`.
+Secrets (API keys, tokens) go in `.env` and are referenced from config.yml via `${VAR}`.
+
+Bryti injects `integrations.<name>.<key>` as `NAME_KEY` (uppercased) into `process.env`
+at startup, so extensions read them the same way regardless of where they came from.
+
+```yaml
+# config.yml
+integrations:
+  my_service:
+    url: "https://api.example.com"
+    api_key: "${MY_SERVICE_API_KEY}"   # secret stays in .env
+```
 
 ```typescript
+// extension reads it the same way either way
+const url = process.env.MY_SERVICE_URL;
 const apiKey = process.env.MY_SERVICE_API_KEY;
 
-if (!apiKey) {
+if (!url) {
   return {
     content: [{ type: "text", text: JSON.stringify({
-      error: "MY_SERVICE_API_KEY is not set. Add it to .env and restart."
+      error: "MY_SERVICE_URL not set. Add integrations.my_service.url to config.yml and restart."
     })}],
   };
 }

@@ -124,6 +124,29 @@ tools:
     max_concurrent: 3
 
 # ---------------------------------------------------------------------------
+# Integrations (optional)
+#
+# Values here are injected into process.env at startup so extensions can
+# read them without separate .env entries.
+#
+# Convention: integrations.<name>.<key> becomes the env var NAME_KEY (uppercased).
+# Example: integrations.hedgedoc.url → HEDGEDOC_URL
+#
+# Secrets (API keys, tokens) should still use ${VAR} substitution so they
+# stay in .env and out of config.yml.
+# ---------------------------------------------------------------------------
+
+# integrations:
+#   hedgedoc:
+#     url: "http://hedgedoc:3000"           # internal Docker network URL
+#     public_url: "https://docs.example.com" # user-facing URL for shared links
+#
+#   # Any future integration follows the same pattern:
+#   # my_service:
+#   #   url: "https://api.example.com"
+#   #   api_key: "${MY_SERVICE_API_KEY}"    # secret stays in .env
+
+# ---------------------------------------------------------------------------
 # Scheduled prompts (optional)
 # ---------------------------------------------------------------------------
 

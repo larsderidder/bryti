@@ -21,7 +21,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { Cron } from "croner";
-import { loadConfig, ensureDataDirs, type Config } from "./config.js";
+import { loadConfig, ensureDataDirs, applyIntegrationEnvVars, type Config } from "./config.js";
 import { createCoreMemory, type CoreMemory } from "./memory/core-memory.js";
 import { createHistoryManager, type HistoryManager } from "./history.js";
 import { warmupEmbeddings, disposeEmbeddings } from "./memory/embeddings.js";
@@ -594,6 +594,7 @@ async function processMessage(
  */
 async function startApp(): Promise<RunningApp> {
   const config = loadConfig();
+  applyIntegrationEnvVars(config);
   ensureDataDirs(config);
   installConsoleFileLogging(createAppLogger(config.data_dir));
 

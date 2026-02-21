@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
-import { loadConfig, ensureDataDirs } from "../src/config.js";
+import { loadConfig, ensureDataDirs, applyIntegrationEnvVars } from "../src/config.js";
 
 describe("Config", () => {
   let tempDir: string;
@@ -311,5 +311,98 @@ cron: []
 
     delete process.env.COST_INPUT;
     delete process.env.COST_OUTPUT;
+  });
+});
+
+describe("applyIntegrationEnvVars", () => {
+  const minimalConfig = (integrations: string) => `
+agent:
+  name: TestBot
+  model: test/test-model
+telegram:
+  token: test-token
+models:
+  providers:
+    - name: test
+      base_url: https://test.example.com
+      api_key: test-key
+      models:
+        - id: test-model
+${integrations}
+`;
+
+  let tempDir: string;
+
+  beforeEach(() => {
+    tempDir = fs.mkdtempSync("/tmp/bryti-integrations-test-");
+    process.env.BRYTI_DATA_DIR = tempDir;
+  });
+
+  afterEach(() => {
+    delete process.env.BRYTI_DATA_DIR;
+    delete process.env.HEDGEDOC_URL;
+    delete process.env.HEDGEDOC_PUBLIC_URL;
+    delete process.env.MY_SERVICE_URL;
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("injects integration values as uppercased env vars", () => {
+    fs.writeFileSync(path.join(tempDir, "config.yml"), minimalConfig(`
+integrations:
+  hedgedoc:
+    url: "http://hedgedoc:3000"
+    public_url: "https://docs.example.com"
+`));
+    const config = loadConfig();
+    applyIntegrationEnvVars(config);
+
+    expect(process.env.HEDGEDOC_URL).toBe("http://hedgedoc:3000");
+    expect(process.env.HEDGEDOC_PUBLIC_URL).toBe("https://docs.example.com");
+  });
+
+  it("does not overwrite existing env vars", () => {
+    process.env.HEDGEDOC_URL = "http://already-set:3000";
+    fs.writeFileSync(path.join(tempDir, "config.yml"), minimalConfig(`
+integrations:
+  hedgedoc:
+    url: "http://hedgedoc:3000"
+`));
+    const config = loadConfig();
+    applyIntegrationEnvVars(config);
+
+    expect(process.env.HEDGEDOC_URL).toBe("http://already-set:3000");
+  });
+
+  it("converts snake_case keys to uppercased env vars", () => {
+    fs.writeFileSync(path.join(tempDir, "config.yml"), minimalConfig(`
+integrations:
+  my_service:
+    url: "https://api.example.com"
+`));
+    const config = loadConfig();
+    applyIntegrationEnvVars(config);
+
+    expect(process.env.MY_SERVICE_URL).toBe("https://api.example.com");
+  });
+
+  it("ignores integrations section when absent", () => {
+    fs.writeFileSync(path.join(tempDir, "config.yml"), minimalConfig(""));
+    const config = loadConfig();
+    expect(() => applyIntegrationEnvVars(config)).not.toThrow();
+  });
+
+  it("parses integrations into config.integrations", () => {
+    fs.writeFileSync(path.join(tempDir, "config.yml"), minimalConfig(`
+integrations:
+  hedgedoc:
+    url: "http://hedgedoc:3000"
+    public_url: "https://docs.example.com"
+`));
+    const config = loadConfig();
+
+    expect(config.integrations.hedgedoc).toEqual({
+      url: "http://hedgedoc:3000",
+      public_url: "https://docs.example.com",
+    });
   });
 });

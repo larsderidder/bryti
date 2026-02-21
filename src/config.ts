@@ -83,6 +83,14 @@ export interface Config {
       max_concurrent: number;
     };
   };
+  /**
+   * Optional integrations. Each entry is injected into process.env at startup
+   * so extensions can read them without needing separate .env entries.
+   *
+   * Convention: integrations.<name>.<key> → env var NAME_KEY (uppercased, dots to underscores).
+   * Example: integrations.hedgedoc.url → HEDGEDOC_URL
+   */
+  integrations: Record<string, Record<string, string>>;
   cron: CronJob[];
   /** Optional active hours window. Scheduler callbacks skip firing outside it. */
   active_hours?: ActiveHoursConfig;
@@ -158,6 +166,54 @@ function substituteDeep(obj: unknown): unknown {
 }
 
 /**
+ * Parse the integrations section, extracting string key-value pairs.
+ *
+ * Only string values are kept — nested objects, booleans, and numbers are
+ * ignored. Each entry's values can use ${ENV_VAR} substitution (already
+ * applied by substituteDeep before this is called).
+ */
+function integrationsFromConfig(substituted: Record<string, unknown>): Config["integrations"] {
+  const raw = (substituted.integrations ?? {}) as Record<string, unknown>;
+  const result: Record<string, Record<string, string>> = {};
+
+  for (const [name, entry] of Object.entries(raw)) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const values: Record<string, string> = {};
+    for (const [key, value] of Object.entries(entry as Record<string, unknown>)) {
+      if (typeof value === "string") {
+        values[key] = value;
+      }
+    }
+    if (Object.keys(values).length > 0) {
+      result[name] = values;
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Inject integration config values into process.env so extensions can read them.
+ *
+ * Convention: integrations.<name>.<key> → <NAME>_<KEY> (uppercased).
+ * Example: integrations.hedgedoc.url → HEDGEDOC_URL
+ *          integrations.hedgedoc.public_url → HEDGEDOC_PUBLIC_URL
+ *
+ * Existing env vars are never overwritten — .env always wins.
+ * Call this once after loadConfig(), before extensions are loaded.
+ */
+export function applyIntegrationEnvVars(config: Config): void {
+  for (const [name, values] of Object.entries(config.integrations)) {
+    for (const [key, value] of Object.entries(values)) {
+      const envKey = `${name}_${key}`.toUpperCase().replace(/[^A-Z0-9]/g, "_");
+      if (process.env[envKey] === undefined) {
+        process.env[envKey] = value;
+      }
+    }
+  }
+}
+
+/**
  * Parse the tools section of the substituted config, applying defaults.
  */
 function toolsFromConfig(substituted: Record<string, unknown>, dataDir: string): Config["tools"] {
@@ -220,6 +276,7 @@ export function loadConfig(configPath?: string): Config {
       ...(substituted.models as object),
     },
     tools: toolsFromConfig(substituted, dataDir),
+    integrations: integrationsFromConfig(substituted),
     cron: (substituted.cron as CronJob[]) || [],
     active_hours: (substituted.active_hours as ActiveHoursConfig | undefined) ?? undefined,
     trust: {
