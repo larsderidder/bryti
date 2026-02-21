@@ -1,0 +1,97 @@
+# Pibot configuration
+# Copy to config.yml and fill in your values.
+# ${VAR} references are substituted from environment variables.
+
+agent:
+  name: "Pibot"
+  # Additional prompt prepended to the system prompt. Use this to give the
+  # agent a persona, standing instructions, or context about you and your work.
+  # The framework appends memory, tool descriptions, and all other instructions
+  # automatically — you only need to put your own additions here.
+  system_prompt: |
+    You are Pibot, a personal AI assistant. You are concise and practical.
+  # Option 1: Anthropic OAuth (Claude Pro/Max subscription, no API key needed)
+  # Requires pi CLI login: `pi login anthropic`
+  model: "anthropic/claude-sonnet-4-20250514"
+  fallback_models:             # Tried in order when primary model fails. Use provider/model-id format.
+    - "opencode/minimax-m2.5-free"
+    - "opencode/kimi-k2.5-free"
+  # Option 2: API key provider (uncomment and replace Option 1 above)
+  # model: "together/Qwen/Qwen3-235B-A22B"
+  # fallback_models:
+  #   - "opencode/minimax-m2.5-free"
+  timezone: "Europe/Amsterdam"  # IANA timezone, e.g. "America/New_York". Omit for UTC.
+
+telegram:
+  token: ${TELEGRAM_BOT_TOKEN}
+  allowed_users: []  # Telegram user IDs, empty = allow all (single-user v1 only)
+
+models:
+  providers:
+    # Anthropic OAuth — uses ~/.pi/agent/auth.json (shared with pi CLI).
+    # No api_key needed; pibot reads the OAuth token from auth.json automatically.
+    # Prerequisite: run `pi login anthropic` once to authenticate.
+    - name: anthropic
+      base_url: ""
+      api: anthropic-messages
+      api_key: ""
+      models:
+        - id: "claude-sonnet-4-20250514"
+          name: "Claude Sonnet 4.5"
+          context_window: 200000
+          max_tokens: 16384
+        - id: "claude-opus-4-20250514"
+          name: "Claude Opus 4"
+          context_window: 200000
+          max_tokens: 16384
+
+    # Free open models via opencode.ai (good fallbacks, no subscription needed)
+    - name: opencode
+      base_url: https://opencode.ai/zen/v1
+      api: openai-responses
+      api_key: "public"
+      models:
+        - id: "minimax-m2.5-free"
+          name: "MiniMax M2.5 (Free)"
+          api: openai-completions
+          context_window: 200000
+          max_tokens: 32000
+          compat:
+            maxTokensField: max_tokens
+        - id: "kimi-k2.5-free"
+          name: "Kimi K2.5 (Free)"
+          api: openai-completions
+          context_window: 128000
+          max_tokens: 32000
+          compat:
+            maxTokensField: max_tokens
+
+    # API key providers (optional, uncomment and add your keys)
+    # - name: together
+    #   base_url: https://api.together.xyz/v1
+    #   api_key: ${TOGETHER_API_KEY}
+    #   models:
+    #     - id: "Qwen/Qwen3-235B-A22B"
+    #       name: "Qwen 3 235B"
+    #       context_window: 131072
+    #       max_tokens: 8192
+
+tools:
+  # Web search via SearXNG (workers only — main agent delegates to workers)
+  web_search:
+    enabled: true
+    searxng_url: "https://search.xithing.eu"
+  fetch_url:
+    enabled: true
+    timeout_ms: 10000
+  files:
+    enabled: true
+    base_dir: ./data/files
+  workers:
+    max_concurrent: 3  # raise if you want more parallel research tasks
+
+cron: []
+  # - schedule: "0 8 * * *"
+  #   message: "Good morning! Check the latest tech news and give me a brief summary."
+  # - schedule: "0 18 * * 1-5"
+  #   message: "Summarize what we discussed today and update my memory with any action items."

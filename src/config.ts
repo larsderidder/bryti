@@ -38,6 +38,9 @@ export interface CronJob {
 export interface Config {
   agent: {
     name: string;
+    /** Additional content prepended to the system prompt. Persona, standing
+     *  instructions, or context about the user. The framework adds memory,
+     *  tool descriptions, and all other sections automatically. */
     system_prompt: string;
     model: string;
     /** Ordered list of fallback model strings to try when the primary fails. */
