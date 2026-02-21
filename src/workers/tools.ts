@@ -1,5 +1,5 @@
 /**
- * Worker tools: dispatch_worker, check_worker, interrupt_worker, steer_worker.
+ * Worker tools: worker_dispatch, worker_check, worker_interrupt, worker_steer.
  *
  * Workers are stateless background LLM sessions that run independently of the
  * main agent. They have a scoped tool set, write results to a file, and signal
@@ -7,15 +7,15 @@
  * trigger_on_fact projection the main agent has set up).
  *
  * Lifecycle:
- *   1. dispatch_worker → creates worker dir, writes task.md, spawns session
+ *   1. worker_dispatch → creates worker dir, writes task.md, spawns session
  *   2. Worker runs (web search, fetch URL, write to result.md)
  *      - Worker polls steering.md after every few tool calls and adjusts if found
  *   3. On completion (or failure/timeout/cancellation), pibot:
  *      - writes status.json
  *      - archives a fact into the user's memory store
- *   4. check_worker → query current status of a worker
- *   5. interrupt_worker → cancel a running worker immediately
- *   6. steer_worker → write guidance into steering.md for the worker to pick up
+ *   4. worker_check → query current status of a worker
+ *   5. worker_interrupt → cancel a running worker immediately
+ *   6. worker_steer → write guidance into steering.md for the worker to pick up
  */
 
 import fs from "node:fs";
@@ -45,7 +45,6 @@ import type { WorkerRegistry } from "./registry.js";
 // Constants
 // ---------------------------------------------------------------------------
 
-const MAX_CONCURRENT_WORKERS = 3;
 const DEFAULT_TIMEOUT_MS = 60 * 60 * 1000; // 60 minutes
 
 // ---------------------------------------------------------------------------
@@ -143,15 +142,15 @@ const dispatchWorkerSchema = Type.Object({
 });
 
 const checkWorkerSchema = Type.Object({
-  worker_id: Type.String({ description: "The worker_id returned by dispatch_worker." }),
+  worker_id: Type.String({ description: "The worker_id returned by worker_dispatch." }),
 });
 
 const interruptWorkerSchema = Type.Object({
-  worker_id: Type.String({ description: "The worker_id returned by dispatch_worker." }),
+  worker_id: Type.String({ description: "The worker_id returned by worker_dispatch." }),
 });
 
 const steerWorkerSchema = Type.Object({
-  worker_id: Type.String({ description: "The worker_id returned by dispatch_worker." }),
+  worker_id: Type.String({ description: "The worker_id returned by worker_dispatch." }),
   guidance: Type.String({
     description:
       "New instructions for the worker. Be specific: what to focus on, what to skip, " +
@@ -379,7 +378,7 @@ async function spawnWorkerSession(opts: {
   } catch (error) {
     const errMsg = (error as Error).message;
     // Don't overwrite a terminal status set externally (timeout handler or
-    // interrupt_worker). Both set their own status before aborting the session,
+    // worker_interrupt). Both set their own status before aborting the session,
     // so the error thrown by abort() here would otherwise clobber it.
     const currentEntry = registry.get(workerId);
     if (currentEntry?.status === "timeout" || currentEntry?.status === "cancelled") {
@@ -434,7 +433,7 @@ function scheduleCleanup(
   workerId: string,
   _workerDir: string,
 ): void {
-  // Keep the entry for 24 hours so check_worker still works.
+  // Keep the entry for 24 hours so worker_check still works.
   setTimeout(() => {
     registry.remove(workerId);
     console.log(`[worker] ${workerId} removed from registry after 24h`);
@@ -446,12 +445,12 @@ function scheduleCleanup(
 // ---------------------------------------------------------------------------
 
 /**
- * Create the dispatch_worker and check_worker tools.
+ * Create the worker_dispatch and worker_check tools.
  *
  * @param config          App config (for model, tools, data_dir).
  * @param memoryStore     The user's archival memory store (for completion signals).
  * @param registry        Shared worker registry for this user.
- * @param isWorkerSession When true, dispatch_worker rejects all calls (no nesting).
+ * @param isWorkerSession When true, worker_dispatch rejects all calls (no nesting).
  */
 export function createWorkerTools(
   config: Config,
@@ -460,8 +459,8 @@ export function createWorkerTools(
   isWorkerSession = false,
 ): AgentTool<any>[] {
   const dispatchTool: AgentTool<typeof dispatchWorkerSchema> = {
-    name: "dispatch_worker",
-    label: "dispatch_worker",
+    name: "worker_dispatch",
+    label: "worker_dispatch",
     description:
       "Dispatch a background worker to perform a long-running task (research, content gathering, etc.). " +
       "Returns immediately — the worker runs in the background. " +
@@ -480,9 +479,10 @@ export function createWorkerTools(
       }
 
       // Concurrency limit
-      if (registry.runningCount() >= MAX_CONCURRENT_WORKERS) {
+      const maxConcurrent = config.tools.workers.max_concurrent;
+      if (registry.runningCount() >= maxConcurrent) {
         return toolError(
-          `Maximum concurrent workers (${MAX_CONCURRENT_WORKERS}) already running. ` +
+          `Maximum concurrent workers (${maxConcurrent}) already running. ` +
           `Use check_worker to see current workers, or wait for one to complete.`,
         );
       }
@@ -511,7 +511,7 @@ export function createWorkerTools(
       const modelString = modelOverride ?? config.agent.model;
       const resultPath = path.join(workerDir, "result.md");
 
-      // Register immediately so check_worker can find it
+      // Register immediately so worker_check can find it
       registry.register({
         workerId,
         status: "running",
@@ -574,8 +574,8 @@ export function createWorkerTools(
   };
 
   const checkTool: AgentTool<typeof checkWorkerSchema> = {
-    name: "check_worker",
-    label: "check_worker",
+    name: "worker_check",
+    label: "worker_check",
     description:
       "Check the status of a background worker. " +
       "Use when the user asks how a task is progressing, or to verify completion before reading results.",
@@ -627,8 +627,8 @@ export function createWorkerTools(
   };
 
   const interruptTool: AgentTool<typeof interruptWorkerSchema> = {
-    name: "interrupt_worker",
-    label: "interrupt_worker",
+    name: "worker_interrupt",
+    label: "worker_interrupt",
     description:
       "Cancel a running background worker immediately. " +
       "Use when the task is no longer needed, the user asks you to stop it, or the worker is taking too long. " +
@@ -725,8 +725,8 @@ export function createWorkerTools(
   };
 
   const steerTool: AgentTool<typeof steerWorkerSchema> = {
-    name: "steer_worker",
-    label: "steer_worker",
+    name: "worker_steer",
+    label: "worker_steer",
     description:
       "Send updated guidance to a running background worker. " +
       "The worker checks for a steering.md file after every few tool calls and incorporates the instructions. " +

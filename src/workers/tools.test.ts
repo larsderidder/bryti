@@ -2,10 +2,10 @@
  * Worker tool tests.
  *
  * We test the tool's validation logic, concurrency enforcement, and
- * check_worker disk-fallback. We do not test actual session spawning
+ * worker_check disk-fallback. We do not test actual session spawning
  * (that requires a live model).
  *
- * interrupt_worker tests cover:
+ * worker_interrupt tests cover:
  * - cancelling a running worker (abort called, status set to cancelled)
  * - no-op on already-terminal workers
  * - not-found handling with disk fallback
@@ -21,7 +21,7 @@ import type { WorkerRegistry } from "./registry.js";
 import type { MemoryStore, ScoredResult } from "../memory/store.js";
 import type { Config } from "../config.js";
 
-// Mock the embedding module so interrupt_worker (and any future completion
+// Mock the embedding module so worker_interrupt (and any future completion
 // paths) don't try to download/load a GGUF model during tests.
 vi.mock("../memory/embeddings.js", () => ({
   embed: vi.fn().mockResolvedValue(new Array(768).fill(0)),
@@ -60,6 +60,7 @@ function makeMockConfig(dataDir: string): Config {
       web_search: { enabled: true, searxng_url: "https://search.xithing.eu" },
       fetch_url: { enabled: true, timeout_ms: 5000 },
       files: { enabled: true, base_dir: path.join(dataDir, "files") },
+      workers: { max_concurrent: 3 },
     },
     cron: [],
     data_dir: dataDir,
@@ -85,7 +86,7 @@ function makeMockMemoryStore(): MemoryStore {
 // Tests
 // ---------------------------------------------------------------------------
 
-describe("dispatch_worker — validation", () => {
+describe("worker_dispatch — validation", () => {
   let tempDir: string;
   let config: Config;
   let registry: WorkerRegistry;
@@ -104,7 +105,7 @@ describe("dispatch_worker — validation", () => {
 
   it("rejects dispatch when isWorkerSession=true (no nesting)", async () => {
     const tools = createWorkerTools(config, memoryStore, registry, true);
-    const dispatch = tools.find((t) => t.name === "dispatch_worker")!;
+    const dispatch = tools.find((t) => t.name === "worker_dispatch")!;
 
     const result = await dispatch.execute("call1", { task: "Do something" });
     expect((result.details as any).error).toMatch(/cannot dispatch/i);
@@ -112,9 +113,9 @@ describe("dispatch_worker — validation", () => {
 
   it("rejects dispatch when max concurrent workers reached", async () => {
     const tools = createWorkerTools(config, memoryStore, registry);
-    const dispatch = tools.find((t) => t.name === "dispatch_worker")!;
+    const dispatch = tools.find((t) => t.name === "worker_dispatch")!;
 
-    // Fill up the registry with 3 running workers
+    // Fill up the registry with 3 running workers (default limit)
     for (let i = 0; i < 3; i++) {
       registry.register({
         workerId: `w-${i}`,
@@ -134,9 +135,35 @@ describe("dispatch_worker — validation", () => {
     expect((result.details as any).error).toMatch(/maximum concurrent workers/i);
   });
 
+  it("respects max_concurrent from config", async () => {
+    config.tools.workers.max_concurrent = 2;
+    const tools = createWorkerTools(config, memoryStore, registry);
+    const dispatch = tools.find((t) => t.name === "worker_dispatch")!;
+
+    // Only 2 running workers needed to hit the limit now
+    for (let i = 0; i < 2; i++) {
+      registry.register({
+        workerId: `w-cfg-${i}`,
+        status: "running",
+        task: "placeholder",
+        resultPath: "",
+        workerDir: "",
+        startedAt: new Date(),
+        error: null,
+        model: "m",
+        abort: null,
+        timeoutHandle: null,
+      });
+    }
+
+    const result = await dispatch.execute("call1", { task: "Should be blocked" });
+    expect((result.details as any).error).toMatch(/maximum concurrent workers/i);
+    expect((result.details as any).error).toMatch(/2/);
+  });
+
   it("rejects unknown tool names", async () => {
     const tools = createWorkerTools(config, memoryStore, registry);
-    const dispatch = tools.find((t) => t.name === "dispatch_worker")!;
+    const dispatch = tools.find((t) => t.name === "worker_dispatch")!;
 
     const result = await dispatch.execute("call1", {
       task: "Research something",
@@ -146,7 +173,7 @@ describe("dispatch_worker — validation", () => {
   });
 });
 
-describe("dispatch_worker — successful dispatch", () => {
+describe("worker_dispatch — successful dispatch", () => {
   let tempDir: string;
   let config: Config;
   let registry: WorkerRegistry;
@@ -173,7 +200,7 @@ describe("dispatch_worker — successful dispatch", () => {
 
   it("creates worker directory and task.md", async () => {
     const tools = createWorkerTools(config, memoryStore, registry);
-    const dispatch = tools.find((t) => t.name === "dispatch_worker")!;
+    const dispatch = tools.find((t) => t.name === "worker_dispatch")!;
 
     // We stub spawnWorkerSession indirectly by just checking the side effects
     // that happen before spawn (dir creation, task.md, registry entry).
@@ -200,7 +227,7 @@ describe("dispatch_worker — successful dispatch", () => {
 
   it("registers the worker in the registry before spawn completes", async () => {
     const tools = createWorkerTools(config, memoryStore, registry);
-    const dispatch = tools.find((t) => t.name === "dispatch_worker")!;
+    const dispatch = tools.find((t) => t.name === "worker_dispatch")!;
 
     const result = await dispatch.execute("call1", { task: "Some research task" });
     const details = result.details as any;
@@ -214,7 +241,7 @@ describe("dispatch_worker — successful dispatch", () => {
 
   it("returns worker_id, status=running, and result_path", async () => {
     const tools = createWorkerTools(config, memoryStore, registry);
-    const dispatch = tools.find((t) => t.name === "dispatch_worker")!;
+    const dispatch = tools.find((t) => t.name === "worker_dispatch")!;
 
     const result = await dispatch.execute("call1", { task: "Research task" });
     const details = result.details as any;
@@ -228,7 +255,7 @@ describe("dispatch_worker — successful dispatch", () => {
 
   it("includes the trigger_on_fact hint in the response", async () => {
     const tools = createWorkerTools(config, memoryStore, registry);
-    const dispatch = tools.find((t) => t.name === "dispatch_worker")!;
+    const dispatch = tools.find((t) => t.name === "worker_dispatch")!;
 
     const result = await dispatch.execute("call1", { task: "Research something" });
     const details = result.details as any;
@@ -239,7 +266,7 @@ describe("dispatch_worker — successful dispatch", () => {
   });
 });
 
-describe("check_worker", () => {
+describe("worker_check", () => {
   let tempDir: string;
   let config: Config;
   let registry: WorkerRegistry;
@@ -258,7 +285,7 @@ describe("check_worker", () => {
 
   it("returns error for unknown worker_id with no status.json", async () => {
     const tools = createWorkerTools(config, memoryStore, registry);
-    const check = tools.find((t) => t.name === "check_worker")!;
+    const check = tools.find((t) => t.name === "worker_check")!;
 
     const result = await check.execute("call1", { worker_id: "w-notexist" });
     expect((result.details as any).error).toMatch(/worker not found/i);
@@ -266,7 +293,7 @@ describe("check_worker", () => {
 
   it("returns status from in-memory registry", async () => {
     const tools = createWorkerTools(config, memoryStore, registry);
-    const check = tools.find((t) => t.name === "check_worker")!;
+    const check = tools.find((t) => t.name === "worker_check")!;
 
     registry.register({
       workerId: "w-known",
@@ -290,7 +317,7 @@ describe("check_worker", () => {
 
   it("falls back to status.json on disk when not in registry", async () => {
     const tools = createWorkerTools(config, memoryStore, registry);
-    const check = tools.find((t) => t.name === "check_worker")!;
+    const check = tools.find((t) => t.name === "worker_check")!;
 
     // Write a status.json as if a previous run wrote it
     const workerDir = path.join(tempDir, "files", "workers", "w-old");
@@ -316,7 +343,7 @@ describe("check_worker", () => {
 
   it("returns error status correctly", async () => {
     const tools = createWorkerTools(config, memoryStore, registry);
-    const check = tools.find((t) => t.name === "check_worker")!;
+    const check = tools.find((t) => t.name === "worker_check")!;
 
     registry.register({
       workerId: "w-failed",
@@ -338,7 +365,7 @@ describe("check_worker", () => {
   });
 });
 
-describe("interrupt_worker", () => {
+describe("worker_interrupt", () => {
   let tempDir: string;
   let config: Config;
   let registry: WorkerRegistry;
@@ -357,7 +384,7 @@ describe("interrupt_worker", () => {
 
   it("returns error for unknown worker_id with no status.json", async () => {
     const tools = createWorkerTools(config, memoryStore, registry);
-    const interrupt = tools.find((t) => t.name === "interrupt_worker")!;
+    const interrupt = tools.find((t) => t.name === "worker_interrupt")!;
 
     const result = await interrupt.execute("call1", { worker_id: "w-notexist" });
     expect((result.details as any).error).toMatch(/worker not found/i);
@@ -365,7 +392,7 @@ describe("interrupt_worker", () => {
 
   it("returns no-op for a worker already in a terminal state", async () => {
     const tools = createWorkerTools(config, memoryStore, registry);
-    const interrupt = tools.find((t) => t.name === "interrupt_worker")!;
+    const interrupt = tools.find((t) => t.name === "worker_interrupt")!;
 
     for (const status of ["complete", "failed", "timeout", "cancelled"] as const) {
       const workerId = `w-terminal-${status}`;
@@ -391,7 +418,7 @@ describe("interrupt_worker", () => {
 
   it("calls abort() on a running worker and sets status to cancelled", async () => {
     const tools = createWorkerTools(config, memoryStore, registry);
-    const interrupt = tools.find((t) => t.name === "interrupt_worker")!;
+    const interrupt = tools.find((t) => t.name === "worker_interrupt")!;
 
     let abortCalled = false;
     const workerDir = path.join(tempDir, "files", "workers", "w-running");
@@ -423,7 +450,7 @@ describe("interrupt_worker", () => {
 
   it("clears the timeout handle when cancelling", async () => {
     const tools = createWorkerTools(config, memoryStore, registry);
-    const interrupt = tools.find((t) => t.name === "interrupt_worker")!;
+    const interrupt = tools.find((t) => t.name === "worker_interrupt")!;
 
     const workerDir = path.join(tempDir, "files", "workers", "w-timeout");
     fs.mkdirSync(workerDir, { recursive: true });
@@ -453,7 +480,7 @@ describe("interrupt_worker", () => {
 
   it("writes status.json with cancelled status", async () => {
     const tools = createWorkerTools(config, memoryStore, registry);
-    const interrupt = tools.find((t) => t.name === "interrupt_worker")!;
+    const interrupt = tools.find((t) => t.name === "worker_interrupt")!;
 
     const workerDir = path.join(tempDir, "files", "workers", "w-disk");
     fs.mkdirSync(workerDir, { recursive: true });
@@ -482,7 +509,7 @@ describe("interrupt_worker", () => {
 
   it("handles abort() throwing gracefully (still marks cancelled)", async () => {
     const tools = createWorkerTools(config, memoryStore, registry);
-    const interrupt = tools.find((t) => t.name === "interrupt_worker")!;
+    const interrupt = tools.find((t) => t.name === "worker_interrupt")!;
 
     const workerDir = path.join(tempDir, "files", "workers", "w-abort-throws");
     fs.mkdirSync(workerDir, { recursive: true });
@@ -510,7 +537,7 @@ describe("interrupt_worker", () => {
 
   it("handles no abort function (session not yet started)", async () => {
     const tools = createWorkerTools(config, memoryStore, registry);
-    const interrupt = tools.find((t) => t.name === "interrupt_worker")!;
+    const interrupt = tools.find((t) => t.name === "worker_interrupt")!;
 
     const workerDir = path.join(tempDir, "files", "workers", "w-no-abort");
     fs.mkdirSync(workerDir, { recursive: true });
@@ -538,7 +565,7 @@ describe("interrupt_worker", () => {
 
   it("falls back to status.json on disk when worker is not in registry", async () => {
     const tools = createWorkerTools(config, memoryStore, registry);
-    const interrupt = tools.find((t) => t.name === "interrupt_worker")!;
+    const interrupt = tools.find((t) => t.name === "worker_interrupt")!;
 
     const workerDir = path.join(tempDir, "files", "workers", "w-old-complete");
     fs.mkdirSync(workerDir, { recursive: true });
@@ -564,7 +591,7 @@ describe("interrupt_worker", () => {
   });
 });
 
-describe("steer_worker", () => {
+describe("worker_steer", () => {
   let tempDir: string;
   let config: Config;
   let registry: WorkerRegistry;
@@ -583,7 +610,7 @@ describe("steer_worker", () => {
 
   it("returns error for unknown worker_id", async () => {
     const tools = createWorkerTools(config, memoryStore, registry);
-    const steer = tools.find((t) => t.name === "steer_worker")!;
+    const steer = tools.find((t) => t.name === "worker_steer")!;
 
     const result = await steer.execute("call1", {
       worker_id: "w-notexist",
@@ -594,7 +621,7 @@ describe("steer_worker", () => {
 
   it("returns no-op for a worker already in a terminal state", async () => {
     const tools = createWorkerTools(config, memoryStore, registry);
-    const steer = tools.find((t) => t.name === "steer_worker")!;
+    const steer = tools.find((t) => t.name === "worker_steer")!;
 
     for (const status of ["complete", "failed", "timeout", "cancelled"] as const) {
       const workerId = `w-done-${status}`;
@@ -623,7 +650,7 @@ describe("steer_worker", () => {
 
   it("writes steering.md into the worker directory", async () => {
     const tools = createWorkerTools(config, memoryStore, registry);
-    const steer = tools.find((t) => t.name === "steer_worker")!;
+    const steer = tools.find((t) => t.name === "worker_steer")!;
 
     const workerDir = path.join(tempDir, "files", "workers", "w-steerable");
     fs.mkdirSync(workerDir, { recursive: true });
@@ -656,7 +683,7 @@ describe("steer_worker", () => {
 
   it("replaces the previous steering note on subsequent calls", async () => {
     const tools = createWorkerTools(config, memoryStore, registry);
-    const steer = tools.find((t) => t.name === "steer_worker")!;
+    const steer = tools.find((t) => t.name === "worker_steer")!;
 
     const workerDir = path.join(tempDir, "files", "workers", "w-resterr");
     fs.mkdirSync(workerDir, { recursive: true });

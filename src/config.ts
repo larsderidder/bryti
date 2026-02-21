@@ -71,6 +71,10 @@ export interface Config {
     };
     fetch_url: { enabled: boolean; timeout_ms: number };
     files: { enabled: boolean; base_dir: string };
+    workers: {
+      /** Maximum number of workers that may run concurrently. Default: 3. */
+      max_concurrent: number;
+    };
   };
   cron: CronJob[];
   /** Optional active hours window. Scheduler callbacks skip firing outside it. */
@@ -161,6 +165,10 @@ function toolsFromConfig(substituted: Record<string, unknown>, dataDir: string):
       enabled: true,
       base_dir: path.join(dataDir, "files"),
       ...(raw.files as object | undefined),
+    },
+    workers: {
+      max_concurrent: 3,
+      ...(raw.workers as object | undefined),
     },
   };
 }
@@ -321,7 +329,7 @@ export function ensureDataDirs(config: Config): void {
  * Write pi project settings that point to the agent's extension directory.
  *
  * Pi reads extensions from settings.extensions[] paths. We point it at
- * data/files/extensions/ where the agent writes extensions via write_file.
+ * data/files/extensions/ where the agent writes extensions via file_write.
  */
 function writeExtensionSettings(config: Config): void {
   const settingsPath = path.join(config.data_dir, ".pi", "settings.json");
