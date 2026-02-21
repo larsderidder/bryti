@@ -144,8 +144,11 @@ async function getOrLoadSession(state: AppState, userId: string): Promise<UserSe
       userId,
       text:
         `[Worker completed]\n\nThe following commitment(s) were triggered:\n\n${summaries}\n\n` +
-        `Read the worker's result file and act on each triggered item. ` +
-        `Summarize the findings for the user.`,
+        `IMPORTANT: The user has NOT seen the worker's results yet. You must:\n` +
+        `1. Read the worker's result file (file_read)\n` +
+        `2. Share the key findings with the user FIRST\n` +
+        `3. Only THEN suggest next steps or act on them\n` +
+        `Never assume the user knows what the worker found. Always present the findings before drawing conclusions or taking action.`,
       platform: "telegram",
       raw: { type: "worker_trigger" },
     });

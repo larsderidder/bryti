@@ -573,7 +573,14 @@ export function createProjectionStore(userId: string, dataDir: string): Projecti
             activated.push(rowToProjection(updated as ProjectionRow));
           }
         } else if (embed) {
-          embeddingFallback.push(row);
+          // Skip embedding fallback for triggers that contain specific identifiers
+          // (worker IDs, UUIDs, etc.). These should only match on exact keywords,
+          // not semantic similarity. "worker w-abc123 complete" is semantically
+          // similar to "worker w-xyz789 complete" but they're about different workers.
+          const hasSpecificId = /w-[0-9a-f]{6,}|[0-9a-f]{8}-[0-9a-f]{4}-/.test(trigger);
+          if (!hasSpecificId) {
+            embeddingFallback.push(row);
+          }
         }
       }
 
