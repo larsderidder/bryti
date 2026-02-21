@@ -12,7 +12,7 @@ import { createArchivalMemoryTools } from "./archival-memory-tool.js";
 import { createConversationSearchTool } from "./conversation-search-tool.js";
 import { createProjectionTools, createProjectionStore } from "../projection/index.js";
 import { createWorkerTools, createWorkerRegistry } from "../workers/index.js";
-import { createDocumentTools } from "./document-tool.js";
+import { createDocumentTools, HedgeDocBackend } from "../documents/index.js";
 import { embed } from "../memory/embeddings.js";
 import { createMemoryStore } from "../memory/store.js";
 import path from "node:path";
@@ -27,7 +27,7 @@ export { createArchivalMemoryTools };
 export { createConversationSearchTool };
 export { createProjectionTools, createProjectionStore };
 export { createWorkerTools, createWorkerRegistry };
-export { createDocumentTools };
+export { createDocumentTools, HedgeDocBackend } from "../documents/index.js";
 
 /**
  * Type for pibot tools (AgentTool from pi).
@@ -76,11 +76,12 @@ export function createTools(
   tools.push(createConversationSearchTool(path.join(config.data_dir, "history")));
 
   // Document tools: collaborative editing surface.
-  // Registered only when a backend (HedgeDoc) is configured and enabled.
+  // Registered only when a backend is configured and enabled.
   // If not configured, the agent falls back to sending content in chat.
   const hdConfig = config.integrations.hedgedoc;
   if (hdConfig?.enabled) {
-    tools.push(...createDocumentTools({ url: hdConfig.url, public_url: hdConfig.public_url }));
+    const backend = new HedgeDocBackend({ url: hdConfig.url, public_url: hdConfig.public_url });
+    tools.push(...createDocumentTools(backend));
   }
 
   // Worker tools: dispatch and check background research sessions.
