@@ -124,21 +124,6 @@ tools:
     max_concurrent: 3
 
 # ---------------------------------------------------------------------------
-# Integrations (optional)
-# ---------------------------------------------------------------------------
-
-# HedgeDoc — collaborative document editing.
-# Enables the document_create, document_update, document_read tools.
-# The agent will create shared notes and send links to the user in chat.
-# See docker-compose.yml for the HedgeDoc service definition.
-#
-# integrations:
-#   hedgedoc:
-#     enabled: true
-#     url: "http://hedgedoc:3000"           # internal Docker network URL
-#     public_url: "https://docs.example.com" # user-facing URL for shared links
-
-# ---------------------------------------------------------------------------
 # Scheduled prompts (optional)
 # ---------------------------------------------------------------------------
 

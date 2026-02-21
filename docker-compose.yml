@@ -13,11 +13,19 @@ services:
   # ---------------------------------------------------------------------------
   # HedgeDoc — collaborative document editing (optional)
   #
-  # Enables document_create / document_update / document_read tools.
-  # Enable in data/config.yml under integrations.hedgedoc.
+  # Provides document_create, document_update, document_read tools via the
+  # documents-hedgedoc extension in data/files/extensions/.
   #
-  # To activate: uncomment this block and the hedgedoc_db block below,
-  # then set integrations.hedgedoc in config.yml.
+  # To activate:
+  #   1. Uncomment this block and hedgedoc_db below
+  #   2. Set HEDGEDOC_URL and HEDGEDOC_PUBLIC_URL in your .env file
+  #   3. The extension picks them up automatically on next start
+  #
+  # .env entries needed:
+  #   HEDGEDOC_URL=http://hedgedoc:3000
+  #   HEDGEDOC_PUBLIC_URL=https://docs.yourdomain.com
+  #   HEDGEDOC_DOMAIN=docs.yourdomain.com
+  #   HEDGEDOC_SECRET=<run: openssl rand -hex 32>
   # ---------------------------------------------------------------------------
   # hedgedoc:
   #   image: quay.io/hedgedoc/hedgedoc:1.10
@@ -28,8 +36,8 @@ services:
   #     - CMD_URL_ADDPORT=false
   #     - CMD_PROTOCOL_USESSL=true
   #     - CMD_ALLOW_ANONYMOUS=true               # allow anonymous note creation
-  #     - CMD_ALLOW_FREEURL=true                 # allow /new/<alias> for updates
-  #     - CMD_SESSION_SECRET=${HEDGEDOC_SECRET}  # generate with: openssl rand -hex 32
+  #     - CMD_ALLOW_FREEURL=true                 # required for document_update to work
+  #     - CMD_SESSION_SECRET=${HEDGEDOC_SECRET}
   #   volumes:
   #     - hedgedoc_uploads:/hedgedoc/public/uploads
   #   depends_on:
