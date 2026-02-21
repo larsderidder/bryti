@@ -181,6 +181,25 @@ function buildSystemPrompt(
 
   parts.push(buildToolSection(tools, extensionToolNames));
 
+  parts.push(
+    `## Extensions\n` +
+    `Tools marked "(extension)" come from TypeScript files in your extensions directory. ` +
+    `You can read, rewrite, or replace them using file_read and file_write.\n\n` +
+    `Extensions are loaded from: data/files/extensions/\n\n` +
+    `**Replacing an extension:**\n` +
+    `Read the existing file first to understand its structure, then write a new version. ` +
+    `The new extension is picked up on the next restart. ` +
+    `If the user asks you to switch to a different service (e.g. replace HedgeDoc with Notion), ` +
+    `rewrite the relevant extension file against the new API.\n\n` +
+    `**Disabling an extension permanently:**\n` +
+    `Write an empty file over it (file_write with empty content). ` +
+    `An empty file is a permanent tombstone — the extension will not be restored on restart. ` +
+    `Do not delete extension files; overwrite with empty content instead.\n\n` +
+    `**Creating a new extension:**\n` +
+    `Write a new .ts file to data/files/extensions/. It must export a default function that receives ` +
+    `an ExtensionAPI and calls pi.registerTool() for each tool. See existing extensions for examples.`,
+  );
+
   if (coreMemory) {
     parts.push(`## Your Core Memory (always visible)\n${coreMemory}`);
   }

@@ -6,7 +6,7 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && cp -r defaults dist/",
     "dev": "tsc --watch",
     "start": "node --env-file=.env dist/index.js",
     "cli": "node --env-file=.env dist/cli.js",

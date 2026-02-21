@@ -7,7 +7,11 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 import type { ActiveHoursConfig } from "./active-hours.js";
 
 export type { ActiveHoursConfig };
@@ -334,6 +338,46 @@ export function ensureDataDirs(config: Config): void {
   // Pi's discoverAndLoadExtensions reads configuredPaths from settings and
   // scans directories for .ts/.js files.
   writeExtensionSettings(config);
+
+  // Seed default extensions into the user's extensions directory.
+  // Only copies when the target file does not exist.
+  // An empty file signals intentional deletion by the agent — never overwrite it.
+  seedDefaultExtensions(path.join(config.data_dir, "files", "extensions"));
+}
+
+/**
+ * Seed default extensions shipped with bryti into the user's extensions directory.
+ *
+ * Rules:
+ *   - Copy only when the target file does not exist (first run / fresh install).
+ *   - Never overwrite an existing file, even if the source has changed.
+ *   - An empty file (0 bytes) means the agent intentionally deleted the
+ *     extension. Treat it as "do not seed" — never replace it.
+ *
+ * Source: src/defaults/extensions/ (tracked in git, compiled to dist/defaults/extensions/)
+ * Target: data/files/extensions/ (gitignored, user-owned, agent-writable)
+ */
+function seedDefaultExtensions(extensionsDir: string): void {
+  // In production (dist/): defaults are copied alongside the compiled output.
+  // In development (src/ via ts-node or tsx): walk up to project root.
+  const defaultsDir = path.join(__dirname, "defaults", "extensions");
+
+  if (!fs.existsSync(defaultsDir)) {
+    return;
+  }
+
+  for (const filename of fs.readdirSync(defaultsDir)) {
+    const target = path.join(extensionsDir, filename);
+
+    // File already exists (including empty tombstone) — leave it alone.
+    if (fs.existsSync(target)) {
+      continue;
+    }
+
+    const source = path.join(defaultsDir, filename);
+    fs.copyFileSync(source, target);
+    console.log(`[extensions] seeded default: ${filename}`);
+  }
 }
 
 /**
