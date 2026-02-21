@@ -57,21 +57,22 @@ export class WhatsAppBridge implements ChannelBridge {
     const authDir = `${this.dataDir}/whatsapp-auth`;
     const { state, saveCreds } = await useMultiFileAuthState(authDir);
 
+    const silentLogger = {
+      level: "silent",
+      info: () => {},
+      warn: () => {},
+      error: (...args: unknown[]) => console.error("[whatsapp:baileys]", ...args),
+      debug: () => {},
+      trace: () => {},
+      fatal: (...args: unknown[]) => console.error("[whatsapp:baileys:fatal]", ...args),
+      child: () => silentLogger,
+    };
+
     this.socket = makeWASocket({
       auth: state,
       printQRInTerminal: true,
       browser: ["Pibot", "Chrome", "22.0"],
-      // Suppress baileys' noisy default logging
-      logger: {
-        level: "silent",
-        info: () => {},
-        warn: () => {},
-        error: (...args: unknown[]) => console.error("[whatsapp:baileys]", ...args),
-        debug: () => {},
-        trace: () => {},
-        fatal: (...args: unknown[]) => console.error("[whatsapp:baileys:fatal]", ...args),
-        child: () => this.socket!.logger,
-      } as any,
+      logger: silentLogger as any,
     });
 
     this.socket.ev.on("creds.update", saveCreds);
