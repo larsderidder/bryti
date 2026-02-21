@@ -79,6 +79,19 @@ export interface Config {
       max_concurrent: number;
     };
   };
+  integrations: {
+    /**
+     * HedgeDoc backend for the document_create / document_update / document_read tools.
+     * Omit or set enabled: false to disable all document tools.
+     */
+    hedgedoc?: {
+      enabled: boolean;
+      /** Internal URL pibot uses to reach HedgeDoc (e.g. http://hedgedoc:3000) */
+      url: string;
+      /** User-facing URL for links sent to the user. Defaults to url. */
+      public_url?: string;
+    };
+  };
   cron: CronJob[];
   /** Optional active hours window. Scheduler callbacks skip firing outside it. */
   active_hours?: ActiveHoursConfig;
@@ -154,6 +167,25 @@ function substituteDeep(obj: unknown): unknown {
 }
 
 /**
+ * Parse the integrations section of the substituted config.
+ */
+function integrationsFromConfig(substituted: Record<string, unknown>): Config["integrations"] {
+  const raw = (substituted.integrations ?? {}) as Record<string, unknown>;
+  const hd = (raw.hedgedoc ?? {}) as Record<string, unknown>;
+
+  const hedgedoc =
+    hd.enabled === true && typeof hd.url === "string"
+      ? {
+          enabled: true as const,
+          url: hd.url,
+          public_url: typeof hd.public_url === "string" ? hd.public_url : undefined,
+        }
+      : undefined;
+
+  return { hedgedoc };
+}
+
+/**
  * Parse the tools section of the substituted config, applying defaults.
  */
 function toolsFromConfig(substituted: Record<string, unknown>, dataDir: string): Config["tools"] {
@@ -216,6 +248,7 @@ export function loadConfig(configPath?: string): Config {
       ...(substituted.models as object),
     },
     tools: toolsFromConfig(substituted, dataDir),
+    integrations: integrationsFromConfig(substituted),
     cron: (substituted.cron as CronJob[]) || [],
     active_hours: (substituted.active_hours as ActiveHoursConfig | undefined) ?? undefined,
     trust: {

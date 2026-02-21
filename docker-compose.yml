@@ -10,6 +10,41 @@ services:
     environment:
       - PIBOT_DATA_DIR=/data
 
+  # ---------------------------------------------------------------------------
+  # HedgeDoc — collaborative document editing (optional)
+  #
+  # Enables document_create / document_update / document_read tools.
+  # Enable in data/config.yml under integrations.hedgedoc.
+  #
+  # To activate: uncomment this block and the hedgedoc_db block below,
+  # then set integrations.hedgedoc in config.yml.
+  # ---------------------------------------------------------------------------
+  # hedgedoc:
+  #   image: quay.io/hedgedoc/hedgedoc:1.10
+  #   restart: unless-stopped
+  #   environment:
+  #     - CMD_DB_URL=postgres://hedgedoc:hedgedoc@hedgedoc_db:5432/hedgedoc
+  #     - CMD_DOMAIN=${HEDGEDOC_DOMAIN}          # public hostname, no protocol
+  #     - CMD_URL_ADDPORT=false
+  #     - CMD_PROTOCOL_USESSL=true
+  #     - CMD_ALLOW_ANONYMOUS=true               # allow anonymous note creation
+  #     - CMD_ALLOW_FREEURL=true                 # allow /new/<alias> for updates
+  #     - CMD_SESSION_SECRET=${HEDGEDOC_SECRET}  # generate with: openssl rand -hex 32
+  #   volumes:
+  #     - hedgedoc_uploads:/hedgedoc/public/uploads
+  #   depends_on:
+  #     - hedgedoc_db
+  #
+  # hedgedoc_db:
+  #   image: postgres:16-alpine
+  #   restart: unless-stopped
+  #   environment:
+  #     - POSTGRES_USER=hedgedoc
+  #     - POSTGRES_PASSWORD=hedgedoc
+  #     - POSTGRES_DB=hedgedoc
+  #   volumes:
+  #     - hedgedoc_db_data:/var/lib/postgresql/data
+
   # Uncomment for production with webhook mode
   # caddy:
   #   image: caddy:2-alpine
@@ -25,3 +60,5 @@ services:
 # volumes:
 #   caddy_data:
 #   caddy_config:
+#   hedgedoc_uploads:
+#   hedgedoc_db_data:
