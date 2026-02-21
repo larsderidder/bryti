@@ -134,10 +134,12 @@ Do not delete extension files. Always overwrite with empty content.
 
 ## Real examples
 
-Read the existing extensions for patterns:
+Read the existing extensions in `data/files/extensions/` for patterns.
+The bundled default:
 
 - `extensions/documents-hedgedoc.ts` — optional tool (skips if env var missing), fetch API, multiple tools
+
+Extensions the agent has written for itself (if present):
+
 - `extensions/shell.ts` — child_process, env var for paths, elevated tool
-- `extensions/http-client.ts` — generic fetch wrapper, flexible parameters
-- `extensions/time-tools.ts` — pure computation, multiple related tools, no external calls
-- `extensions/google-calendar.ts` — API key from env, graceful error message when unconfigured
+- `extensions/weather_weert.ts` — simple fetch, single tool, hardcoded location
