@@ -19,7 +19,8 @@ RUN addgroup -g 1000 -S pibot && \
     adduser -u 1000 -S pibot -G pibot
 USER pibot
 
-# Data directory is a volume mount
+# Data directory (config, memory, sessions, logs) is a volume mount.
+# The embedding model downloads here on first run (~300MB).
 VOLUME /data
 ENV PIBOT_DATA_DIR=/data
 

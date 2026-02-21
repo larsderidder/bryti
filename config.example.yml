@@ -1,36 +1,61 @@
 # Pibot configuration
-# Copy to config.yml and fill in your values.
+# Copy to data/config.yml and fill in your values.
 # ${VAR} references are substituted from environment variables.
 
 agent:
   name: "Pibot"
-  # Additional prompt prepended to the system prompt. Use this to give the
-  # agent a persona, standing instructions, or context about you and your work.
-  # The framework appends memory, tool descriptions, and all other instructions
-  # automatically — you only need to put your own additions here.
+
+  # Your additions to the system prompt. Persona, standing instructions, context
+  # about you and your work. The framework adds memory, tool descriptions, and
+  # all other sections automatically.
   system_prompt: |
     You are Pibot, a personal AI assistant. You are concise and practical.
+
+  # Primary model. Format: provider/model-id
   # Option 1: Anthropic OAuth (Claude Pro/Max subscription, no API key needed)
-  # Requires pi CLI login: `pi login anthropic`
+  # Requires pi CLI login first: `pi login anthropic`
   model: "anthropic/claude-sonnet-4-20250514"
-  fallback_models:             # Tried in order when primary model fails. Use provider/model-id format.
+
+  # Tried in order when primary model fails
+  fallback_models:
     - "opencode/minimax-m2.5-free"
     - "opencode/kimi-k2.5-free"
-  # Option 2: API key provider (uncomment and replace Option 1 above)
-  # model: "together/Qwen/Qwen3-235B-A22B"
+
+  # Option 2: Free models only (no subscription needed)
+  # model: "opencode/minimax-m2.5-free"
   # fallback_models:
-  #   - "opencode/minimax-m2.5-free"
-  timezone: "Europe/Amsterdam"  # IANA timezone, e.g. "America/New_York". Omit for UTC.
+  #   - "opencode/kimi-k2.5-free"
+
+  # IANA timezone for projection scheduling and display
+  timezone: "Europe/Amsterdam"
+
+  # Model for the background reflection pass (defaults to primary model).
+  # Set a cheaper model here to save tokens on background work.
+  # reflection_model: "opencode/minimax-m2.5-free"
+
+# ---------------------------------------------------------------------------
+# Channels — enable at least one
+# ---------------------------------------------------------------------------
 
 telegram:
   token: ${TELEGRAM_BOT_TOKEN}
-  allowed_users: []  # Telegram user IDs, empty = allow all (single-user v1 only)
+  allowed_users: []  # Telegram user IDs. Empty = allow all (not recommended).
+
+# WhatsApp via baileys (no Meta Business API). QR code auth on first run.
+# allowed_users: phone numbers in international format without + (e.g., 31612345678)
+whatsapp:
+  enabled: false
+  allowed_users: []
+
+# ---------------------------------------------------------------------------
+# Model providers
+# ---------------------------------------------------------------------------
 
 models:
   providers:
     # Anthropic OAuth — uses ~/.pi/agent/auth.json (shared with pi CLI).
-    # No api_key needed; pibot reads the OAuth token from auth.json automatically.
-    # Prerequisite: run `pi login anthropic` once to authenticate.
+    # No api_key needed; pibot reads the OAuth token automatically.
+    # Prerequisite: run `pi login anthropic` once.
     - name: anthropic
       base_url: ""
       api: anthropic-messages
@@ -45,7 +70,7 @@ models:
           context_window: 200000
           max_tokens: 16384
 
-    # Free open models via opencode.ai (good fallbacks, no subscription needed)
+    # Free open models via opencode.ai (no subscription, no API key)
     - name: opencode
       base_url: https://opencode.ai/zen/v1
       api: openai-responses
@@ -66,7 +91,7 @@ models:
           compat:
             maxTokensField: max_tokens
 
-    # API key providers (optional, uncomment and add your keys)
+    # Paid API providers (uncomment and add your keys)
     # - name: together
     #   base_url: https://api.together.xyz/v1
     #   api_key: ${TOGETHER_API_KEY}
@@ -76,22 +101,42 @@ models:
     #       context_window: 131072
     #       max_tokens: 8192
 
+# ---------------------------------------------------------------------------
+# Tools
+# ---------------------------------------------------------------------------
+
 tools:
-  # Web search via SearXNG (workers only — main agent delegates to workers)
+  # Web search via SearXNG (used by workers for web research).
+  # Self-host SearXNG or use a public instance.
   web_search:
     enabled: true
-    searxng_url: "https://search.xithing.eu"
+    searxng_url: "https://searx.be"   # Replace with your own SearXNG instance
+
   fetch_url:
     enabled: true
     timeout_ms: 10000
+
   files:
     enabled: true
     base_dir: ./data/files
+
   workers:
-    max_concurrent: 3  # raise if you want more parallel research tasks
+    max_concurrent: 3
+
+# ---------------------------------------------------------------------------
+# Scheduled prompts (optional)
+# ---------------------------------------------------------------------------
 
 cron: []
   # - schedule: "0 8 * * *"
-  #   message: "Good morning! Check the latest tech news and give me a brief summary."
+  #   message: "Good morning! Brief me on anything I need to know today."
   # - schedule: "0 18 * * 1-5"
-  #   message: "Summarize what we discussed today and update my memory with any action items."
+  #   message: "Summarize what we discussed today and update memory with action items."
+
+# ---------------------------------------------------------------------------
+# Active hours (optional — limits when the scheduler can send messages)
+# ---------------------------------------------------------------------------
+
+# active_hours:
+#   start: "08:00"
+#   end: "23:00"
