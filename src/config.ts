@@ -208,18 +208,95 @@ export function loadConfig(configPath?: string): Config {
     }));
   }
 
-  // Validate required fields
-  if (!config.telegram.token && !config.whatsapp.enabled) {
-    throw new Error("Config: telegram.token is required (or enable whatsapp)");
-  }
-  if (!config.agent.model) {
-    throw new Error("Config: agent.model is required");
-  }
-  if (config.models.providers.length === 0) {
-    throw new Error("Config: at least one model provider is required");
-  }
+  // Validate
+  validateConfig(config);
 
   return config;
+}
+
+/**
+ * Validate config at startup. Catches misconfigurations early rather than
+ * failing at runtime (e.g., 30 minutes later when a cron job fires).
+ */
+function validateConfig(config: Config): void {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+
+  // --- Required fields ---
+
+  if (!config.telegram.token && !config.whatsapp.enabled) {
+    errors.push("telegram.token is required (or enable whatsapp)");
+  }
+  if (!config.agent.model) {
+    errors.push("agent.model is required");
+  }
+  if (config.models.providers.length === 0) {
+    errors.push("at least one model provider is required");
+  }
+
+  // --- Primary model must be resolvable ---
+
+  if (config.agent.model) {
+    const [providerName] = config.agent.model.includes("/")
+      ? config.agent.model.split("/", 2)
+      : [config.agent.model];
+    const provider = config.models.providers.find((p) => p.name === providerName);
+    if (!provider) {
+      errors.push(
+        `agent.model "${config.agent.model}" references provider "${providerName}" ` +
+        `which is not in models.providers. Available: ${config.models.providers.map((p) => p.name).join(", ")}`,
+      );
+    }
+  }
+
+  // --- Fallback models must reference known providers ---
+
+  for (const fb of config.agent.fallback_models ?? []) {
+    const [providerName] = fb.includes("/") ? fb.split("/", 2) : [fb];
+    const provider = config.models.providers.find((p) => p.name === providerName);
+    if (!provider) {
+      warnings.push(
+        `fallback_model "${fb}" references unknown provider "${providerName}"`,
+      );
+    }
+  }
+
+  // --- Reflection needs an OpenAI-compatible provider ---
+
+  const hasOpenAICompatible = config.models.providers.some(
+    (p) => p.base_url && p.api !== "anthropic-messages",
+  );
+  if (!hasOpenAICompatible) {
+    warnings.push(
+      "No OpenAI-compatible provider configured (with base_url). " +
+      "Reflection pass will not work. Add a provider with an OpenAI-compatible " +
+      "API (e.g., opencode, openai, together) or reflection will fail silently.",
+    );
+  }
+
+  // --- WhatsApp needs allowed_users if enabled ---
+
+  if (config.whatsapp.enabled && config.whatsapp.allowed_users.length === 0) {
+    warnings.push(
+      "whatsapp is enabled but allowed_users is empty. " +
+      "Anyone who finds the bot's number can message it.",
+    );
+  }
+
+  // --- Web search needs a URL ---
+
+  if (config.tools.web_search.enabled && !config.tools.web_search.searxng_url) {
+    warnings.push("web_search is enabled but searxng_url is empty. Workers won't be able to search.");
+  }
+
+  // --- Emit ---
+
+  for (const w of warnings) {
+    console.warn(`Config warning: ${w}`);
+  }
+  if (errors.length > 0) {
+    throw new Error(`Config errors:\n  - ${errors.join("\n  - ")}`);
+  }
 }
 
 /**

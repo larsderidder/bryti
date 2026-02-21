@@ -158,21 +158,41 @@ interface CompletionMessage {
  * Falls back to the first available provider.
  */
 function resolveProviderConfig(config: Config): { baseUrl: string; apiKey: string; modelId: string } {
-  const [providerName, modelId] = config.agent.model.includes("/")
-    ? config.agent.model.split("/", 2)
-    : [config.agent.model, config.agent.model];
+  // Reflection uses raw fetch to an OpenAI-compatible /chat/completions endpoint.
+  // The primary model might be Anthropic (different API format, no base_url for
+  // OpenAI compat). Try the primary first, then fallback models, then any
+  // provider with a valid base_url.
+  const candidates = [config.agent.model, ...(config.agent.fallback_models ?? [])];
 
-  const provider = config.models.providers.find((p) => p.name === providerName)
-    ?? config.models.providers[0];
+  for (const modelString of candidates) {
+    const [providerName, modelId] = modelString.includes("/")
+      ? modelString.split("/", 2)
+      : [modelString, modelString];
 
-  const resolvedModelId = provider?.models.find((m) => m.id === modelId)?.id
-    ?? provider?.models[0]?.id
-    ?? modelId;
+    const provider = config.models.providers.find((p) => p.name === providerName);
+    if (!provider?.base_url) continue;
 
+    // Skip anthropic-messages API (not OpenAI-compatible)
+    if (provider.api === "anthropic-messages") continue;
+
+    const resolvedModelId = provider.models.find((m) => m.id === modelId)?.id
+      ?? modelId;
+
+    return {
+      baseUrl: provider.base_url,
+      apiKey: provider.api_key ?? "",
+      modelId: resolvedModelId,
+    };
+  }
+
+  // Last resort: first provider with a base_url
+  const fallbackProvider = config.models.providers.find(
+    (p) => p.base_url && p.api !== "anthropic-messages",
+  );
   return {
-    baseUrl: provider?.base_url ?? "https://api.openai.com/v1",
-    apiKey: provider?.api_key ?? "",
-    modelId: resolvedModelId,
+    baseUrl: fallbackProvider?.base_url ?? "https://api.openai.com/v1",
+    apiKey: fallbackProvider?.api_key ?? "",
+    modelId: fallbackProvider?.models[0]?.id ?? "gpt-4o-mini",
   };
 }
 
