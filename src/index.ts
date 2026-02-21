@@ -347,7 +347,14 @@ async function startApp(): Promise<RunningApp> {
 
     console.log(`[compaction] proactive ${reason} for user ${userId} (${messageCount} messages)`);
     try {
-      await session.compact();
+      await session.compact(
+        "This is a personal assistant conversation. " +
+        "Preserve: user preferences, commitments and promises made, ongoing tasks, " +
+        "facts learned about the user, decisions made, and any context the user would " +
+        "expect the assistant to remember. " +
+        "Discard: verbose tool outputs, raw search results, intermediate reasoning, " +
+        "and conversational filler.",
+      );
       console.log(`[compaction] proactive ${reason} done for user ${userId}`);
     } catch (err) {
       console.error(`[compaction] proactive ${reason} failed for user ${userId}:`, (err as Error).message);
