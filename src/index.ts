@@ -347,7 +347,15 @@ async function startApp(): Promise<RunningApp> {
 
     console.log(`[compaction] proactive ${reason} for user ${userId} (${messageCount} messages)`);
     try {
+      const reasonHint = reason === "nightly"
+        ? "This is a nightly compaction. The user is asleep. " +
+          "Summarize the entire day's conversation into a concise recap. " +
+          "Tomorrow's session should start clean with full context of what happened today."
+        : "The user has been inactive for a while and may return to continue. " +
+          "Summarize completed topics but preserve the thread of any ongoing discussion.";
+
       await session.compact(
+        `${reasonHint} ` +
         "This is a personal assistant conversation. " +
         "Preserve: user preferences, commitments and promises made, ongoing tasks, " +
         "facts learned about the user, decisions made, and any context the user would " +
