@@ -40,6 +40,7 @@ import type { Config } from "./config.js";
 import type { CoreMemory } from "./memory/core-memory.js";
 import { repairToolUseResultPairing } from "./compaction/transcript-repair.js";
 import { createProjectionStore, formatProjectionsForPrompt } from "./projection/index.js";
+import { registerToolCapabilities, getToolCapabilities } from "./trust.js";
 
 /**
  * A loaded, persistent agent session for a single user.
@@ -369,6 +370,16 @@ export async function loadUserSession(
       console.log(`[extensions] Loaded: ${extension.path} (tools: ${toolNames.join(", ") || "none"})`);
       for (const toolName of toolNames) {
         extensionToolNames.add(toolName);
+        // Register extension tools as elevated by default (they can do anything).
+        // Skip if already registered with specific capabilities (e.g., shell_exec).
+        const existing = getToolCapabilities(toolName);
+        if (existing.level === "safe") {
+          registerToolCapabilities(toolName, {
+            level: "elevated",
+            capabilities: ["network", "filesystem", "shell"],
+            reason: "Extension tool with unrestricted access.",
+          });
+        }
       }
     }
     console.log(`[extensions] ${extensionsResult.extensions.length} extension(s) loaded, ${extensionToolNames.size} tool(s) registered`);

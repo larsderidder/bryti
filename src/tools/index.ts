@@ -18,6 +18,7 @@ import path from "node:path";
 import type { Config } from "../config.js";
 import type { CoreMemory } from "../memory/core-memory.js";
 import type { WorkerTriggerCallback } from "../workers/tools.js";
+import { registerToolCapabilities } from "../trust.js";
 
 export { createFileTools };
 export { createCoreMemoryTools };
@@ -81,6 +82,21 @@ export function createTools(
   tools.push(...createWorkerTools(
     config, archivalStore, workerRegistry, false, projectionStore, onWorkerTrigger,
   ));
+
+  // Register trust capabilities for well-known elevated tools.
+  // Extension tools (loaded by pi SDK from data/files/extensions/) default to
+  // elevated since they can execute arbitrary code. Known extension names are
+  // registered explicitly for better permission prompts.
+  registerToolCapabilities("shell_exec", {
+    level: "elevated",
+    capabilities: ["shell", "filesystem"],
+    reason: "Runs shell commands with access to the system.",
+  });
+  registerToolCapabilities("http_request", {
+    level: "elevated",
+    capabilities: ["network"],
+    reason: "Makes HTTP requests to external services.",
+  });
 
   return tools;
 }

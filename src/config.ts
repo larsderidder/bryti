@@ -82,6 +82,11 @@ export interface Config {
   cron: CronJob[];
   /** Optional active hours window. Scheduler callbacks skip firing outside it. */
   active_hours?: ActiveHoursConfig;
+  /** Trust and permission settings. */
+  trust: {
+    /** Tools pre-approved for elevated access (skip permission prompts). */
+    approved_tools: string[];
+  };
   data_dir: string;
 }
 
@@ -213,6 +218,9 @@ export function loadConfig(configPath?: string): Config {
     tools: toolsFromConfig(substituted, dataDir),
     cron: (substituted.cron as CronJob[]) || [],
     active_hours: (substituted.active_hours as ActiveHoursConfig | undefined) ?? undefined,
+    trust: {
+      approved_tools: ((substituted.trust as { approved_tools?: string[] })?.approved_tools) ?? [],
+    },
     data_dir: dataDir,
   };
 

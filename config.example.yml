@@ -134,6 +134,18 @@ cron: []
   #   message: "Summarize what we discussed today and update memory with action items."
 
 # ---------------------------------------------------------------------------
+# Trust levels (runtime permissions for elevated tools)
+# ---------------------------------------------------------------------------
+
+# Extension tools (shell_exec, http_request, etc.) require approval before
+# first use. Pre-approve tools here to skip the permission prompt.
+# trust:
+#   approved_tools:
+#     - shell_exec
+#     - http_request
+#     - weather_weert
+
+# ---------------------------------------------------------------------------
 # Active hours (optional — limits when the scheduler can send messages)
 # ---------------------------------------------------------------------------
 

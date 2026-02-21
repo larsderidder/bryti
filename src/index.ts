@@ -33,6 +33,13 @@ import { createScheduler, type Scheduler } from "./scheduler.js";
 import { MessageQueue } from "./message-queue.js";
 import type { IncomingMessage, ChannelBridge } from "./channels/types.js";
 import {
+  createTrustStore,
+  checkPendingApproval,
+  isAlwaysApproval,
+  type TrustStore,
+} from "./trust.js";
+import { wrapToolsWithTrustChecks } from "./trust-wrapper.js";
+import {
   calculateCostUsd,
   createUsageTracker,
   resolveModelCost,
@@ -56,6 +63,8 @@ interface AppState {
   scheduler: Scheduler;
   /** Enqueue function for injecting messages (used by worker trigger callbacks). */
   enqueue: ((msg: IncomingMessage) => void) | null;
+  /** Trust store for runtime permission checks. */
+  trustStore: TrustStore;
 }
 
 interface AssistantMessageLike {
@@ -139,11 +148,15 @@ async function getOrLoadSession(state: AppState, userId: string): Promise<UserSe
       raw: { type: "worker_trigger" },
     });
   });
+
+  // Wrap tools with trust checks so elevated tools require approval
+  const wrappedTools = wrapToolsWithTrustChecks(tools, state.trustStore, userId);
+
   const userSession = await loadUserSession(
     state.config,
     state.coreMemory,
     userId,
-    tools,
+    wrappedTools,
   );
 
   state.sessions.set(userId, userSession);
@@ -186,6 +199,19 @@ async function processMessage(
       );
     }
     return;
+  }
+
+  // Check for pending trust approvals (user responding to "Can I use X?" prompt)
+  const approvedTool = checkPendingApproval(msg.userId, msg.text);
+  if (approvedTool) {
+    const duration = isAlwaysApproval(msg.text) ? "always" : "once";
+    state.trustStore.approve(approvedTool, duration);
+    const durLabel = duration === "always" ? "Always allowed" : "Allowed for this time";
+    await getBridge(state, msg.platform).sendMessage(
+      msg.channelId,
+      `${durLabel}: ${approvedTool}. Continuing...`,
+    );
+    // Don't return; let the message flow through so the agent can retry the tool
   }
 
   // Show typing indicator
@@ -319,6 +345,7 @@ async function startApp(): Promise<RunningApp> {
   const coreMemory = createCoreMemory(config.data_dir);
   const historyManager = createHistoryManager(config.data_dir);
   const usageTracker = createUsageTracker(config.data_dir);
+  const trustStore = createTrustStore(config.data_dir, config.trust.approved_tools);
 
   // Start channel bridges
   const bridges: ChannelBridge[] = [];
@@ -346,6 +373,7 @@ async function startApp(): Promise<RunningApp> {
     bridges,
     scheduler: null!,
     enqueue: null,
+    trustStore,
   };
 
   const queue = new MessageQueue(
