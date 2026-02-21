@@ -38,7 +38,7 @@ import {
   isAlwaysApproval,
   type TrustStore,
 } from "./trust.js";
-import { wrapToolsWithTrustChecks } from "./trust-wrapper.js";
+import { wrapToolsWithTrustChecks, type TrustWrapperContext } from "./trust-wrapper.js";
 import {
   calculateCostUsd,
   createUsageTracker,
@@ -65,6 +65,8 @@ interface AppState {
   enqueue: ((msg: IncomingMessage) => void) | null;
   /** Trust store for runtime permission checks. */
   trustStore: TrustStore;
+  /** Last user message per userId (for guardrail context). */
+  lastUserMessages: Map<string, string>;
 }
 
 interface AssistantMessageLike {
@@ -149,8 +151,12 @@ async function getOrLoadSession(state: AppState, userId: string): Promise<UserSe
     });
   });
 
-  // Wrap tools with trust checks so elevated tools require approval
-  const wrappedTools = wrapToolsWithTrustChecks(tools, state.trustStore, userId);
+  // Wrap tools with trust checks + LLM guardrail
+  const trustContext: TrustWrapperContext = {
+    config: state.config,
+    getLastUserMessage: () => state.lastUserMessages.get(userId),
+  };
+  const wrappedTools = wrapToolsWithTrustChecks(tools, state.trustStore, userId, trustContext);
 
   const userSession = await loadUserSession(
     state.config,
@@ -213,6 +219,9 @@ async function processMessage(
     );
     // Don't return; let the message flow through so the agent can retry the tool
   }
+
+  // Track last user message for guardrail context
+  state.lastUserMessages.set(msg.userId, msg.text);
 
   // Show typing indicator
   await getBridge(state, msg.platform).sendTyping(msg.channelId);
@@ -374,6 +383,7 @@ async function startApp(): Promise<RunningApp> {
     scheduler: null!,
     enqueue: null,
     trustStore,
+    lastUserMessages: new Map(),
   };
 
   const queue = new MessageQueue(
