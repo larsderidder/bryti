@@ -17,6 +17,7 @@ import makeWASocket, {
   type proto,
 } from "@whiskeysockets/baileys";
 import { Boom } from "@hapi/boom";
+import qrcode from "qrcode-terminal";
 import type { ChannelBridge, IncomingMessage, SendOpts } from "./types.js";
 
 type MessageHandler = (msg: IncomingMessage) => Promise<void>;
@@ -70,7 +71,6 @@ export class WhatsAppBridge implements ChannelBridge {
 
     this.socket = makeWASocket({
       auth: state,
-      printQRInTerminal: true,
       browser: ["Pibot", "Chrome", "22.0"],
       logger: silentLogger as any,
     });
@@ -81,7 +81,8 @@ export class WhatsAppBridge implements ChannelBridge {
       const { connection, lastDisconnect, qr } = update;
 
       if (qr) {
-        console.log("[whatsapp] Scan the QR code above with your WhatsApp app");
+        qrcode.generate(qr, { small: true });
+        console.log("[whatsapp] Scan the QR code with your WhatsApp app");
       }
 
       if (connection === "open") {
