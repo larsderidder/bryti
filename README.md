@@ -157,4 +157,4 @@ npm run cli -- import-openclaw                   # import memory from an OpenCla
 
 ## License
 
-Not yet decided.
+[AGPL-3.0](LICENSE)
