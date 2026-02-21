@@ -26,9 +26,7 @@ import type { Static } from "@sinclair/typebox";
 import { Type } from "@sinclair/typebox";
 import {
   createAgentSession,
-  AuthStorage,
   DefaultResourceLoader,
-  ModelRegistry,
   SessionManager,
   SettingsManager,
 } from "@mariozechner/pi-coding-agent";
@@ -41,6 +39,7 @@ import { createWorkerScopedTools } from "./scoped-tools.js";
 import { toolError, toolSuccess } from "../tools/result.js";
 import type { WorkerRegistry } from "./registry.js";
 import type { ProjectionStore } from "../projection/store.js";
+import { createModelInfra, resolveModel } from "../model-infra.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -169,12 +168,7 @@ type SteerWorkerInput = Static<typeof steerWorkerSchema>;
 // Models.json for worker sessions
 // ---------------------------------------------------------------------------
 
-function ensureWorkerAgentDir(config: Config): string {
-  const agentDir = path.join(config.data_dir, ".pi");
-  fs.mkdirSync(agentDir, { recursive: true });
-  fs.mkdirSync(path.join(agentDir, "auth"), { recursive: true });
-  return agentDir;
-}
+
 
 // ---------------------------------------------------------------------------
 // Worker session spawner
@@ -217,39 +211,16 @@ async function spawnWorkerSession(opts: {
     onTrigger,
   } = opts;
 
-  const agentDir = ensureWorkerAgentDir(config);
+  const { authStorage, modelRegistry, agentDir } = createModelInfra(config);
   const modelsDir = path.join(config.data_dir, ".models");
   const resultPath = path.join(workerDir, "result.md");
 
-  // Auth
-  // Share ~/.pi/agent/auth.json with the main agent for OAuth token access
-  const authStorage = new AuthStorage();
-  for (const provider of config.models.providers) {
-    if (provider.api_key) {
-      authStorage.setRuntimeApiKey(provider.name, provider.api_key);
-    }
-  }
-
-  // Model registry (reuses the same models.json as the main agent)
-  const modelRegistry = new ModelRegistry(authStorage, path.join(agentDir, "models.json"));
-  modelRegistry.refresh();
-
-  // Resolve model — workers default to the first fallback model (cheaper) rather
+  // Resolve model. Workers default to the first fallback model (cheaper) rather
   // than the primary model. The primary might be Opus/Sonnet via OAuth; we don't
   // want workers burning those tokens on research tasks.
   const workerDefault = config.agent.fallback_models?.[0] ?? config.agent.model;
   const modelString = modelOverride ?? workerDefault;
-  const [providerName, modelId] = modelString.includes("/")
-    ? modelString.split("/", 2)
-    : [modelString, modelString];
-
-  let model = modelRegistry.find(providerName, modelId);
-  if (!model) {
-    const available = modelRegistry.getAvailable();
-    model = available.find(
-      (m) => m.provider === providerName && m.id.includes(modelId),
-    );
-  }
+  const model = resolveModel(modelString, modelRegistry);
   if (!model) {
     throw new Error(`Worker model not found: ${modelString}`);
   }

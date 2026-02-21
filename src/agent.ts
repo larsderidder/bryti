@@ -25,10 +25,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { AgentMessage, AgentTool } from "@mariozechner/pi-agent-core";
-import type { Model } from "@mariozechner/pi-ai";
 import {
   createAgentSession,
-  AuthStorage,
   DefaultResourceLoader,
   ModelRegistry,
   SessionManager,
@@ -41,6 +39,7 @@ import type { CoreMemory } from "./memory/core-memory.js";
 import { repairToolUseResultPairing } from "./compaction/transcript-repair.js";
 import { createProjectionStore, formatProjectionsForPrompt } from "./projection/index.js";
 import { registerToolCapabilities, getToolCapabilities } from "./trust.js";
+import { createModelInfra, resolveModel } from "./model-infra.js";
 
 /**
  * A loaded, persistent agent session for a single user.
@@ -65,47 +64,7 @@ interface ToolSummary {
   description?: string;
 }
 
-/**
- * Generate models.json from bryti config.
- */
-function generateModelsJson(config: Config, agentDir: string): void {
-  const modelsJsonPath = path.join(agentDir, "models.json");
 
-  const providers: Record<string, unknown> = {};
-
-  for (const provider of config.models.providers) {
-    if (provider.name === "groq") {
-      continue;
-    }
-
-    // Providers without an api_key use OAuth from ~/.pi/agent/auth.json.
-    // We still need to include them in models.json so custom model IDs
-    // (e.g. claude-sonnet-4-6 not yet in SDK built-ins) are discoverable.
-    // Use "oauth" as a placeholder apiKey; AuthStorage resolves the real token.
-    const apiKey = provider.api_key || "oauth";
-
-    providers[provider.name] = {
-      baseUrl: provider.base_url || `https://api.${provider.name}.com`,
-      api: provider.api || "openai-completions",
-      apiKey: apiKey,
-      models: provider.models.map((m) => ({
-        id: m.id,
-        name: m.name || m.id,
-        contextWindow: m.context_window || 131072,
-        ...(m.api && { api: m.api }),
-        ...(m.max_tokens && { maxTokens: m.max_tokens }),
-        ...(m.cost && { cost: m.cost }),
-        ...(m.compat && { compat: m.compat }),
-      })),
-    };
-  }
-
-  fs.writeFileSync(
-    modelsJsonPath,
-    JSON.stringify({ providers }, null, 2),
-    "utf-8",
-  );
-}
 
 /**
  * Build the system prompt with core memory.
@@ -289,42 +248,13 @@ export async function loadUserSession(
   userId: string,
   customTools: AgentTool[],
 ): Promise<UserSession> {
-  const agentDir = path.join(config.data_dir, ".pi");
-  fs.mkdirSync(agentDir, { recursive: true });
-
-  generateModelsJson(config, agentDir);
-
-  // Auth — share ~/.pi/agent/auth.json so bryti uses the same OAuth creds as
-  // the pi CLI (Anthropic OAuth, etc.). AuthStorage uses file-level locking so
-  // concurrent token refreshes from pi CLI and bryti are safe.
-  // Calling new AuthStorage() with no args defaults to ~/.pi/agent/auth.json.
-  const authStorage = new AuthStorage();
-  for (const provider of config.models.providers) {
-    if (provider.api_key) {
-      authStorage.setRuntimeApiKey(provider.name, provider.api_key);
-    }
-  }
-
-  // Model registry
-  const modelRegistry = new ModelRegistry(authStorage, path.join(agentDir, "models.json"));
-  modelRegistry.refresh();
+  const { authStorage, modelRegistry, agentDir } = createModelInfra(config);
 
   // Resolve model
-  const modelConfig = config.agent.model;
-  const [providerName, modelId] = modelConfig.includes("/")
-    ? modelConfig.split("/")
-    : [modelConfig, modelConfig];
-
-  let model = modelRegistry.find(providerName, modelId);
-  if (!model) {
-    const available = modelRegistry.getAvailable();
-    model = available.find(
-      (m) => m.provider === providerName && m.id.includes(modelId),
-    );
-  }
+  const model = resolveModel(config.agent.model, modelRegistry);
   if (!model) {
     throw new Error(
-      `Model not found: ${modelConfig}. Available: ${modelRegistry.getAvailable().map((m) => m.id).join(", ")}`,
+      `Model not found: ${config.agent.model}. Available: ${modelRegistry.getAvailable().map((m) => m.id).join(", ")}`,
     );
   }
 
@@ -495,28 +425,7 @@ export function repairSessionTranscript(session: AgentSession, userId: string): 
   }
 }
 
-/**
- * Resolve a "provider/modelId" string against the model registry.
- * Returns null if the model is not found in the registry.
- */
-export function resolveModel(
-  modelString: string,
-  modelRegistry: ModelRegistry,
-): Model<any> | null {
-  const [providerName, modelId] = modelString.includes("/")
-    ? modelString.split("/")
-    : [modelString, modelString];
 
-  let model = modelRegistry.find(providerName, modelId);
-  if (!model) {
-    const available = modelRegistry.getAvailable();
-    // Secondary lookup: same provider + model id substring match
-    model = available.find(
-      (m) => m.provider === providerName && m.id.includes(modelId),
-    );
-  }
-  return model ?? null;
-}
 
 /**
  * Result of a prompt attempt in the fallback chain.

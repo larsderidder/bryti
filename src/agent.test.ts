@@ -2,9 +2,9 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
   buildToolSection,
   promptWithFallback,
-  resolveModel,
   refreshSystemPrompt,
 } from "./agent.js";
+import { resolveModel } from "./model-infra.js";
 import type { AgentSession } from "@mariozechner/pi-coding-agent";
 import type { ModelRegistry } from "@mariozechner/pi-coding-agent";
 import type { Config } from "./config.js";

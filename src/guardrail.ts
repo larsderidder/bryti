@@ -20,10 +20,9 @@
  * - Fail-safe: if the LLM call fails, default to ASK (not ALLOW)
  */
 
-import path from "node:path";
 import { completeSimple } from "@mariozechner/pi-ai";
-import { AuthStorage, ModelRegistry } from "@mariozechner/pi-coding-agent";
 import type { Config } from "./config.js";
+import { createModelInfra, resolveFirstModel, type ModelInfra } from "./model-infra.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -126,28 +125,12 @@ function parseVerdict(response: string): GuardrailResult {
 // Model resolution
 // ---------------------------------------------------------------------------
 
-let cachedModelRegistry: ModelRegistry | null = null;
-let cachedAuthStorage: AuthStorage | null = null;
+let cachedInfra: ModelInfra | null = null;
 
-function getModelInfra(config: Config): { modelRegistry: ModelRegistry; authStorage: AuthStorage } {
-  if (cachedModelRegistry && cachedAuthStorage) {
-    return { modelRegistry: cachedModelRegistry, authStorage: cachedAuthStorage };
-  }
-
-  const agentDir = path.join(config.data_dir, ".pi");
-  const authStorage = new AuthStorage();
-  for (const provider of config.models.providers) {
-    if (provider.api_key) {
-      authStorage.setRuntimeApiKey(provider.name, provider.api_key);
-    }
-  }
-
-  const modelRegistry = new ModelRegistry(authStorage, path.join(agentDir, "models.json"));
-  modelRegistry.refresh();
-
-  cachedModelRegistry = modelRegistry;
-  cachedAuthStorage = authStorage;
-  return { modelRegistry, authStorage };
+function getModelInfra(config: Config): ModelInfra {
+  if (cachedInfra) return cachedInfra;
+  cachedInfra = createModelInfra(config);
+  return cachedInfra;
 }
 
 // ---------------------------------------------------------------------------
@@ -173,22 +156,7 @@ export async function evaluateToolCall(
     config.agent.model,
   ];
 
-  let model = null;
-  for (const modelString of candidates) {
-    const [providerName, modelId] = modelString.includes("/")
-      ? modelString.split("/", 2)
-      : [modelString, modelString];
-
-    model = modelRegistry.find(providerName, modelId);
-    if (!model) {
-      const available = modelRegistry.getAvailable();
-      model = available.find(
-        (m) => m.provider === providerName && m.id.includes(modelId),
-      ) ?? null;
-    }
-    if (model) break;
-  }
-
+  const model = resolveFirstModel(candidates, modelRegistry);
   if (!model) {
     return { verdict: "ASK", reason: "No model available for guardrail evaluation." };
   }

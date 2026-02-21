@@ -22,13 +22,12 @@ import fs from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
 import { completeSimple } from "@mariozechner/pi-ai";
-import { AuthStorage, ModelRegistry } from "@mariozechner/pi-coding-agent";
 import type { Config } from "../config.js";
 import type { ProjectionResolution, ProjectionStore } from "./store.js";
 import { createProjectionStore } from "./store.js";
 import { formatProjectionsForPrompt } from "./format.js";
-import { toUtc } from "../time.js";
-import { getUserTimezone } from "../time.js";
+import { toUtc, getUserTimezone } from "../time.js";
+import { createModelInfra, resolveFirstModel } from "../model-infra.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -160,8 +159,9 @@ interface CompletionMessage {
 /**
  * Make a single chat completion call via the pi SDK's provider layer.
  *
- * Uses ModelRegistry + AuthStorage so all providers work: Anthropic (direct
- * or OAuth), OpenAI, opencode, etc. No raw fetch, no manual API key wiring.
+ * Uses the shared model infrastructure so all providers work: Anthropic
+ * (direct or OAuth), OpenAI, opencode, etc. No raw fetch, no manual API
+ * key wiring.
  *
  * The model is resolved from config.agent.reflection_model first, then
  * config.agent.model, then the first available fallback. This lets operators
@@ -171,19 +171,7 @@ export async function sdkComplete(
   config: Config,
   messages: CompletionMessage[],
 ): Promise<string> {
-  const agentDir = path.join(config.data_dir, ".pi");
-
-  // Auth: same setup as loadUserSession / workers
-  const authStorage = new AuthStorage();
-  for (const provider of config.models.providers) {
-    if (provider.api_key) {
-      authStorage.setRuntimeApiKey(provider.name, provider.api_key);
-    }
-  }
-
-  // Model registry: reads the same models.json the main agent writes
-  const modelRegistry = new ModelRegistry(authStorage, path.join(agentDir, "models.json"));
-  modelRegistry.refresh();
+  const { modelRegistry } = createModelInfra(config);
 
   // Resolve the model: reflection_model > primary model > first fallback
   const candidates = [
@@ -192,22 +180,7 @@ export async function sdkComplete(
     ...(config.agent.fallback_models ?? []),
   ].filter(Boolean) as string[];
 
-  let model = null;
-  for (const modelString of candidates) {
-    const [providerName, modelId] = modelString.includes("/")
-      ? modelString.split("/", 2)
-      : [modelString, modelString];
-
-    model = modelRegistry.find(providerName, modelId);
-    if (!model) {
-      const available = modelRegistry.getAvailable();
-      model = available.find(
-        (m) => m.provider === providerName && m.id.includes(modelId),
-      ) ?? null;
-    }
-    if (model) break;
-  }
-
+  const model = resolveFirstModel(candidates, modelRegistry);
   if (!model) {
     throw new Error(
       `Reflection: no usable model found. Tried: ${candidates.join(", ")}`,
