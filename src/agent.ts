@@ -224,7 +224,8 @@ function buildSystemPrompt(
     `3. Tell the user you've started looking into it and will share results when ready.\n\n` +
     `When the trigger fires: read the result.md file with read_file, summarize the key findings for the user, resolve the projection.\n\n` +
     `Use check_worker only when the user asks for a progress update.\n` +
-    `Workers cannot spawn other workers.`,
+    `Workers cannot spawn other workers.\n` +
+    `Workers use a cheaper model by default. You can override with the model parameter if needed.`,
   );
 
   // Silent reply — for scheduled/proactive turns where there's nothing to say

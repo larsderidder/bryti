@@ -186,7 +186,8 @@ async function spawnWorkerSession(opts: {
   const resultPath = path.join(workerDir, "result.md");
 
   // Auth
-  const authStorage = new AuthStorage(path.join(agentDir, "auth", "auth.json"));
+  // Share ~/.pi/agent/auth.json with the main agent for OAuth token access
+  const authStorage = new AuthStorage();
   for (const provider of config.models.providers) {
     if (provider.api_key) {
       authStorage.setRuntimeApiKey(provider.name, provider.api_key);
@@ -197,8 +198,11 @@ async function spawnWorkerSession(opts: {
   const modelRegistry = new ModelRegistry(authStorage, path.join(agentDir, "models.json"));
   modelRegistry.refresh();
 
-  // Resolve model
-  const modelString = modelOverride ?? config.agent.model;
+  // Resolve model — workers default to the first fallback model (cheaper) rather
+  // than the primary model. The primary might be Opus/Sonnet via OAuth; we don't
+  // want workers burning those tokens on research tasks.
+  const workerDefault = config.agent.fallback_models?.[0] ?? config.agent.model;
+  const modelString = modelOverride ?? workerDefault;
   const [providerName, modelId] = modelString.includes("/")
     ? modelString.split("/", 2)
     : [modelString, modelString];
