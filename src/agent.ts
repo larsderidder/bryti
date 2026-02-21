@@ -77,18 +77,16 @@ function generateModelsJson(config: Config, agentDir: string): void {
       continue;
     }
 
-    // Skip providers without an api_key — these are built-in OAuth providers
-    // (e.g. anthropic) whose credentials come from ~/.pi/agent/auth.json.
-    // The ModelRegistry already knows their models natively; adding them here
-    // without a valid apiKey would fail schema validation.
-    if (!provider.api_key) {
-      continue;
-    }
+    // Providers without an api_key use OAuth from ~/.pi/agent/auth.json.
+    // We still need to include them in models.json so custom model IDs
+    // (e.g. claude-sonnet-4-6 not yet in SDK built-ins) are discoverable.
+    // Use "oauth" as a placeholder apiKey; AuthStorage resolves the real token.
+    const apiKey = provider.api_key || "oauth";
 
     providers[provider.name] = {
-      baseUrl: provider.base_url,
+      baseUrl: provider.base_url || `https://api.${provider.name}.com`,
       api: provider.api || "openai-completions",
-      apiKey: provider.api_key,
+      apiKey: apiKey,
       models: provider.models.map((m) => ({
         id: m.id,
         name: m.name || m.id,
