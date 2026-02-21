@@ -46,6 +46,10 @@ export interface Config {
      *  prompt so the agent resolves relative time expressions correctly.
      *  Defaults to UTC when omitted. */
     timezone?: string;
+    /** Model to use for the reflection pass. Defaults to the primary model.
+     *  Use this to pick a cheaper model for background reflection without
+     *  affecting the main agent. Format: "provider/model-id". */
+    reflection_model?: string;
   };
   telegram: {
     token: string;
@@ -259,19 +263,6 @@ function validateConfig(config: Config): void {
         `fallback_model "${fb}" references unknown provider "${providerName}"`,
       );
     }
-  }
-
-  // --- Reflection needs an OpenAI-compatible provider ---
-
-  const hasOpenAICompatible = config.models.providers.some(
-    (p) => p.base_url && p.api !== "anthropic-messages",
-  );
-  if (!hasOpenAICompatible) {
-    warnings.push(
-      "No OpenAI-compatible provider configured (with base_url). " +
-      "Reflection pass will not work. Add a provider with an OpenAI-compatible " +
-      "API (e.g., opencode, openai, together) or reflection will fail silently.",
-    );
   }
 
   // --- WhatsApp needs allowed_users if enabled ---

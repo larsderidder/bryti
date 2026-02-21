@@ -7,8 +7,10 @@
  * Design:
  * - Runs every 30 minutes via cron.
  * - Reads the JSONL audit log for the last windowMinutes of conversation.
- * - Makes a single raw OpenAI-compatible completion call (no agent loop,
- *   no tools, no session history) with a narrow extraction prompt.
+ * - Makes a single SDK completion call (no agent loop, no tools, no session
+ *   history) with a narrow extraction prompt.
+ * - Uses the pi SDK's ModelRegistry + completeSimple so all providers work:
+ *   Anthropic, OpenAI, OAuth tokens, etc. No raw fetch.
  * - Parses the JSON output and writes projections directly to SQLite.
  * - Tracks last-reflection timestamp per user in the same SQLite DB to
  *   avoid re-processing unchanged transcripts.
@@ -19,6 +21,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
+import { completeSimple } from "@mariozechner/pi-ai";
+import { AuthStorage, ModelRegistry } from "@mariozechner/pi-coding-agent";
 import type { Config } from "../config.js";
 import type { ProjectionResolution, ProjectionStore } from "./store.js";
 import { createProjectionStore } from "./store.js";
@@ -145,7 +149,7 @@ function setLastReflectionTimestamp(db: Database.Database, ts: string): void {
 }
 
 // ---------------------------------------------------------------------------
-// LLM completion
+// LLM completion via pi SDK
 // ---------------------------------------------------------------------------
 
 interface CompletionMessage {
@@ -154,90 +158,90 @@ interface CompletionMessage {
 }
 
 /**
- * Resolve the base_url and api_key for the configured model.
- * Falls back to the first available provider.
+ * Make a single chat completion call via the pi SDK's provider layer.
+ *
+ * Uses ModelRegistry + AuthStorage so all providers work: Anthropic (direct
+ * or OAuth), OpenAI, opencode, etc. No raw fetch, no manual API key wiring.
+ *
+ * The model is resolved from config.agent.reflection_model first, then
+ * config.agent.model, then the first available fallback. This lets operators
+ * use a cheaper model for reflection without affecting the main agent.
  */
-function resolveProviderConfig(config: Config): { baseUrl: string; apiKey: string; modelId: string } {
-  // Reflection uses raw fetch to an OpenAI-compatible /chat/completions endpoint.
-  // The primary model might be Anthropic (different API format, no base_url for
-  // OpenAI compat). Try the primary first, then fallback models, then any
-  // provider with a valid base_url.
-  const candidates = [config.agent.model, ...(config.agent.fallback_models ?? [])];
+export async function sdkComplete(
+  config: Config,
+  messages: CompletionMessage[],
+): Promise<string> {
+  const agentDir = path.join(config.data_dir, ".pi");
 
+  // Auth: same setup as loadUserSession / workers
+  const authStorage = new AuthStorage();
+  for (const provider of config.models.providers) {
+    if (provider.api_key) {
+      authStorage.setRuntimeApiKey(provider.name, provider.api_key);
+    }
+  }
+
+  // Model registry: reads the same models.json the main agent writes
+  const modelRegistry = new ModelRegistry(authStorage, path.join(agentDir, "models.json"));
+  modelRegistry.refresh();
+
+  // Resolve the model: reflection_model > primary model > first fallback
+  const candidates = [
+    config.agent.reflection_model,
+    config.agent.model,
+    ...(config.agent.fallback_models ?? []),
+  ].filter(Boolean) as string[];
+
+  let model = null;
   for (const modelString of candidates) {
     const [providerName, modelId] = modelString.includes("/")
       ? modelString.split("/", 2)
       : [modelString, modelString];
 
-    const provider = config.models.providers.find((p) => p.name === providerName);
-    if (!provider?.base_url) continue;
-
-    // Skip anthropic-messages API (not OpenAI-compatible)
-    if (provider.api === "anthropic-messages") continue;
-
-    const resolvedModelId = provider.models.find((m) => m.id === modelId)?.id
-      ?? modelId;
-
-    return {
-      baseUrl: provider.base_url,
-      apiKey: provider.api_key ?? "",
-      modelId: resolvedModelId,
-    };
-  }
-
-  // Last resort: first provider with a base_url
-  const fallbackProvider = config.models.providers.find(
-    (p) => p.base_url && p.api !== "anthropic-messages",
-  );
-  return {
-    baseUrl: fallbackProvider?.base_url ?? "https://api.openai.com/v1",
-    apiKey: fallbackProvider?.api_key ?? "",
-    modelId: fallbackProvider?.models[0]?.id ?? "gpt-4o-mini",
-  };
-}
-
-/**
- * Make a single chat completion call using the OpenAI-compatible API.
- * Returns the assistant message content, or throws on error.
- */
-export async function rawComplete(
-  config: Config,
-  messages: CompletionMessage[],
-  timeoutMs = 30_000,
-): Promise<string> {
-  const { baseUrl, apiKey, modelId } = resolveProviderConfig(config);
-
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-
-  try {
-    const response = await fetch(`${baseUrl}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model: modelId,
-        messages,
-        max_tokens: 1024,
-        temperature: 0,
-      }),
-      signal: controller.signal,
-    });
-
-    if (!response.ok) {
-      const body = await response.text();
-      throw new Error(`LLM API error ${response.status}: ${body.slice(0, 200)}`);
+    model = modelRegistry.find(providerName, modelId);
+    if (!model) {
+      const available = modelRegistry.getAvailable();
+      model = available.find(
+        (m) => m.provider === providerName && m.id.includes(modelId),
+      ) ?? null;
     }
-
-    const data = await response.json() as {
-      choices: Array<{ message: { content: string } }>;
-    };
-    return data.choices[0]?.message?.content ?? "";
-  } finally {
-    clearTimeout(timer);
+    if (model) break;
   }
+
+  if (!model) {
+    throw new Error(
+      `Reflection: no usable model found. Tried: ${candidates.join(", ")}`,
+    );
+  }
+
+  // Separate system prompt from user/assistant messages
+  const systemMsg = messages.find((m) => m.role === "system");
+  const userMessages = messages.filter((m) => m.role !== "system");
+
+  const context = {
+    systemPrompt: systemMsg?.content,
+    messages: userMessages.map((m) => ({
+      role: m.role as "user",
+      content: m.content,
+      timestamp: Date.now(),
+    })),
+  };
+
+  const apiKey = await modelRegistry.getApiKey(model);
+  const result = await completeSimple(model, context, {
+    maxTokens: 1024,
+    temperature: 0,
+    apiKey: apiKey ?? undefined,
+  });
+
+  if (result.stopReason === "error") {
+    throw new Error(`Reflection LLM error: ${result.errorMessage ?? "unknown"}`);
+  }
+
+  return result.content
+    .filter((c) => c.type === "text")
+    .map((c) => c.type === "text" ? c.text : "")
+    .join("");
 }
 
 // ---------------------------------------------------------------------------
@@ -324,7 +328,7 @@ export async function runReflection(
   userId: string,
   windowMinutes = 30,
   store?: ProjectionStore,
-  completeFn?: typeof rawComplete,
+  completeFn?: typeof sdkComplete,
 ): Promise<ReflectionResult> {
   const historyDir = path.join(config.data_dir, "history");
   const turns = readRecentHistory(historyDir, windowMinutes);
@@ -366,7 +370,7 @@ export async function runReflection(
     const messages = buildReflectionPrompt(turns, pendingText, currentDatetime);
 
     // Call LLM
-    const doComplete = completeFn ?? rawComplete;
+    const doComplete = completeFn ?? sdkComplete;
     let raw: string;
     try {
       raw = await doComplete(config, messages);

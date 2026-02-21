@@ -6,7 +6,7 @@ import {
   readRecentHistory,
   parseReflectionOutput,
   runReflection,
-  type rawComplete,
+  type sdkComplete,
   type ReflectionOutput,
 } from "./reflection.js";
 import { createProjectionStore } from "./store.js";
@@ -246,7 +246,7 @@ describe("runReflection", () => {
       { role: "assistant", content: "I'll note that.", timestamp: recentTs },
     ]);
 
-    const mockComplete: typeof rawComplete = async () =>
+    const mockComplete: typeof sdkComplete = async () =>
       JSON.stringify({
         project: [
           { summary: "Dentist appointment", when: "2026-03-01", resolution: "day" },
@@ -306,7 +306,7 @@ describe("runReflection", () => {
       { role: "assistant", content: "It's sunny!", timestamp: recentTs },
     ]);
 
-    const mockComplete: typeof rawComplete = async () => '{"project":[],"archive":[]}';
+    const mockComplete: typeof sdkComplete = async () => '{"project":[],"archive":[]}';
 
     const store = createProjectionStore("12345", tmpDir);
     try {
