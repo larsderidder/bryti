@@ -139,7 +139,6 @@ The bundled default:
 
 - `extensions/documents-hedgedoc.ts` — optional tool (skips if env var missing), fetch API, multiple tools
 
-Extensions the agent has written for itself (if present):
-
-- `extensions/shell.ts` — child_process, env var for paths, elevated tool
-- `extensions/weather_weert.ts` — simple fetch, single tool, hardcoded location
+The agent can also write its own extensions at runtime (shell access,
+API integrations, etc.). Check `data/files/extensions/` for any that
+already exist.
