@@ -20,13 +20,6 @@ import { renderMarkdownWithMarkers } from "../markdown/render.js";
  */
 type MessageHandler = (msg: IncomingMessage) => Promise<void>;
 
-/**
- * Telegram bridge configuration.
- */
-export interface TelegramBridgeConfig {
-  botToken: string;
-  allowedUsers: number[];
-}
 
 /**
  * Escape the three HTML special characters that Telegram HTML mode requires.

@@ -14,12 +14,10 @@
  */
 
 import { Cron } from "croner";
-import type { Projection } from "./projection/index.js";
 import type { Config } from "./config.js";
 import type { IncomingMessage } from "./channels/types.js";
 import { createProjectionStore, formatProjectionsForPrompt, runReflection } from "./projection/index.js";
 import { isActiveNow } from "./active-hours.js";
-import { getUserTimezone } from "./time.js";
 
 // ---------------------------------------------------------------------------
 // Helpers

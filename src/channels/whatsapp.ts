@@ -10,11 +10,9 @@
  */
 
 import makeWASocket, {
-  type ConnectionState,
   useMultiFileAuthState,
   type WASocket,
   DisconnectReason,
-  type proto,
 } from "@whiskeysockets/baileys";
 import { Boom } from "@hapi/boom";
 import qrcode from "qrcode-terminal";

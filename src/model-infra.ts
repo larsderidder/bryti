@@ -33,7 +33,7 @@ export interface ModelInfra {
  * Generate models.json from bryti config so the pi SDK's ModelRegistry
  * can discover all configured providers and models.
  */
-export function generateModelsJson(config: Config, agentDir: string): void {
+function generateModelsJson(config: Config, agentDir: string): void {
   const modelsJsonPath = path.join(agentDir, "models.json");
 
   const providers: Record<string, unknown> = {};

@@ -225,9 +225,4 @@ export function createMemoryStore(userId: string, dataDir: string): MemoryStore 
   };
 }
 
-/**
- * Get the database path for a user.
- */
-export function getMemoryDbPath(userId: string, dataDir: string): string {
-  return path.join(dataDir, "users", userId, "memory.db");
-}
+

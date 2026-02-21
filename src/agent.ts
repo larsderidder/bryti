@@ -226,7 +226,7 @@ function buildSystemPrompt(
  * Return the per-user session directory. Each user gets their own directory
  * so that SessionManager.continueRecent() picks up the right session.
  */
-export function userSessionDir(config: Config, userId: string): string {
+function userSessionDir(config: Config, userId: string): string {
   const dir = path.join(config.data_dir, "sessions", userId);
   fs.mkdirSync(dir, { recursive: true });
   return dir;
@@ -430,7 +430,7 @@ export function repairSessionTranscript(session: AgentSession, userId: string): 
 /**
  * Result of a prompt attempt in the fallback chain.
  */
-export interface FallbackResult {
+interface FallbackResult {
   /** The model string that ultimately succeeded. */
   modelUsed: string;
   /** Number of models tried before success (0 = primary succeeded). */
@@ -549,11 +549,6 @@ export async function promptWithFallback(
 export async function refreshSystemPrompt(session: AgentSession): Promise<void> {
   await session.reload();
 }
-
-/**
- * Event handler type for agent session events.
- */
-export type AgentEventHandler = (event: AgentSessionEvent) => void;
 
 // Re-export AgentSession type for callers that need it
 export type { AgentSession };

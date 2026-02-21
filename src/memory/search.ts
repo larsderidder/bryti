@@ -114,23 +114,4 @@ export function createHybridSearch(
   };
 }
 
-/**
- * Create a hybrid search with a simpler interface for use in tools.
- */
-export interface HybridMemorySearch {
-  /** Search memory for relevant facts. */
-  search(query: string): Promise<SearchResult[]>;
-}
 
-export function createHybridMemorySearch(
-  store: MemoryStore,
-  embed: (text: string) => Promise<number[]>,
-): HybridMemorySearch {
-  const search = createHybridSearch(store, embed);
-
-  return {
-    async search(query: string): Promise<SearchResult[]> {
-      return search(query);
-    },
-  };
-}
