@@ -8,7 +8,7 @@ describe("Worker scoped tools", () => {
   let tempDir: string;
 
   beforeEach(() => {
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pibot-scoped-tools-"));
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "bryti-scoped-tools-"));
   });
 
   afterEach(() => {

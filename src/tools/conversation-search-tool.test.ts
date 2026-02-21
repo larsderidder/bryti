@@ -7,7 +7,7 @@ describe("ConversationSearchTool", () => {
   let tempDir: string;
 
   beforeEach(() => {
-    tempDir = fs.mkdtempSync("/tmp/pibot-conversation-tool-");
+    tempDir = fs.mkdtempSync("/tmp/bryti-conversation-tool-");
   });
 
   afterEach(() => {

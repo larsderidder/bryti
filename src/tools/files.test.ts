@@ -8,7 +8,7 @@ describe("FileTools", () => {
   let tools: ReturnType<typeof createFileTools>;
 
   beforeEach(() => {
-    tempDir = fs.mkdtempSync("/tmp/pibot-test-");
+    tempDir = fs.mkdtempSync("/tmp/bryti-test-");
     tools = createFileTools(tempDir);
   });
 

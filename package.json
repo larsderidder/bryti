@@ -1,5 +1,5 @@
 {
-  "name": "pibot",
+  "name": "bryti",
   "version": "0.0.1",
   "description": "Managed AI agent service built on pi SDK. Open models, flat pricing, EU-hosted.",
   "type": "module",

@@ -241,7 +241,7 @@ export class TelegramBridge implements ChannelBridge {
         return;
       }
       await ctx.reply(
-        "Welcome to Pibot! I'm your personal AI assistant.\n\n" +
+        "Welcome to Bryti! I'm your personal AI assistant.\n\n" +
         "Commands:\n" +
         "/start - Show this message\n" +
         "/clear - Clear conversation history\n" +

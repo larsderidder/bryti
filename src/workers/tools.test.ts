@@ -32,7 +32,7 @@ vi.mock("../memory/embeddings.js", () => ({
 // ---------------------------------------------------------------------------
 
 function makeTempDir(): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "pibot-worker-test-"));
+  return fs.mkdtempSync(path.join(os.tmpdir(), "bryti-worker-test-"));
 }
 
 function makeMockConfig(dataDir: string): Config {

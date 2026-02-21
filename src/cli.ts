@@ -1,5 +1,5 @@
 /**
- * Pibot management CLI.
+ * Bryti management CLI.
  *
  * Single entry point for all operator tasks. Run via:
  *   npm run cli -- <command> [options]
@@ -20,8 +20,8 @@
  *   archive-fact "<content>"               Insert a fact and check trigger-based projections
  *
  * Global options:
- *   --user-id <id>     User ID (default: first allowed_users entry or PIBOT_USER_ID env)
- *   --data-dir <path>  Data directory (default: PIBOT_DATA_DIR env or ./data)
+ *   --user-id <id>     User ID (default: first allowed_users entry or BRYTI_USER_ID env)
+ *   --data-dir <path>  Data directory (default: BRYTI_DATA_DIR env or ./data)
  */
 
 import fs from "node:fs";
@@ -57,12 +57,12 @@ function positional(afterFlags: number): string | undefined {
 // ---------------------------------------------------------------------------
 
 function resolveDataDir(): string {
-  return opt("--data-dir") ?? process.env.PIBOT_DATA_DIR ?? "./data";
+  return opt("--data-dir") ?? process.env.BRYTI_DATA_DIR ?? "./data";
 }
 
 function resolveUserId(dataDir: string): string {
   if (opt("--user-id")) return opt("--user-id")!;
-  if (process.env.PIBOT_USER_ID) return process.env.PIBOT_USER_ID;
+  if (process.env.BRYTI_USER_ID) return process.env.BRYTI_USER_ID;
   // Try to read from config
   try {
     const config = loadConfig(path.join(dataDir, "config.yml"));
@@ -327,7 +327,7 @@ function cmdTimeskip(dataDir: string, userId: string, summaryOrId: string, minut
 function cmdImportOpenclaw(dataDir: string, userId: string, dryRun: boolean): void {
   const clawdDir = "/home/lars/clawd";
 
-  console.log(`Importing OpenClaw memory into pibot`);
+  console.log(`Importing OpenClaw memory into bryti`);
   console.log(`  User ID:  ${userId}`);
   console.log(`  Data dir: ${dataDir}`);
   console.log(`  Dry run:  ${dryRun}`);
@@ -421,7 +421,7 @@ function cmdImportOpenclaw(dataDir: string, userId: string, dryRun: boolean): vo
 
   db.close();
   console.log(`[archival] Done: ${inserted} inserted, ${skipped} skipped`);
-  console.log("\nDone. Restart pibot for core memory changes to take effect.");
+  console.log("\nDone. Restart bryti for core memory changes to take effect.");
 }
 
 function splitIntoSections(content: string, filename: string): string[] {
@@ -530,7 +530,7 @@ function cmdFillContext(
       fs.appendFileSync(filePath, entries.join("\n") + "\n", "utf-8");
       console.log(`  Written ${entries.length} entries to history/${day}.jsonl`);
     }
-    console.log(`\nDone. Restart pibot to pick up the new history in context.`);
+    console.log(`\nDone. Restart bryti to pick up the new history in context.`);
   } else {
     for (const [day, entries] of byDay) {
       console.log(`  Would write ${entries.length} entries to history/${day}.jsonl`);
@@ -590,7 +590,7 @@ async function cmdArchiveFact(dataDir: string, userId: string, content: string):
 
 function showHelp(): void {
   console.log(`
-pibot CLI — management commands
+bryti CLI — management commands
 
 Usage:
   npm run cli -- <command> [options]
@@ -643,7 +643,7 @@ Commands:
 
 Global options:
   --user-id <id>     User ID (default: first entry in telegram.allowed_users)
-  --data-dir <path>  Data directory (default: PIBOT_DATA_DIR env or ./data)
+  --data-dir <path>  Data directory (default: BRYTI_DATA_DIR env or ./data)
 `);
 }
 

@@ -10,7 +10,7 @@
  *   1. worker_dispatch → creates worker dir, writes task.md, spawns session
  *   2. Worker runs (web search, fetch URL, write to result.md)
  *      - Worker polls steering.md after every few tool calls and adjusts if found
- *   3. On completion (or failure/timeout/cancellation), pibot:
+ *   3. On completion (or failure/timeout/cancellation), bryti:
  *      - writes status.json
  *      - archives a fact into the user's memory store
  *   4. worker_check → query current status of a worker

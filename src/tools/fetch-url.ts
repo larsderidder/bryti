@@ -85,7 +85,7 @@ export function createFetchUrlTool(timeoutMs: number = 10000): AgentTool<typeof 
         const response = await axios.get(url, {
           timeout: timeoutMs,
           headers: {
-            "User-Agent": "Mozilla/5.0 (compatible; Pibot/1.0)",
+            "User-Agent": "Mozilla/5.0 (compatible; Bryti/1.0)",
             Accept: "text/html,application/xhtml+xml",
           },
           maxContentLength: 2 * 1024 * 1024, // 2MB max

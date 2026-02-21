@@ -1,7 +1,7 @@
 /**
  * Agent session management.
  *
- * Wraps pi's SDK createAgentSession() with pibot-specific configuration:
+ * Wraps pi's SDK createAgentSession() with bryti-specific configuration:
  * - Persistent sessions per user (session file survives across messages)
  * - Transcript repair before every prompt (fixes tool-call/result pairing)
  * - Auto-compaction via pi SDK (triggers automatically when context fills)
@@ -66,7 +66,7 @@ interface ToolSummary {
 }
 
 /**
- * Generate models.json from pibot config.
+ * Generate models.json from bryti config.
  */
 function generateModelsJson(config: Config, agentDir: string): void {
   const modelsJsonPath = path.join(agentDir, "models.json");
@@ -275,9 +275,9 @@ export async function loadUserSession(
 
   generateModelsJson(config, agentDir);
 
-  // Auth — share ~/.pi/agent/auth.json so pibot uses the same OAuth creds as
+  // Auth — share ~/.pi/agent/auth.json so bryti uses the same OAuth creds as
   // the pi CLI (Anthropic OAuth, etc.). AuthStorage uses file-level locking so
-  // concurrent token refreshes from pi CLI and pibot are safe.
+  // concurrent token refreshes from pi CLI and bryti are safe.
   // Calling new AuthStorage() with no args defaults to ~/.pi/agent/auth.json.
   const authStorage = new AuthStorage();
   for (const provider of config.models.providers) {

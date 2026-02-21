@@ -8,7 +8,7 @@ describe("CoreMemoryTools", () => {
   let tools: ReturnType<typeof createCoreMemoryTools>;
 
   beforeEach(() => {
-    tempDir = fs.mkdtempSync("/tmp/pibot-core-memory-tool-");
+    tempDir = fs.mkdtempSync("/tmp/bryti-core-memory-tool-");
     tools = createCoreMemoryTools(createCoreMemory(tempDir));
   });
 

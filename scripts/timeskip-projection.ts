@@ -17,7 +17,7 @@ import Database from "better-sqlite3";
 import path from "node:path";
 import fs from "node:fs";
 
-const PIBOT_DATA_DIR = process.env.PIBOT_DATA_DIR ?? "./data";
+const BRYTI_DATA_DIR = process.env.BRYTI_DATA_DIR ?? "./data";
 const USER_ID = process.argv.includes("--user-id")
   ? process.argv[process.argv.indexOf("--user-id") + 1]
   : "default-user";
@@ -32,7 +32,7 @@ const SUMMARY = process.argv.includes("--summary")
   ? process.argv[process.argv.indexOf("--summary") + 1]
   : undefined;
 
-const dbPath = path.join(PIBOT_DATA_DIR, "users", USER_ID, "memory.db");
+const dbPath = path.join(BRYTI_DATA_DIR, "users", USER_ID, "memory.db");
 if (!fs.existsSync(dbPath)) {
   console.error(`No memory.db found at ${dbPath}`);
   process.exit(1);

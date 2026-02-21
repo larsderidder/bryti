@@ -18,6 +18,6 @@ while true; do
     exit 0
   fi
 
-  echo "Pibot crashed (exit code $exit_code). Restarting in ${RESTART_DELAY_SECONDS}s..."
+  echo "Bryti crashed (exit code $exit_code). Restarting in ${RESTART_DELAY_SECONDS}s..."
   sleep "$RESTART_DELAY_SECONDS"
 done

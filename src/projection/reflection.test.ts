@@ -50,7 +50,7 @@ function makeConfig(dataDir: string): Config {
 }
 
 function makeDir(): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "pibot-refl-test-"));
+  return fs.mkdtempSync(path.join(os.tmpdir(), "bryti-refl-test-"));
 }
 
 // ---------------------------------------------------------------------------

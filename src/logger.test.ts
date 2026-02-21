@@ -7,7 +7,7 @@ describe("AppLogger", () => {
   let tempDir: string;
 
   beforeEach(() => {
-    tempDir = fs.mkdtempSync("/tmp/pibot-log-test-");
+    tempDir = fs.mkdtempSync("/tmp/bryti-log-test-");
   });
 
   afterEach(() => {

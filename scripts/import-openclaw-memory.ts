@@ -1,5 +1,5 @@
 /**
- * Import OpenClaw memory into pibot's memory system.
+ * Import OpenClaw memory into bryti's memory system.
  *
  * Sources:
  * - /home/lars/clawd/USER.md    → appended to core memory (always in context)
@@ -19,7 +19,7 @@ import Database from "better-sqlite3";
 // ---------------------------------------------------------------------------
 
 const CLAWD_DIR = "/home/lars/clawd";
-const PIBOT_DATA_DIR = process.env.PIBOT_DATA_DIR ?? "./data";
+const BRYTI_DATA_DIR = process.env.BRYTI_DATA_DIR ?? "./data";
 const USER_ID = process.argv.includes("--user-id")
   ? process.argv[process.argv.indexOf("--user-id") + 1]
   : "default-user";
@@ -36,7 +36,7 @@ function importCoreMemory(): void {
     return;
   }
 
-  const corePath = path.join(PIBOT_DATA_DIR, "core-memory.md");
+  const corePath = path.join(BRYTI_DATA_DIR, "core-memory.md");
   const existing = fs.existsSync(corePath) ? fs.readFileSync(corePath, "utf-8") : "";
 
   if (existing.includes("## About Lars")) {
@@ -72,7 +72,7 @@ interface ExistsStmt {
 }
 
 function openDb(): { insert: InsertStmt; exists: ExistsStmt; close: () => void } {
-  const userDir = path.join(PIBOT_DATA_DIR, "users", USER_ID);
+  const userDir = path.join(BRYTI_DATA_DIR, "users", USER_ID);
   fs.mkdirSync(userDir, { recursive: true });
 
   const db = new Database(path.join(userDir, "memory.db"));
@@ -197,13 +197,13 @@ function importArchival(): void {
 // Main
 // ---------------------------------------------------------------------------
 
-console.log(`Importing OpenClaw memory into pibot`);
+console.log(`Importing OpenClaw memory into bryti`);
 console.log(`  User ID:  ${USER_ID}`);
-console.log(`  Data dir: ${PIBOT_DATA_DIR}`);
+console.log(`  Data dir: ${BRYTI_DATA_DIR}`);
 console.log(`  Dry run:  ${DRY_RUN}`);
 console.log("");
 
 importCoreMemory();
 importArchival();
 
-console.log("\nDone. Restart pibot for core memory changes to take effect.");
+console.log("\nDone. Restart bryti for core memory changes to take effect.");

@@ -182,7 +182,7 @@ function toolsFromConfig(substituted: Record<string, unknown>, dataDir: string):
 }
 
 export function loadConfig(configPath?: string): Config {
-  const dataDir = path.resolve(process.env.PIBOT_DATA_DIR || "./data");
+  const dataDir = path.resolve(process.env.BRYTI_DATA_DIR || "./data");
   const cfgPath = configPath || path.join(dataDir, "config.yml");
 
   if (!fs.existsSync(cfgPath)) {
@@ -196,7 +196,7 @@ export function loadConfig(configPath?: string): Config {
   // Defaults
   const config: Config = {
     agent: {
-      name: "Pibot",
+      name: "Bryti",
       system_prompt: "You are a helpful personal assistant.",
       model: "",
       fallback_models: [],

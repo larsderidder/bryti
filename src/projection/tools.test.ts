@@ -6,7 +6,7 @@ import { createProjectionStore } from "./store.js";
 import { createProjectionTools } from "./tools.js";
 
 function makeTempDir(): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "pibot-proj-tools-test-"));
+  return fs.mkdtempSync(path.join(os.tmpdir(), "bryti-proj-tools-test-"));
 }
 
 describe("ProjectionTools dependencies", () => {

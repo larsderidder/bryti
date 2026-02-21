@@ -8,7 +8,7 @@ describe("UsageTracker", () => {
   let tempDir: string;
 
   beforeEach(() => {
-    tempDir = fs.mkdtempSync("/tmp/pibot-usage-test-");
+    tempDir = fs.mkdtempSync("/tmp/bryti-usage-test-");
   });
 
   afterEach(() => {
@@ -93,7 +93,7 @@ describe("UsageTracker", () => {
 describe("usage cost helpers", () => {
   const config: Config = {
     agent: {
-      name: "Pibot",
+      name: "Bryti",
       system_prompt: "test",
       model: "provider-a/model-a",
     },

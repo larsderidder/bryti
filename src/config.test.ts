@@ -7,12 +7,12 @@ describe("Config", () => {
   let tempDir: string;
 
   beforeEach(() => {
-    tempDir = fs.mkdtempSync("/tmp/pibot-test-");
-    process.env.PIBOT_DATA_DIR = tempDir;
+    tempDir = fs.mkdtempSync("/tmp/bryti-test-");
+    process.env.BRYTI_DATA_DIR = tempDir;
   });
 
   afterEach(() => {
-    delete process.env.PIBOT_DATA_DIR;
+    delete process.env.BRYTI_DATA_DIR;
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 

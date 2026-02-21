@@ -15,13 +15,13 @@ COPY --from=builder /app/node_modules ./node_modules
 COPY package.json ./
 
 # Create non-root user
-RUN addgroup -g 1000 -S pibot && \
-    adduser -u 1000 -S pibot -G pibot
-USER pibot
+RUN addgroup -g 1000 -S bryti && \
+    adduser -u 1000 -S bryti -G bryti
+USER bryti
 
 # Data directory (config, memory, sessions, logs) is a volume mount.
 # The embedding model downloads here on first run (~300MB).
 VOLUME /data
-ENV PIBOT_DATA_DIR=/data
+ENV BRYTI_DATA_DIR=/data
 
 CMD ["node", "dist/index.js"]

@@ -1,7 +1,7 @@
 /**
  * Centralized timezone utilities.
  *
- * Single source of truth for all timezone-aware operations in pibot.
+ * Single source of truth for all timezone-aware operations in bryti.
  * All datetime strings stored in SQLite use space-separated UTC format
  * ("YYYY-MM-DD HH:MM") so SQLite's datetime() comparisons stay correct.
  *

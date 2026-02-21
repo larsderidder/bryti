@@ -8,7 +8,7 @@ import type { Config } from "./config.js";
 // ---------------------------------------------------------------------------
 
 function makeTempDir(): string {
-  return fs.mkdtempSync("/tmp/pibot-scheduler-test-");
+  return fs.mkdtempSync("/tmp/bryti-scheduler-test-");
 }
 
 function makeConfig(cron: Config["cron"] = []): Config {

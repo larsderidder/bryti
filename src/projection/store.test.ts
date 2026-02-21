@@ -14,7 +14,7 @@ import {
 // ---------------------------------------------------------------------------
 
 function makeTempDir(): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "pibot-proj-test-"));
+  return fs.mkdtempSync(path.join(os.tmpdir(), "bryti-proj-test-"));
 }
 
 function isoHoursFromNow(hours: number): string {

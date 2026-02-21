@@ -1,7 +1,7 @@
 /**
  * Tool registry.
  *
- * Pibot-specific tools registered as pi SDK custom tools.
+ * Bryti-specific tools registered as pi SDK custom tools.
  * These supplement pi's built-in tools (read/write/edit/bash).
  */
 
@@ -30,12 +30,12 @@ export { createWorkerTools, createWorkerRegistry };
 
 
 /**
- * Type for pibot tools (AgentTool from pi).
+ * Type for bryti tools (AgentTool from pi).
  */
-export type PibotTool = AgentTool<any>;
+export type BrytiTool = AgentTool<any>;
 
 /**
- * Create all pibot tools based on configuration.
+ * Create all bryti tools based on configuration.
  *
  * @param onWorkerTrigger  Called when a worker's completion fact triggers projections.
  *                         Use this to inject an immediate message into the agent queue.
@@ -45,8 +45,8 @@ export function createTools(
   coreMemory: CoreMemory,
   userId: string,
   onWorkerTrigger?: WorkerTriggerCallback,
-): PibotTool[] {
-  const tools: PibotTool[] = [];
+): BrytiTool[] {
+  const tools: BrytiTool[] = [];
 
   // File tools (main agent can read/write in its sandbox)
   if (config.tools.files.enabled) {

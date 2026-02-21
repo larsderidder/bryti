@@ -71,7 +71,7 @@ function makeMissingToolResult(params: {
     content: [
       {
         type: "text",
-        text: "[pibot] missing tool result in session history; inserted synthetic error result for transcript repair.",
+        text: "[bryti] missing tool result in session history; inserted synthetic error result for transcript repair.",
       },
     ],
     isError: true,

@@ -1,5 +1,5 @@
 /**
- * Pibot entry point.
+ * Bryti entry point.
  *
  * Wires together:
  * - Config loading
@@ -343,7 +343,7 @@ async function startApp(): Promise<RunningApp> {
   ensureDataDirs(config);
   installConsoleFileLogging(createAppLogger(config.data_dir));
 
-  console.log(`Pibot starting: agent="${config.agent.name}" model="${config.agent.model}"`);
+  console.log(`Bryti starting: agent="${config.agent.name}" model="${config.agent.model}"`);
   console.log(`Data directory: ${config.data_dir}`);
   console.log(`Providers: ${config.models.providers.map((p) => p.name).join(", ")}`);
   console.log(`Config cron jobs: ${config.cron.length}`);
@@ -502,7 +502,7 @@ async function startApp(): Promise<RunningApp> {
   compactionJobs.push(nightlyCompact);
 
   console.log(`Proactive compaction: idle check every 10 min (threshold: 30 min), nightly at 03:00 ${tz}`);
-  console.log("Pibot ready!");
+  console.log("Bryti ready!");
 
   let stopped = false;
   return {
@@ -536,7 +536,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 async function runWithSupervisor(): Promise<void> {
-  const restartDelayMs = Number(process.env.PIBOT_RESTART_DELAY_MS ?? 2000);
+  const restartDelayMs = Number(process.env.BRYTI_RESTART_DELAY_MS ?? 2000);
   let shutdownRequested = false;
   let resolver: ((outcome: "shutdown" | "restart") => void) | null = null;
 

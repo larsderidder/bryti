@@ -8,7 +8,7 @@ describe("HistoryManager", () => {
   let historyManager: HistoryManager;
 
   beforeEach(() => {
-    tempDir = fs.mkdtempSync("/tmp/pibot-test-");
+    tempDir = fs.mkdtempSync("/tmp/bryti-test-");
     historyManager = createHistoryManager(tempDir);
   });
 

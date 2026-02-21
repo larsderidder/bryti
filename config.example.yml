@@ -1,15 +1,15 @@
-# Pibot configuration
+# Bryti configuration
 # Copy to data/config.yml and fill in your values.
 # ${VAR} references are substituted from environment variables.
 
 agent:
-  name: "Pibot"
+  name: "Bryti"
 
   # Your additions to the system prompt. Persona, standing instructions, context
   # about you and your work. The framework adds memory, tool descriptions, and
   # all other sections automatically.
   system_prompt: |
-    You are Pibot, a personal AI assistant. You are concise and practical.
+    You are Bryti, a personal AI assistant. You are concise and practical.
 
   # Primary model. Format: provider/model-id
   # Option 1: Anthropic OAuth (Claude Pro/Max subscription, no API key needed)
@@ -54,7 +54,7 @@ whatsapp:
 models:
   providers:
     # Anthropic OAuth — uses ~/.pi/agent/auth.json (shared with pi CLI).
-    # No api_key needed; pibot reads the OAuth token automatically.
+    # No api_key needed; bryti reads the OAuth token automatically.
     # Prerequisite: run `pi login anthropic` once.
     - name: anthropic
       base_url: ""

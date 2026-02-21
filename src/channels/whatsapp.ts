@@ -71,7 +71,7 @@ export class WhatsAppBridge implements ChannelBridge {
 
     this.socket = makeWASocket({
       auth: state,
-      browser: ["Pibot", "Chrome", "22.0"],
+      browser: ["Bryti", "Chrome", "22.0"],
       logger: silentLogger as any,
     });
 
