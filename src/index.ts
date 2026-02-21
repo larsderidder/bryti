@@ -337,6 +337,8 @@ async function startApp(): Promise<RunningApp> {
    * Try to compact a session. Skips if already compacting or if there are
    * very few messages (not worth compacting).
    */
+  const IDLE_CONTEXT_THRESHOLD = 30; // percent of context window
+
   async function tryCompact(userSession: UserSession, reason: string): Promise<void> {
     const { session, userId } = userSession;
     if (session.isCompacting) return;
@@ -344,6 +346,17 @@ async function startApp(): Promise<RunningApp> {
     // Don't compact tiny sessions (system + a couple messages)
     const messageCount = session.messages.length;
     if (messageCount < 6) return;
+
+    // Idle compaction: only when context is above threshold. No point compacting
+    // a mostly-empty context just because the user stepped away.
+    // Nightly compaction always runs (fresh start for the morning).
+    if (reason !== "nightly") {
+      const usage = session.getContextUsage();
+      const percent = usage?.percent ?? 0;
+      if (percent < IDLE_CONTEXT_THRESHOLD) {
+        return;
+      }
+    }
 
     console.log(`[compaction] proactive ${reason} for user ${userId} (${messageCount} messages)`);
     try {
