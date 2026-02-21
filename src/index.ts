@@ -20,6 +20,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { Cron } from "croner";
 import { loadConfig, ensureDataDirs, type Config } from "./config.js";
 import { createCoreMemory, type CoreMemory } from "./memory/core-memory.js";
 import { createHistoryManager, type HistoryManager } from "./history.js";
@@ -37,6 +38,7 @@ import {
   type UsageTracker,
 } from "./usage.js";
 import { createAppLogger, installConsoleFileLogging } from "./logger.js";
+import { getUserTimezone } from "./time.js";
 
 /**
  * Application state.
@@ -160,6 +162,13 @@ async function processMessage(
     // Load (or reuse) the persistent session for this user
     const userSession = await getOrLoadSession(state, msg.userId);
     const { session } = userSession;
+
+    // Track last user message time (scheduler messages have raw.type set)
+    const rawObj = msg.raw as Record<string, unknown> | null | undefined;
+    const isSchedulerMessage = rawObj?.type != null;
+    if (!isSchedulerMessage) {
+      userSession.lastUserMessageAt = Date.now();
+    }
 
     // Repair transcript before prompting
     repairSessionTranscript(session, msg.userId);
@@ -313,6 +322,60 @@ async function startApp(): Promise<RunningApp> {
   scheduler.start();
   state.scheduler = scheduler;
 
+  // -----------------------------------------------------------------------
+  // Proactive compaction: idle and nightly
+  //
+  // Pi SDK auto-compacts when the context window fills, but that's the worst
+  // time (mid-conversation, adds latency). Proactive compaction keeps context
+  // lean during quiet periods.
+  // -----------------------------------------------------------------------
+
+  const IDLE_THRESHOLD_MS = 30 * 60 * 1000; // 30 minutes
+  const compactionJobs: Cron[] = [];
+
+  /**
+   * Try to compact a session. Skips if already compacting or if there are
+   * very few messages (not worth compacting).
+   */
+  async function tryCompact(userSession: UserSession, reason: string): Promise<void> {
+    const { session, userId } = userSession;
+    if (session.isCompacting) return;
+
+    // Don't compact tiny sessions (system + a couple messages)
+    const messageCount = session.messages.length;
+    if (messageCount < 6) return;
+
+    console.log(`[compaction] proactive ${reason} for user ${userId} (${messageCount} messages)`);
+    try {
+      await session.compact();
+      console.log(`[compaction] proactive ${reason} done for user ${userId}`);
+    } catch (err) {
+      console.error(`[compaction] proactive ${reason} failed for user ${userId}:`, (err as Error).message);
+    }
+  }
+
+  // Check every 10 minutes: compact sessions idle for 30+ minutes
+  const idleCheck = new Cron("*/10 * * * *", { timezone: "UTC" }, () => {
+    const now = Date.now();
+    for (const [_userId, userSession] of state.sessions) {
+      const idleMs = now - userSession.lastUserMessageAt;
+      if (idleMs >= IDLE_THRESHOLD_MS) {
+        tryCompact(userSession, "idle").catch(() => {});
+      }
+    }
+  });
+  compactionJobs.push(idleCheck);
+
+  // Nightly compaction at 03:00 user timezone (all sessions)
+  const tz = getUserTimezone(config);
+  const nightlyCompact = new Cron("0 3 * * *", { timezone: tz }, () => {
+    for (const [_userId, userSession] of state.sessions) {
+      tryCompact(userSession, "nightly").catch(() => {});
+    }
+  });
+  compactionJobs.push(nightlyCompact);
+
+  console.log(`Proactive compaction: idle check every 10 min (threshold: 30 min), nightly at 03:00 ${tz}`);
   console.log("Pibot ready!");
 
   let stopped = false;
@@ -324,6 +387,7 @@ async function startApp(): Promise<RunningApp> {
       stopped = true;
       console.log("Shutting down...");
       state.scheduler.stop();
+      for (const job of compactionJobs) job.stop();
       await bridge.stop();
       for (const [userId, userSession] of state.sessions) {
         console.log(`Disposing session for user ${userId}`);

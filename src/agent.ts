@@ -53,6 +53,8 @@ export interface UserSession {
   userId: string;
   /** Path to the per-user session directory on disk. */
   sessionDir: string;
+  /** Timestamp of last user-initiated message (not scheduler). */
+  lastUserMessageAt: number;
   /** Clean up event listeners. Does NOT delete the session file. */
   dispose(): void;
 }
@@ -414,6 +416,7 @@ export async function loadUserSession(
     modelRegistry,
     userId,
     sessionDir: sessDir,
+    lastUserMessageAt: Date.now(),
     dispose() {
       unsubscribe();
       session.dispose();
