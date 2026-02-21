@@ -96,6 +96,60 @@ export function buildToolSection(
 
 export const SILENT_REPLY_TOKEN = "NOOP";
 
+/**
+ * Extract a short human-readable summary of the tool arguments for the audit log.
+ * The goal is to give the /log command enough context to show a useful line,
+ * without storing raw LLM arguments verbatim.
+ */
+function buildArgsSummary(toolName: string, args: unknown): string {
+  if (!args || typeof args !== "object") {
+    return "";
+  }
+  const a = args as Record<string, unknown>;
+
+  switch (toolName) {
+    case "memory_archival_search":
+      return String(a.query ?? "");
+    case "memory_archival_insert":
+      return truncate(String(a.content ?? ""), 80);
+    case "memory_core_append":
+      return `${a.section}: ${truncate(String(a.content ?? ""), 60)}`;
+    case "memory_core_replace":
+      return String(a.section ?? "");
+    case "memory_conversation_search":
+      return String(a.query ?? "");
+    case "projection_create":
+      return truncate(String(a.summary ?? ""), 80);
+    case "projection_resolve":
+      return String(a.id ?? "");
+    case "projection_list":
+      return "";
+    case "projection_link":
+      return String(a.projection_id ?? "");
+    case "worker_dispatch":
+      return truncate(String(a.task ?? ""), 80);
+    case "worker_check":
+      return String(a.worker_id ?? "");
+    case "worker_interrupt":
+      return String(a.worker_id ?? "");
+    case "worker_steer":
+      return String(a.worker_id ?? "");
+    case "file_read":
+      return String(a.path ?? "");
+    case "file_write":
+      return String(a.path ?? "");
+    case "file_list":
+      return String(a.directory ?? "");
+    default:
+      return "";
+  }
+}
+
+function truncate(text: string, maxLen: number): string {
+  if (text.length <= maxLen) return text;
+  return text.slice(0, maxLen - 1) + "…";
+}
+
 function buildSystemPrompt(
   config: Config,
   coreMemory: string,
@@ -145,6 +199,9 @@ function buildSystemPrompt(
     `Tools marked "(extension)" come from TypeScript files in your extensions directory. ` +
     `You can read, rewrite, replace, or create them using file_read and file_write.\n\n` +
     `Extensions are loaded from: data/files/extensions/\n\n` +
+    `Some extensions only register their tools when a required environment variable is set. ` +
+    `If a tool is missing that you expect to be there, the extension is likely not configured. ` +
+    `Read the extension file to find out which env var it needs, then tell the user to add it to .env and restart.\n\n` +
     `Before writing or modifying an extension, read the guide:\n` +
     `file_read("extensions/EXTENSIONS.md")\n\n` +
     `It covers the template, available APIs, parameter types, how to use env vars, ` +
@@ -356,6 +413,11 @@ export async function loadUserSession(
     }
   }
 
+  // Ensure the logs directory exists and prepare the tool call log path.
+  const logsDir = path.join(config.data_dir, "logs");
+  fs.mkdirSync(logsDir, { recursive: true });
+  const toolCallLogPath = path.join(logsDir, "tool-calls.jsonl");
+
   // Log compaction and tool call events
   const toolCallCounts = new Map<string, number>();
   const unsubscribe = session.subscribe((event: AgentSessionEvent) => {
@@ -376,6 +438,22 @@ export async function loadUserSession(
       const name = event.toolName ?? "unknown";
       toolCallCounts.set(name, (toolCallCounts.get(name) ?? 0) + 1);
       console.log(`[tool] ${name} called (total this session: ${toolCallCounts.get(name)})`);
+
+      // Append a structured entry to the audit log. Best-effort: never crash the
+      // subscriber if the write fails.
+      try {
+        const args = event.args;
+        const argsSummary = buildArgsSummary(name, args);
+        const entry = JSON.stringify({
+          timestamp: new Date().toISOString(),
+          userId,
+          toolName: name,
+          args_summary: argsSummary,
+        });
+        fs.appendFileSync(toolCallLogPath, entry + "\n", "utf-8");
+      } catch {
+        // Best-effort — never let a log write crash the agent loop
+      }
     }
   });
 

@@ -67,6 +67,8 @@ interface AppState {
   trustStore: TrustStore;
   /** Last user message per userId (for guardrail context). */
   lastUserMessages: Map<string, string>;
+  /** Users whose session was recovered after corruption — notified on next message. */
+  recoveredSessions: Set<string>;
 }
 
 interface AssistantMessageLike {
@@ -161,15 +163,231 @@ async function getOrLoadSession(state: AppState, userId: string): Promise<UserSe
   };
   const wrappedTools = wrapToolsWithTrustChecks(tools, state.trustStore, userId, trustContext);
 
-  const userSession = await loadUserSession(
-    state.config,
-    state.coreMemory,
-    userId,
-    wrappedTools,
-  );
+  const sessDir = path.join(state.config.data_dir, "sessions", userId);
+
+  let userSession: UserSession;
+  try {
+    userSession = await loadUserSession(state.config, state.coreMemory, userId, wrappedTools);
+  } catch (err) {
+    console.error(`[session] Failed to load session for user ${userId}, attempting recovery:`, err);
+    const corruptDir = path.join(
+      state.config.data_dir,
+      "sessions",
+      `${userId}-corrupt-${Date.now()}`,
+    );
+    if (fs.existsSync(sessDir)) {
+      try {
+        fs.renameSync(sessDir, corruptDir);
+        console.log(`[session] Quarantined corrupt session to: ${corruptDir}`);
+      } catch (renameErr) {
+        console.error(`[session] Could not quarantine corrupt session:`, renameErr);
+      }
+    }
+    // Retry with a clean slate — loadUserSession will create a fresh session directory
+    userSession = await loadUserSession(state.config, state.coreMemory, userId, wrappedTools);
+    state.recoveredSessions.add(userId);
+  }
 
   state.sessions.set(userId, userSession);
   return userSession;
+}
+
+// ---------------------------------------------------------------------------
+// Crash recovery: pending-message checkpoints
+// ---------------------------------------------------------------------------
+
+interface PendingCheckpoint {
+  text: string;
+  channelId: string;
+  platform: string;
+  timestamp: number;
+}
+
+function pendingDir(config: Config): string {
+  return path.join(config.data_dir, "pending");
+}
+
+function pendingPath(config: Config, userId: string): string {
+  return path.join(pendingDir(config), `${userId}.json`);
+}
+
+function writePendingCheckpoint(config: Config, msg: IncomingMessage): void {
+  const checkpoint: PendingCheckpoint = {
+    text: msg.text,
+    channelId: msg.channelId,
+    platform: msg.platform,
+    timestamp: Date.now(),
+  };
+  try {
+    fs.writeFileSync(pendingPath(config, msg.userId), JSON.stringify(checkpoint), "utf8");
+  } catch (err) {
+    console.warn("[pending] Failed to write checkpoint:", (err as Error).message);
+  }
+}
+
+function deletePendingCheckpoint(config: Config, userId: string): void {
+  try {
+    fs.rmSync(pendingPath(config, userId), { force: true });
+  } catch (err) {
+    console.warn("[pending] Failed to delete checkpoint:", (err as Error).message);
+  }
+}
+
+/**
+ * On startup, scan for leftover pending files from a previous crash.
+ * For each stale file (between 2 min and 1 hour old), notify the user.
+ * Files older than 1 hour are silently discarded.
+ */
+async function recoverPendingCheckpoints(state: AppState): Promise<void> {
+  const dir = pendingDir(state.config);
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(dir).filter((f) => f.endsWith(".json"));
+  } catch {
+    return;
+  }
+
+  if (entries.length === 0) return;
+
+  const now = Date.now();
+  const MIN_AGE_MS = 2 * 60 * 1000;   // 2 minutes: ignore files written moments before a clean restart
+  const MAX_AGE_MS = 60 * 60 * 1000;  // 1 hour: too stale to be useful
+
+  // Group by userId (filename = <userId>.json), keep most recent per user
+  const byUser = new Map<string, { checkpoint: PendingCheckpoint; filePath: string }>();
+
+  for (const entry of entries) {
+    const filePath = path.join(dir, entry);
+    let checkpoint: PendingCheckpoint;
+    try {
+      checkpoint = JSON.parse(fs.readFileSync(filePath, "utf8")) as PendingCheckpoint;
+    } catch {
+      fs.rmSync(filePath, { force: true });
+      continue;
+    }
+
+    const userId = entry.slice(0, -5); // strip .json
+    const existing = byUser.get(userId);
+    if (!existing || checkpoint.timestamp > existing.checkpoint.timestamp) {
+      byUser.set(userId, { checkpoint, filePath });
+    }
+  }
+
+  for (const [userId, { checkpoint, filePath }] of byUser) {
+    const age = now - checkpoint.timestamp;
+
+    // Always delete the file first to prevent repeat notifications on the next restart
+    try {
+      fs.rmSync(filePath, { force: true });
+    } catch {
+      // ignore
+    }
+
+    if (age < MIN_AGE_MS || age > MAX_AGE_MS) {
+      console.log(`[pending] Skipping stale checkpoint for ${userId} (age ${Math.round(age / 1000)}s)`);
+      continue;
+    }
+
+    console.log(`[pending] Crash recovery: notifying ${userId} (age ${Math.round(age / 1000)}s)`);
+    try {
+      const bridge = getBridge(state, checkpoint.platform);
+      await bridge.sendMessage(
+        checkpoint.channelId,
+        "Sorry, I crashed while working on your last message. Could you resend it?",
+      );
+    } catch (err) {
+      console.warn(`[pending] Failed to notify ${userId}:`, (err as Error).message);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// /log — recent activity audit
+// ---------------------------------------------------------------------------
+
+/**
+ * Maps internal tool names to human-readable descriptions for the /log output.
+ * Follows the same "never leak tool names" rule used elsewhere in the system.
+ */
+const TOOL_DESCRIPTIONS: Record<string, string> = {
+  memory_archival_search: "Searched memory",
+  memory_archival_insert: "Saved a memory",
+  memory_core_append: "Updated core memory",
+  memory_core_replace: "Updated core memory",
+  memory_conversation_search: "Searched conversation history",
+  projection_create: "Set a reminder",
+  projection_resolve: "Resolved a reminder",
+  projection_list: "Checked upcoming reminders",
+  projection_link: "Linked memory to a reminder",
+  worker_dispatch: "Started background research",
+  worker_check: "Checked background task",
+  worker_interrupt: "Cancelled a background task",
+  worker_steer: "Adjusted a background task",
+  file_read: "Read a file",
+  file_write: "Wrote a file",
+  file_list: "Listed files",
+};
+
+interface ToolCallLogEntry {
+  timestamp: string;
+  userId: string;
+  toolName: string;
+  args_summary: string;
+}
+
+/**
+ * Read the tool call log, filter to the given user, and format a
+ * human-readable activity summary for display.
+ */
+function buildActivityLog(dataDir: string, userId: string, timezone: string): string {
+  const logPath = path.join(dataDir, "logs", "tool-calls.jsonl");
+
+  if (!fs.existsSync(logPath)) {
+    return "No recent activity on record yet.";
+  }
+
+  let entries: ToolCallLogEntry[];
+  try {
+    const raw = fs.readFileSync(logPath, "utf-8");
+    entries = raw
+      .split("\n")
+      .filter((line) => line.trim())
+      .map((line) => {
+        try {
+          return JSON.parse(line) as ToolCallLogEntry;
+        } catch {
+          return null;
+        }
+      })
+      .filter((entry): entry is ToolCallLogEntry => entry !== null);
+  } catch {
+    return "Could not read the activity log.";
+  }
+
+  // Filter to this user, take the last 20 entries
+  const userEntries = entries
+    .filter((e) => e.userId === userId)
+    .slice(-20);
+
+  if (userEntries.length === 0) {
+    return "No recent activity on record yet.";
+  }
+
+  const lines = userEntries.map((entry) => {
+    const ts = new Date(entry.timestamp);
+    const time = ts.toLocaleString("sv-SE", {
+      timeZone: timezone,
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    });
+
+    const description = TOOL_DESCRIPTIONS[entry.toolName] ?? "Ran a task";
+    const detail = entry.args_summary ? `: ${entry.args_summary}` : "";
+    return `- ${time}  ${description}${detail}`;
+  });
+
+  return `Recent activity:\n${lines.join("\n")}`;
 }
 
 /**
@@ -210,6 +428,12 @@ async function processMessage(
     return;
   }
 
+  if (msg.text === "/log") {
+    const logText = buildActivityLog(state.config.data_dir, msg.userId, getUserTimezone(state.config));
+    await getBridge(state, msg.platform).sendMessage(msg.channelId, logText);
+    return;
+  }
+
   // Input validation: reject excessively long messages before they waste context
   const MAX_MESSAGE_LENGTH = 10_000;
   if (msg.text.length > MAX_MESSAGE_LENGTH) {
@@ -243,6 +467,13 @@ async function processMessage(
   try {
     // Load (or reuse) the persistent session for this user
     const userSession = await getOrLoadSession(state, msg.userId);
+    if (state.recoveredSessions.has(msg.userId)) {
+      state.recoveredSessions.delete(msg.userId);
+      await getBridge(state, msg.platform).sendMessage(
+        msg.channelId,
+        "I had to start a fresh conversation due to a technical issue. My memory and reminders are intact, just the recent conversation thread was lost.",
+      );
+    }
     const { session } = userSession;
 
     // Track last user message time (scheduler messages have raw.type set)
@@ -264,6 +495,14 @@ async function processMessage(
       role: "user",
       content: msg.text,
     });
+
+    // Write a crash-recovery checkpoint before the (potentially long) model call.
+    // Deleted after the response is sent. If the process dies in between, the
+    // next startup will find this file and notify the user.
+    const isUserMessage = !isSchedulerMessage;
+    if (isUserMessage) {
+      writePendingCheckpoint(state.config, msg);
+    }
 
     // Prompt the agent, with automatic fallback to other models if the primary fails
     const promptStart = Date.now();
@@ -343,6 +582,10 @@ async function processMessage(
     const err = error as Error;
     console.error("Error processing message:", err);
     await getBridge(state, msg.platform).sendMessage(msg.channelId, `Error: ${err.message}`);
+  } finally {
+    // Always clean up the crash-recovery checkpoint, regardless of outcome.
+    // force: true makes this a no-op for scheduler messages (no file was written).
+    deletePendingCheckpoint(state.config, msg.userId);
   }
 }
 
@@ -398,6 +641,7 @@ async function startApp(): Promise<RunningApp> {
     enqueue: null,
     trustStore,
     lastUserMessages: new Map(),
+    recoveredSessions: new Set(),
   };
 
   const queue = new MessageQueue(
@@ -513,6 +757,10 @@ async function startApp(): Promise<RunningApp> {
   compactionJobs.push(nightlyCompact);
 
   console.log(`Proactive compaction: idle check every 10 min (threshold: 30 min), nightly at 03:00 ${tz}`);
+
+  // Recover any pending messages from a previous crash
+  await recoverPendingCheckpoints(state);
+
   console.log("Bryti ready!");
 
   let stopped = false;

@@ -325,6 +325,7 @@ export function ensureDataDirs(config: Config): void {
     path.join(config.data_dir, "usage"),
     path.join(config.data_dir, "logs"),
     path.join(config.data_dir, ".pi"),
+    path.join(config.data_dir, "pending"),
   ];
 
   // WhatsApp auth directory (always create in case user adds WhatsApp later)

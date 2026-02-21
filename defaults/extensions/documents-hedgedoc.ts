@@ -29,7 +29,8 @@ export default function (pi: ExtensionAPI) {
 
   if (!baseUrl) {
     // HedgeDoc not configured — tools are not registered.
-    // The agent will send document content in chat instead.
+    // Set HEDGEDOC_URL in .env to activate document_create/update/read.
+    console.log("[documents-hedgedoc] HEDGEDOC_URL not set — document tools not registered");
     return;
   }
 
