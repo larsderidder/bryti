@@ -70,7 +70,7 @@ describe("Worker scoped tools", () => {
     const tools = createWorkerScopedTools(tempDir);
     const writeTool = tools.find((t) => t.name === "write_file")!;
 
-    for (const reserved of ["status.json", "task.md"]) {
+    for (const reserved of ["status.json", "task.md", "steering.md"]) {
       const result = await writeTool.execute("c1", {
         filename: reserved,
         content: "overwrite attempt",

@@ -1,5 +1,5 @@
 /**
- * Worker tools: dispatch_worker, check_worker, and interrupt_worker.
+ * Worker tools: dispatch_worker, check_worker, interrupt_worker, steer_worker.
  *
  * Workers are stateless background LLM sessions that run independently of the
  * main agent. They have a scoped tool set, write results to a file, and signal
@@ -9,11 +9,13 @@
  * Lifecycle:
  *   1. dispatch_worker → creates worker dir, writes task.md, spawns session
  *   2. Worker runs (web search, fetch URL, write to result.md)
+ *      - Worker polls steering.md after every few tool calls and adjusts if found
  *   3. On completion (or failure/timeout/cancellation), pibot:
  *      - writes status.json
  *      - archives a fact into the user's memory store
  *   4. check_worker → query current status of a worker
  *   5. interrupt_worker → cancel a running worker immediately
+ *   6. steer_worker → write guidance into steering.md for the worker to pick up
  */
 
 import fs from "node:fs";
@@ -64,6 +66,13 @@ function buildWorkerSystemPrompt(task: string, workerDir: string): string {
     `- You may create additional files (notes.md, sources.md, etc.) as needed.`,
     `- Do not ask for feedback or confirmation. Work autonomously.`,
     `- When you are done, stop. Write your last thoughts to result.md and end.`,
+    ``,
+    `## Steering`,
+    ``,
+    `After every 3 tool calls, check for a file called steering.md using read_file.`,
+    `If the file exists, read it and immediately incorporate the guidance into your work.`,
+    `The steering note may narrow your focus, redirect your research, or add new requirements.`,
+    `Treat it as an authoritative update from the agent that dispatched you.`,
     ``,
     `## Task`,
     ``,
@@ -141,9 +150,20 @@ const interruptWorkerSchema = Type.Object({
   worker_id: Type.String({ description: "The worker_id returned by dispatch_worker." }),
 });
 
+const steerWorkerSchema = Type.Object({
+  worker_id: Type.String({ description: "The worker_id returned by dispatch_worker." }),
+  guidance: Type.String({
+    description:
+      "New instructions for the worker. Be specific: what to focus on, what to skip, " +
+      "what to add. The worker checks for this after every few tool calls and adjusts accordingly. " +
+      "Replaces any prior steering — include everything the worker needs.",
+  }),
+});
+
 type DispatchWorkerInput = Static<typeof dispatchWorkerSchema>;
 type CheckWorkerInput = Static<typeof checkWorkerSchema>;
 type InterruptWorkerInput = Static<typeof interruptWorkerSchema>;
+type SteerWorkerInput = Static<typeof steerWorkerSchema>;
 
 // ---------------------------------------------------------------------------
 // Models.json for worker sessions
@@ -704,5 +724,52 @@ export function createWorkerTools(
     },
   };
 
-  return [dispatchTool, checkTool, interruptTool];
+  const steerTool: AgentTool<typeof steerWorkerSchema> = {
+    name: "steer_worker",
+    label: "steer_worker",
+    description:
+      "Send updated guidance to a running background worker. " +
+      "The worker checks for a steering.md file after every few tool calls and incorporates the instructions. " +
+      "Use this to narrow focus, redirect research, add requirements, or correct course mid-task. " +
+      "Each call replaces the previous steering note — include everything the worker needs. " +
+      "Has no effect on workers that have already finished.",
+    parameters: steerWorkerSchema,
+    async execute(
+      _toolCallId: string,
+      { worker_id, guidance }: SteerWorkerInput,
+    ): Promise<AgentToolResult<unknown>> {
+      const entry = registry.get(worker_id);
+
+      if (!entry) {
+        return toolError(`Worker not found: ${worker_id}`);
+      }
+
+      if (entry.status !== "running") {
+        return toolSuccess({
+          worker_id,
+          status: entry.status,
+          note: `Worker is already in terminal state "${entry.status}". Steering has no effect.`,
+        });
+      }
+
+      const steeringPath = path.join(entry.workerDir, "steering.md");
+      try {
+        fs.writeFileSync(steeringPath, guidance, "utf-8");
+      } catch (error) {
+        return toolError(error, "Failed to write steering note");
+      }
+
+      console.log(`[worker] ${worker_id} steering note updated (${Buffer.byteLength(guidance, "utf-8")} bytes)`);
+
+      return toolSuccess({
+        worker_id,
+        status: "running",
+        note:
+          "Steering note written. The worker will pick it up after its next few tool calls " +
+          "and adjust its work accordingly.",
+      });
+    },
+  };
+
+  return [dispatchTool, checkTool, interruptTool, steerTool];
 }

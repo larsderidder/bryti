@@ -223,6 +223,8 @@ function buildSystemPrompt(
     `When the trigger fires: read the result.md file with read_file, summarize the key findings for the user, resolve the projection.\n\n` +
     `Use check_worker only when the user asks for a progress update.\n` +
     `Use interrupt_worker to cancel a running worker when the task is no longer needed or the user asks to stop it.\n` +
+    `Use steer_worker to redirect a running worker mid-task — narrow focus, add requirements, correct course. ` +
+    `The worker checks for steering after every few tool calls. Each call replaces the previous note.\n` +
     `Workers cannot spawn other workers.\n` +
     `Workers use a cheaper model by default. You can override with the model parameter if needed.`,
   );

@@ -563,3 +563,122 @@ describe("interrupt_worker", () => {
     expect(details.note).toMatch(/already finished/i);
   });
 });
+
+describe("steer_worker", () => {
+  let tempDir: string;
+  let config: Config;
+  let registry: WorkerRegistry;
+  let memoryStore: MemoryStore;
+
+  beforeEach(() => {
+    tempDir = makeTempDir();
+    config = makeMockConfig(tempDir);
+    registry = createWorkerRegistry();
+    memoryStore = makeMockMemoryStore();
+  });
+
+  afterEach(() => {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("returns error for unknown worker_id", async () => {
+    const tools = createWorkerTools(config, memoryStore, registry);
+    const steer = tools.find((t) => t.name === "steer_worker")!;
+
+    const result = await steer.execute("call1", {
+      worker_id: "w-notexist",
+      guidance: "Focus only on TypeScript.",
+    });
+    expect((result.details as any).error).toMatch(/worker not found/i);
+  });
+
+  it("returns no-op for a worker already in a terminal state", async () => {
+    const tools = createWorkerTools(config, memoryStore, registry);
+    const steer = tools.find((t) => t.name === "steer_worker")!;
+
+    for (const status of ["complete", "failed", "timeout", "cancelled"] as const) {
+      const workerId = `w-done-${status}`;
+      registry.register({
+        workerId,
+        status,
+        task: "Some task",
+        resultPath: "",
+        workerDir: "",
+        startedAt: new Date(),
+        error: null,
+        model: "m",
+        abort: null,
+        timeoutHandle: null,
+      });
+
+      const result = await steer.execute("call1", {
+        worker_id: workerId,
+        guidance: "This should be ignored.",
+      });
+      const details = result.details as any;
+      expect(details.status).toBe(status);
+      expect(details.note).toMatch(/terminal state/i);
+    }
+  });
+
+  it("writes steering.md into the worker directory", async () => {
+    const tools = createWorkerTools(config, memoryStore, registry);
+    const steer = tools.find((t) => t.name === "steer_worker")!;
+
+    const workerDir = path.join(tempDir, "files", "workers", "w-steerable");
+    fs.mkdirSync(workerDir, { recursive: true });
+
+    registry.register({
+      workerId: "w-steerable",
+      status: "running",
+      task: "Research LLMs",
+      resultPath: path.join(workerDir, "result.md"),
+      workerDir,
+      startedAt: new Date(),
+      error: null,
+      model: "test-provider/test-model",
+      abort: null,
+      timeoutHandle: null,
+    });
+
+    const result = await steer.execute("call1", {
+      worker_id: "w-steerable",
+      guidance: "Skip GPT-4. Focus only on open-weight models released in 2025.",
+    });
+
+    expect((result.details as any).status).toBe("running");
+
+    const steeringPath = path.join(workerDir, "steering.md");
+    expect(fs.existsSync(steeringPath)).toBe(true);
+    const content = fs.readFileSync(steeringPath, "utf-8");
+    expect(content).toBe("Skip GPT-4. Focus only on open-weight models released in 2025.");
+  });
+
+  it("replaces the previous steering note on subsequent calls", async () => {
+    const tools = createWorkerTools(config, memoryStore, registry);
+    const steer = tools.find((t) => t.name === "steer_worker")!;
+
+    const workerDir = path.join(tempDir, "files", "workers", "w-resterr");
+    fs.mkdirSync(workerDir, { recursive: true });
+
+    registry.register({
+      workerId: "w-resterr",
+      status: "running",
+      task: "Research something",
+      resultPath: path.join(workerDir, "result.md"),
+      workerDir,
+      startedAt: new Date(),
+      error: null,
+      model: "test-provider/test-model",
+      abort: null,
+      timeoutHandle: null,
+    });
+
+    await steer.execute("call1", { worker_id: "w-resterr", guidance: "First note." });
+    await steer.execute("call2", { worker_id: "w-resterr", guidance: "Second note — replaces first." });
+
+    const steeringPath = path.join(workerDir, "steering.md");
+    const content = fs.readFileSync(steeringPath, "utf-8");
+    expect(content).toBe("Second note — replaces first.");
+  });
+});

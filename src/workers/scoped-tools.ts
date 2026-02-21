@@ -43,7 +43,7 @@ function isValidFilename(filename: string): boolean {
   if (!filename || filename.length > 255) return false;
   if (filename.includes("/") || filename.includes("\\")) return false;
   if (filename.startsWith(".")) return false;
-  if (filename === "status.json" || filename === "task.md") return false; // reserved
+  if (filename === "status.json" || filename === "task.md" || filename === "steering.md") return false; // reserved
   return true;
 }
 
