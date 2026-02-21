@@ -18,6 +18,20 @@ import {
 } from "./trust.js";
 import { evaluateToolCall, type GuardrailResult } from "./guardrail.js";
 import type { Config } from "./config.js";
+import type { ApprovalResult } from "./channels/types.js";
+
+/**
+ * Callback for interactive approval requests.
+ *
+ * Called when a tool needs explicit user approval before executing.
+ * Sends a prompt to the user (via inline buttons or text) and resolves
+ * with the user's decision. Implementations handle the channel-specific
+ * UI (e.g. Telegram inline keyboard, WhatsApp text reply).
+ *
+ * @param prompt     Human-readable description shown to the user.
+ * @param approvalKey Unique key for this request.
+ */
+export type ApprovalCallback = (prompt: string, approvalKey: string) => Promise<ApprovalResult>;
 
 /**
  * Context needed for guardrail evaluation.
@@ -26,6 +40,24 @@ export interface TrustWrapperContext {
   config: Config;
   /** The last user message (for guardrail context). */
   getLastUserMessage: () => string | undefined;
+  /** If provided, approval requests use this instead of text-based blocking. */
+  onApprovalNeeded?: ApprovalCallback;
+}
+
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function denied(toolName: string): AgentToolResult<unknown> {
+  return {
+    content: [{
+      type: "text" as const,
+      text: `User denied permission for ${toolName}. Tell the user the action was not taken.`,
+    }],
+  } as AgentToolResult<unknown>;
 }
 
 /**
@@ -50,14 +82,35 @@ export function wrapToolWithTrustCheck<T extends AgentTool<any>>(
     // Elevated: first check if the tool itself is approved
     const permResult = checkPermission(tool.name, trustStore);
     if (!permResult.allowed) {
-      // Tool not approved at all; ask for tool-level permission first
-      setPendingApproval(userId, tool.name);
-      return {
-        content: [{
-          type: "text" as const,
-          text: permResult.blockReason ?? `Permission denied for ${tool.name}.`,
-        }],
-      } as AgentToolResult<unknown>;
+      const caps = getToolCapabilities(tool.name);
+      const capList = caps.capabilities?.join(", ") ?? "elevated access";
+      const reason = caps.reason ?? `Needs ${capList}.`;
+      const prompt =
+        `⚡ Permission request\n\n` +
+        `<b>${escapeHtml(tool.name)}</b> wants to use: <b>${escapeHtml(capList)}</b>\n` +
+        `${escapeHtml(reason)}`;
+
+      if (context?.onApprovalNeeded) {
+        const approvalKey = `tool:${userId}:${tool.name}`;
+        const result = await context.onApprovalNeeded(prompt, approvalKey);
+
+        if (result === "deny") {
+          return denied(tool.name);
+        }
+
+        const duration = result === "allow_always" ? "always" : "once";
+        trustStore.approve(tool.name, duration);
+        // Fall through to guardrail with the now-approved tool
+      } else {
+        // No inline approval available — fall back to text-based flow
+        setPendingApproval(userId, tool.name);
+        return {
+          content: [{
+            type: "text" as const,
+            text: permResult.blockReason ?? `Permission denied for ${tool.name}.`,
+          }],
+        } as AgentToolResult<unknown>;
+      }
     }
 
     // Tool is approved. Run the LLM guardrail on the specific arguments.
@@ -87,15 +140,33 @@ export function wrapToolWithTrustCheck<T extends AgentTool<any>>(
       }
 
       if (guardrailResult.verdict === "ASK") {
-        setPendingApproval(userId, `${tool.name}:${toolCallId}`);
-        return {
-          content: [{
-            type: "text" as const,
-            text: `Guardrail flagged this action: ${guardrailResult.reason}. ` +
-              `Ask the user to confirm: describe what you're about to do and why, ` +
-              `then ask "Should I go ahead?"`,
-          }],
-        } as AgentToolResult<unknown>;
+        const argsStr = typeof params === "string" ? params : JSON.stringify(params);
+        const prompt =
+          `⚠️ Confirmation needed\n\n` +
+          `<b>${escapeHtml(tool.name)}</b>\n` +
+          `${escapeHtml(guardrailResult.reason)}\n\n` +
+          `Args: <code>${escapeHtml(argsStr.slice(0, 200))}</code>`;
+
+        if (context?.onApprovalNeeded) {
+          const approvalKey = `guardrail:${userId}:${toolCallId}`;
+          const result = await context.onApprovalNeeded(prompt, approvalKey);
+
+          if (result === "deny") {
+            return denied(tool.name);
+          }
+          // allow or allow_always: fall through to execution
+          // (guardrail "always allow" for a specific invocation isn't meaningful, treat same as once)
+        } else {
+          setPendingApproval(userId, `${tool.name}:${toolCallId}`);
+          return {
+            content: [{
+              type: "text" as const,
+              text: `Guardrail flagged this action: ${guardrailResult.reason}. ` +
+                `Ask the user to confirm: describe what you're about to do and why, ` +
+                `then ask "Should I go ahead?"`,
+            }],
+          } as AgentToolResult<unknown>;
+        }
       }
 
       // ALLOW: fall through to execution

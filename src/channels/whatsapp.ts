@@ -17,7 +17,7 @@ import makeWASocket, {
 } from "@whiskeysockets/baileys";
 import { Boom } from "@hapi/boom";
 import qrcode from "qrcode-terminal";
-import type { ChannelBridge, IncomingMessage, SendOpts } from "./types.js";
+import type { ApprovalResult, ChannelBridge, IncomingMessage, SendOpts } from "./types.js";
 
 type MessageHandler = (msg: IncomingMessage) => Promise<void>;
 
@@ -37,6 +37,8 @@ export class WhatsAppBridge implements ChannelBridge {
   private shouldReconnect = true;
   private reconnectAttempts = 0;
   private readonly maxReconnectAttempts = 10;
+  /** Pending text-based approvals: approvalKey → resolve */
+  private pendingApprovals: Map<string, (result: ApprovalResult) => void> = new Map();
 
   /**
    * @param dataDir Base data directory (auth state stored in dataDir/whatsapp-auth/)
@@ -153,6 +155,11 @@ export class WhatsAppBridge implements ChannelBridge {
           }
         }
 
+        // Check if this message is a response to a pending approval request
+        if (this.checkApprovalResponse(text)) {
+          continue;
+        }
+
         if (this.handler) {
           const incomingMsg: IncomingMessage = {
             channelId: jid,
@@ -239,6 +246,53 @@ export class WhatsAppBridge implements ChannelBridge {
 
   onMessage(handler: (msg: IncomingMessage) => Promise<void>): void {
     this.handler = handler;
+  }
+
+  async sendApprovalRequest(
+    channelId: string,
+    prompt: string,
+    approvalKey: string,
+    timeoutMs = 5 * 60 * 1000,
+  ): Promise<ApprovalResult> {
+    // WhatsApp has no inline buttons for non-Business accounts.
+    // Fall back to text instructions; parse the next message from this user.
+    await this.sendMessage(
+      channelId,
+      `${prompt}\n\nReply *YES* to allow once, *ALWAYS* to always allow, or *NO* to deny.`,
+    );
+
+    return new Promise<ApprovalResult>((resolve) => {
+      this.pendingApprovals.set(approvalKey, resolve);
+
+      setTimeout(() => {
+        if (this.pendingApprovals.has(approvalKey)) {
+          this.pendingApprovals.delete(approvalKey);
+          resolve("deny");
+        }
+      }, timeoutMs);
+    });
+  }
+
+  /**
+   * Check if an incoming message is a response to a pending approval.
+   * Called from the message handler before passing to the main handler.
+   * Returns true if the message was consumed as an approval response.
+   */
+  checkApprovalResponse(text: string): boolean {
+    if (this.pendingApprovals.size === 0) return false;
+
+    const lower = text.trim().toLowerCase();
+    let result: ApprovalResult | null = null;
+    if (lower === "yes" || lower === "allow") result = "allow";
+    else if (lower === "always" || lower === "always allow") result = "allow_always";
+    else if (lower === "no" || lower === "deny") result = "deny";
+    else return false;
+
+    // Resolve the oldest pending approval
+    const [key, resolve] = this.pendingApprovals.entries().next().value as [string, (r: ApprovalResult) => void];
+    this.pendingApprovals.delete(key);
+    resolve(result);
+    return true;
   }
 }
 

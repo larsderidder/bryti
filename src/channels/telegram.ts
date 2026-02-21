@@ -10,8 +10,8 @@
  * is easily broken by LLM output.
  */
 
-import { Bot, type Context } from "grammy";
-import type { ChannelBridge, IncomingMessage, SendOpts } from "./types.js";
+import { Bot, InlineKeyboard, type Context } from "grammy";
+import type { ApprovalResult, ChannelBridge, IncomingMessage, SendOpts } from "./types.js";
 import { markdownToIR, chunkMarkdownIR, type MarkdownLinkSpan } from "../markdown/ir.js";
 import { renderMarkdownWithMarkers } from "../markdown/render.js";
 
@@ -219,6 +219,8 @@ export class TelegramBridge implements ChannelBridge {
   private handler: MessageHandler | null = null;
   private typingIntervals: Map<string, NodeJS.Timeout> = new Map();
   private readonly allowedUsers: number[];
+  /** Pending approval requests: approvalKey → resolve function */
+  private pendingApprovals: Map<string, (result: ApprovalResult) => void> = new Map();
 
   constructor(private readonly botToken: string, allowedUsers: number[] = []) {
     this.allowedUsers = allowedUsers;
@@ -391,6 +393,48 @@ export class TelegramBridge implements ChannelBridge {
       await ctx.reply("Sorry, I can only handle text messages and images for now.");
     });
 
+    // Handle inline keyboard callbacks for approval requests.
+    // Callback data format: "approval:<key>:<result>"
+    this.bot.on("callback_query:data", async (ctx) => {
+      const data = ctx.callbackQuery.data;
+      if (!data.startsWith("approval:")) {
+        await ctx.answerCallbackQuery();
+        return;
+      }
+
+      // Parse: "approval:<key>:<result>"
+      const rest = data.slice("approval:".length);
+      const lastColon = rest.lastIndexOf(":");
+      if (lastColon === -1) {
+        await ctx.answerCallbackQuery();
+        return;
+      }
+
+      const key = rest.slice(0, lastColon);
+      const resultStr = rest.slice(lastColon + 1) as ApprovalResult;
+
+      const resolve = this.pendingApprovals.get(key);
+      if (resolve) {
+        this.pendingApprovals.delete(key);
+        resolve(resultStr);
+        // Edit the message to remove the buttons and show the result
+        const label = resultStr === "allow" ? "✓ Allowed once"
+          : resultStr === "allow_always" ? "✓ Always allowed"
+          : "✗ Denied";
+        try {
+          await ctx.editMessageReplyMarkup({ reply_markup: undefined });
+          await ctx.editMessageText(
+            (ctx.callbackQuery.message?.text ?? "") + `\n\n<i>${label}</i>`,
+            { parse_mode: "HTML" },
+          );
+        } catch {
+          // Message may have been deleted or too old — ignore
+        }
+      }
+
+      await ctx.answerCallbackQuery();
+    });
+
     // Initialize bot (fetches bot info) then start polling in background
     await this.bot.init();
     // bot.start() blocks until stopped; run it in background
@@ -521,6 +565,40 @@ export class TelegramBridge implements ChannelBridge {
     this.handler = handler;
   }
 
+  async sendApprovalRequest(
+    channelId: string,
+    prompt: string,
+    approvalKey: string,
+    timeoutMs = 5 * 60 * 1000,
+  ): Promise<ApprovalResult> {
+    if (!this.bot) throw new Error("Bot not started");
+
+    const keyboard = new InlineKeyboard()
+      .text("✓ Allow once", `approval:${approvalKey}:allow`)
+      .text("✓ Always allow", `approval:${approvalKey}:allow_always`)
+      .row()
+      .text("✗ Deny", `approval:${approvalKey}:deny`);
+
+    await withRetry(() =>
+      this.bot!.api.sendMessage(parseInt(channelId, 10), escapeHtml(prompt), {
+        parse_mode: "HTML",
+        reply_markup: keyboard,
+      }),
+    );
+
+    return new Promise<ApprovalResult>((resolve) => {
+      this.pendingApprovals.set(approvalKey, resolve);
+
+      // Auto-deny on timeout
+      setTimeout(() => {
+        if (this.pendingApprovals.has(approvalKey)) {
+          this.pendingApprovals.delete(approvalKey);
+          resolve("deny");
+        }
+      }, timeoutMs);
+    });
+  }
+
   /**
    * Download the largest available photo from a photo message and return it
    * as a base64-encoded image attachment. Returns null on failure.
@@ -532,6 +610,7 @@ export class TelegramBridge implements ChannelBridge {
 
     // Telegram sends photos as an array of sizes; last entry is largest
     const sizes = ctx.message.photo;
+    console.log(`[telegram] Photo sizes: ${sizes.map((s) => `${s.width}x${s.height} (file_size: ${s.file_size ?? "?"})`).join(", ")}`);
     const largest = sizes[sizes.length - 1];
     if (!largest) return null;
 
@@ -545,9 +624,10 @@ export class TelegramBridge implements ChannelBridge {
 
       const buffer = await response.arrayBuffer();
       const data = Buffer.from(buffer).toString("base64");
-      console.log(`[telegram] Downloaded photo: ${buffer.byteLength} bytes, base64 length ${data.length}`);
-      // Telegram photos are always JPEG
-      return [{ data, mimeType: "image/jpeg" }];
+      // Use Content-Type from response; fall back to JPEG (Telegram default for compressed photos)
+      const mimeType = response.headers.get("content-type")?.split(";")[0].trim() || "image/jpeg";
+      console.log(`[telegram] Downloaded photo: ${buffer.byteLength} bytes (${largest.width}x${largest.height}), mime=${mimeType}, base64 length ${data.length}`);
+      return [{ data, mimeType }];
     } catch (err) {
       console.error("[telegram] Failed to download photo:", (err as Error).message);
       return null;

@@ -87,8 +87,8 @@ export function createTools(
   // Used after writing or modifying extensions so new tools load immediately.
   if (onRestart) {
     const restartTool: AgentTool<typeof restartSchema> = {
-      name: "bryti_restart",
-      label: "bryti_restart",
+      name: "system_restart",
+      label: "system_restart",
       description:
         "Restart the bryti process to reload extensions and config. " +
         "Use this after writing or modifying an extension file, or after changing config.yml. " +
@@ -106,7 +106,7 @@ export function createTools(
       },
     };
     tools.push(restartTool);
-    registerToolCapabilities("bryti_restart", {
+    registerToolCapabilities("system_restart", {
       level: "elevated",
       capabilities: ["shell"],
       reason: "Restarts the bryti process.",

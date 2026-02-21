@@ -8,9 +8,8 @@ import {
   createTrustStore,
   registerToolCapabilities,
   checkPendingApproval,
-  setPendingApproval,
 } from "./trust.js";
-import { wrapToolWithTrustCheck, wrapToolsWithTrustChecks } from "./trust-wrapper.js";
+import { wrapToolWithTrustCheck, wrapToolsWithTrustChecks, type ApprovalCallback } from "./trust-wrapper.js";
 
 let tmpDir: string;
 
@@ -107,6 +106,67 @@ describe("wrapToolWithTrustCheck", () => {
     // Retry: succeeds
     const result2 = await wrapped.execute("call2", {});
     expect(result2.content[0].text).toBe("success");
+  });
+});
+
+describe("inline approval callback", () => {
+  it("calls onApprovalNeeded and executes when allowed", async () => {
+    registerToolCapabilities("test_inline_allow", {
+      level: "elevated",
+      capabilities: ["network"],
+      reason: "Makes HTTP requests.",
+    });
+    const tool = makeTool("test_inline_allow", "executed");
+    const store = createTrustStore(tmpDir);
+
+    const approvalCallback: ApprovalCallback = async (_prompt, _key) => "allow";
+    const wrapped = wrapToolWithTrustCheck(tool, store, "userA", {
+      config: { tools: { web_search: { enabled: false, searxng_url: "" }, fetch_url: { enabled: false, timeout_ms: 0 }, files: { enabled: false, base_dir: "" }, workers: { max_concurrent: 0 } }, integrations: {}, agent: { name: "", system_prompt: "", model: "", fallback_models: [] }, telegram: { token: "", allowed_users: [] }, whatsapp: { enabled: false, allowed_users: [] }, models: { providers: [] }, cron: [], trust: { approved_tools: [] }, data_dir: tmpDir } as any,
+      getLastUserMessage: () => undefined,
+      onApprovalNeeded: approvalCallback,
+    });
+
+    const result = await wrapped.execute("call1", {});
+    expect(result.content[0].text).toBe("executed");
+  });
+
+  it("calls onApprovalNeeded and blocks when denied", async () => {
+    registerToolCapabilities("test_inline_deny", {
+      level: "elevated",
+      capabilities: ["shell"],
+      reason: "Runs shell commands.",
+    });
+    const tool = makeTool("test_inline_deny", "should not run");
+    const store = createTrustStore(tmpDir);
+
+    const approvalCallback: ApprovalCallback = async (_prompt, _key) => "deny";
+    const wrapped = wrapToolWithTrustCheck(tool, store, "userB", {
+      config: {} as any,
+      getLastUserMessage: () => undefined,
+      onApprovalNeeded: approvalCallback,
+    });
+
+    const result = await wrapped.execute("call1", {});
+    expect(result.content[0].text).toContain("denied");
+  });
+
+  it("persists always-approval to trust store", async () => {
+    registerToolCapabilities("test_inline_always", {
+      level: "elevated",
+      capabilities: ["network"],
+    });
+    const tool = makeTool("test_inline_always", "executed");
+    const store = createTrustStore(tmpDir);
+
+    const approvalCallback: ApprovalCallback = async (_prompt, _key) => "allow_always";
+    const wrapped = wrapToolWithTrustCheck(tool, store, "userC", {
+      config: {} as any,
+      getLastUserMessage: () => undefined,
+      onApprovalNeeded: approvalCallback,
+    });
+
+    await wrapped.execute("call1", {});
+    expect(store.isApproved("test_inline_always")).toBe(true);
   });
 });
 

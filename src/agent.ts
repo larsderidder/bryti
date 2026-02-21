@@ -214,7 +214,7 @@ function buildSystemPrompt(
     `file_read("extensions/EXTENSIONS.md")\n\n` +
     `It covers the template, available APIs, parameter types, how to use env vars, ` +
     `and how to disable an extension permanently (write an empty file — never delete).\n\n` +
-    `After writing or modifying an extension or config.yml, call bryti_restart to reload. ` +
+    `After writing or modifying an extension or config.yml, call system_restart to reload. ` +
     `Always tell the user what you changed before restarting.`,
   );
 

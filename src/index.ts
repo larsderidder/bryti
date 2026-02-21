@@ -205,6 +205,10 @@ async function getOrLoadSession(state: AppState, msg: IncomingMessage): Promise<
   const trustContext: TrustWrapperContext = {
     config: state.config,
     getLastUserMessage: () => state.lastUserMessages.get(userId),
+    onApprovalNeeded: async (prompt, approvalKey) => {
+      const bridge = getBridge(state, platform);
+      return bridge.sendApprovalRequest(channelId, prompt, approvalKey);
+    },
   };
   const wrappedTools = wrapToolsWithTrustChecks(tools, state.trustStore, userId, trustContext);
 

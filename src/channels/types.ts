@@ -31,6 +31,14 @@ export interface SendOpts {
   parseMode?: "markdown" | "html" | "plain";
 }
 
+/**
+ * Result of an inline approval request.
+ * - allow: approved for this invocation only
+ * - allow_always: approved permanently (persisted to disk)
+ * - deny: rejected
+ */
+export type ApprovalResult = "allow" | "allow_always" | "deny";
+
 export interface ChannelBridge {
   readonly name: string;
   readonly platform: Platform;
@@ -49,4 +57,19 @@ export interface ChannelBridge {
 
   /** Register a handler for incoming messages. */
   onMessage(handler: (msg: IncomingMessage) => Promise<void>): void;
+
+  /**
+   * Send an approval request with inline buttons and wait for the user's response.
+   *
+   * @param channelId  Chat to send the approval prompt to.
+   * @param prompt     Human-readable description of what needs approval.
+   * @param approvalKey Unique key for this request (used to match callback).
+   * @param timeoutMs  How long to wait before auto-denying (default: 5 minutes).
+   */
+  sendApprovalRequest(
+    channelId: string,
+    prompt: string,
+    approvalKey: string,
+    timeoutMs?: number,
+  ): Promise<ApprovalResult>;
 }
