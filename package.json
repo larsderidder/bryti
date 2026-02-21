@@ -1,7 +1,8 @@
 {
   "name": "bryti",
   "version": "0.0.1",
-  "description": "Managed AI agent service built on pi SDK. Open models, flat pricing, EU-hosted.",
+  "description": "Your AI colleague, in the apps you already use.",
+  "license": "AGPL-3.0-only",
   "type": "module",
   "private": true,
   "scripts": {
