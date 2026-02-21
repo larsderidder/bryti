@@ -2,34 +2,29 @@
  * WhatsApp bridge using baileys.
  *
  * Implements ChannelBridge for WhatsApp DMs.
- * QR code auth for first run, then persistent auth state.
+ * QR code auth on first run, then persistent multi-file auth state.
+ * Auto-reconnects on disconnect with exponential backoff.
+ *
+ * Formatting: WhatsApp supports *bold*, _italic_, ~strikethrough~, ```code```.
+ * We convert basic markdown patterns. No HTML support.
  */
 
 import makeWASocket, {
   type ConnectionState,
   useMultiFileAuthState,
   type WASocket,
-  proto,
+  DisconnectReason,
+  type proto,
 } from "@whiskeysockets/baileys";
-import type { WASocket as WASocketType } from "@whiskeysockets/baileys";
-import * as qrcodeTerminal from "qrcode-terminal";
+import { Boom } from "@hapi/boom";
 import type { ChannelBridge, IncomingMessage, SendOpts } from "./types.js";
 
-/**
- * WhatsApp message handler function.
- */
 type MessageHandler = (msg: IncomingMessage) => Promise<void>;
 
-/**
- * WhatsApp bridge configuration.
- */
-export interface WhatsAppBridgeConfig {
-  dataDir: string;
-}
+// WhatsApp message limit (chars). Actual limit is ~65536 but long messages
+// are unreadable. Split at a practical limit.
+const MAX_MESSAGE_LENGTH = 4000;
 
-/**
- * WhatsApp bridge implementation.
- */
 export class WhatsAppBridge implements ChannelBridge {
   readonly name = "whatsapp";
   readonly platform = "whatsapp" as const;
@@ -37,154 +32,258 @@ export class WhatsAppBridge implements ChannelBridge {
   private socket: WASocket | null = null;
   private handler: MessageHandler | null = null;
   private readonly dataDir: string;
+  private readonly allowedUsers: string[];
   private connectionState: "open" | "connecting" | "close" = "close";
+  private shouldReconnect = true;
+  private reconnectAttempts = 0;
+  private readonly maxReconnectAttempts = 10;
 
-  constructor(dataDir: string) {
+  /**
+   * @param dataDir Base data directory (auth state stored in dataDir/whatsapp-auth/)
+   * @param allowedUsers Phone numbers in international format without +, e.g. ["31612345678"]
+   */
+  constructor(dataDir: string, allowedUsers: string[] = []) {
     this.dataDir = dataDir;
+    // Normalize: strip + prefix, ensure @s.whatsapp.net suffix for comparison
+    this.allowedUsers = allowedUsers.map((u) => u.replace(/^\+/, ""));
   }
 
   async start(): Promise<void> {
-    const authDir = `${this.dataDir}/whatsapp-auth`;
+    this.shouldReconnect = true;
+    await this.connect();
+  }
 
-    // Load auth state from files
+  private async connect(): Promise<void> {
+    const authDir = `${this.dataDir}/whatsapp-auth`;
     const { state, saveCreds } = await useMultiFileAuthState(authDir);
 
-    // Create the socket
     this.socket = makeWASocket({
       auth: state,
-      printQRInTerminal: false, // We handle QR manually
-      browser: ["Pibot", "Chrome", "120"],
+      printQRInTerminal: true,
+      browser: ["Pibot", "Chrome", "22.0"],
+      // Suppress baileys' noisy default logging
+      logger: {
+        level: "silent",
+        info: () => {},
+        warn: () => {},
+        error: (...args: unknown[]) => console.error("[whatsapp:baileys]", ...args),
+        debug: () => {},
+        trace: () => {},
+        fatal: (...args: unknown[]) => console.error("[whatsapp:baileys:fatal]", ...args),
+        child: () => this.socket!.logger,
+      } as any,
     });
 
-    // Handle credentials save
     this.socket.ev.on("creds.update", saveCreds);
 
-    // Handle connection updates
     this.socket.ev.on("connection.update", (update) => {
       const { connection, lastDisconnect, qr } = update;
 
       if (qr) {
-        // Display QR code in terminal
-        console.log("\n📱 WhatsApp Authentication QR Code:");
-        qrcodeTerminal.generate(qr, { small: true });
-        console.log("Scan this QR code with your WhatsApp app\n");
+        console.log("[whatsapp] Scan the QR code above with your WhatsApp app");
       }
 
-      if (connection) {
-        this.connectionState = connection;
-        if (connection === "open") {
-          console.log("WhatsApp bridge connected!");
-        } else if (connection === "close") {
-          const reason = (lastDisconnect?.error as Error)?.message;
-          console.log(`WhatsApp disconnected: ${reason}`);
+      if (connection === "open") {
+        this.connectionState = "open";
+        this.reconnectAttempts = 0;
+        console.log("[whatsapp] Connected");
+      } else if (connection === "close") {
+        this.connectionState = "close";
+        const boom = lastDisconnect?.error as Boom | undefined;
+        const statusCode = boom?.output?.statusCode;
+        const shouldReconnect =
+          statusCode !== DisconnectReason.loggedOut && this.shouldReconnect;
+
+        if (statusCode === DisconnectReason.loggedOut) {
+          console.log("[whatsapp] Logged out. Delete whatsapp-auth/ and restart to re-authenticate.");
+        } else if (shouldReconnect && this.reconnectAttempts < this.maxReconnectAttempts) {
+          this.reconnectAttempts++;
+          const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts), 60000);
+          console.log(
+            `[whatsapp] Disconnected (${boom?.message ?? "unknown"}). ` +
+            `Reconnecting in ${delay / 1000}s (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`,
+          );
+          setTimeout(() => this.connect().catch(console.error), delay);
+        } else if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+          console.error("[whatsapp] Max reconnect attempts reached. Giving up.");
         }
       }
     });
 
-    // Handle incoming messages
     this.socket.ev.on("messages.upsert", async ({ messages, type }) => {
       if (type !== "notify") return;
 
       for (const msg of messages) {
-        // Skip group messages
-        if (!msg.key.remoteJid?.endsWith("@s.whatsapp.net")) continue;
+        // Only handle personal DMs (not groups, broadcasts, status)
+        const jid = msg.key.remoteJid;
+        if (!jid?.endsWith("@s.whatsapp.net")) continue;
 
         // Skip our own messages
         if (msg.key.fromMe) continue;
 
-        // Skip messages without text
-        const text = msg.message?.conversation || msg.message?.extendedTextMessage?.text;
+        // Extract text from various message types
+        const text =
+          msg.message?.conversation ??
+          msg.message?.extendedTextMessage?.text ??
+          msg.message?.imageMessage?.caption ??
+          msg.message?.videoMessage?.caption;
         if (!text) continue;
+
+        // Extract phone number from JID (strip @s.whatsapp.net)
+        const phoneNumber = jid.replace("@s.whatsapp.net", "");
+
+        // Check allowed users (if configured)
+        if (this.allowedUsers.length > 0 && !this.allowedUsers.includes(phoneNumber)) {
+          console.log(`[whatsapp] Ignoring message from non-allowed user: ${phoneNumber}`);
+          continue;
+        }
 
         if (this.handler) {
           const incomingMsg: IncomingMessage = {
-            channelId: msg.key.remoteJid!,
-            userId: msg.key.participant!,
+            channelId: jid,
+            userId: phoneNumber,
             text,
             platform: "whatsapp",
             raw: msg,
           };
-          await this.handler(incomingMsg);
+          try {
+            await this.handler(incomingMsg);
+          } catch (err) {
+            console.error("[whatsapp] Handler error:", (err as Error).message);
+          }
         }
       }
     });
 
-    // Wait for connection to open
+    // Wait for initial connection (or timeout after 30s for QR scanning)
     await new Promise<void>((resolve) => {
-      const checkConnection = () => {
+      const timeout = setTimeout(() => {
+        console.log("[whatsapp] Connection timeout (QR not scanned?). Continuing startup.");
+        resolve();
+      }, 30000);
+
+      const check = () => {
         if (this.connectionState === "open") {
+          clearTimeout(timeout);
           resolve();
-        } else if (this.connectionState === "close") {
-          resolve(); // Resolve anyway to not block startup
         } else {
-          setTimeout(checkConnection, 100);
+          setTimeout(check, 200);
         }
       };
-      checkConnection();
+      check();
     });
   }
 
   async stop(): Promise<void> {
+    this.shouldReconnect = false;
     if (this.socket) {
       this.socket.end(undefined);
       this.socket = null;
     }
-    console.log("WhatsApp bridge stopped");
+    console.log("[whatsapp] Stopped");
   }
 
   async sendMessage(channelId: string, text: string, _opts?: SendOpts): Promise<string> {
-    if (!this.socket) {
+    if (!this.socket || this.connectionState !== "open") {
       throw new Error("WhatsApp not connected");
     }
 
-    // Convert markdown-like formatting to WhatsApp format
-    const formattedText = this.formatText(text);
+    const formatted = formatForWhatsApp(text);
+    const chunks = chunkText(formatted, MAX_MESSAGE_LENGTH);
 
-    const message = await this.socket.sendMessage(channelId, {
-      text: formattedText,
-    });
+    let lastMessageId = "";
+    for (const chunk of chunks) {
+      const sent = await this.socket.sendMessage(channelId, { text: chunk });
+      lastMessageId = sent?.key?.id ?? "";
 
-    if (!message?.key?.id) {
-      throw new Error("Failed to send message");
+      // Small delay between chunks to avoid rate limiting
+      if (chunks.length > 1) {
+        await new Promise((r) => setTimeout(r, 500));
+      }
     }
 
-    // Return message ID
-    return message.key.id;
+    return lastMessageId;
   }
 
   async editMessage(_channelId: string, _messageId: string, _text: string): Promise<void> {
-    // WhatsApp doesn't support message editing
-    throw new Error("WhatsApp does not support message editing");
+    // WhatsApp doesn't support message editing via baileys
+    // Could send a new message with "correction:" prefix, but that's noisy
   }
 
   async sendTyping(channelId: string): Promise<void> {
-    if (!this.socket) {
-      throw new Error("WhatsApp not connected");
+    if (!this.socket || this.connectionState !== "open") return;
+    try {
+      await this.socket.sendPresenceUpdate("composing", channelId);
+    } catch {
+      // Best-effort typing indicator
     }
-
-    // Use presenceSubscribe and sendPresenceUpdate instead
-    await this.socket.sendPresenceUpdate("composing", channelId);
   }
 
   onMessage(handler: (msg: IncomingMessage) => Promise<void>): void {
     this.handler = handler;
   }
+}
 
-  /**
-   * Convert markdown-like formatting to WhatsApp format.
-   */
-  private formatText(text: string): string {
-    // WhatsApp supports: *bold*, _italic_, ~strikethrough~, ```code```
-    // Our Telegram bridge sends MarkdownV2, so convert back
-    let formatted = text;
+// ---------------------------------------------------------------------------
+// Formatting
+// ---------------------------------------------------------------------------
 
-    // Unescape markdown (Telegram bridge escapes these)
-    formatted = formatted.replace(/\\\*/g, "*");
-    formatted = formatted.replace(/\\_/g, "_");
-    formatted = formatted.replace(/\\~/g, "~");
-    formatted = formatted.replace(/\\`/g, "`");
-    formatted = formatted.replace(/\\#/g, "#");
+/**
+ * Convert markdown-ish text to WhatsApp formatting.
+ *
+ * WhatsApp supports: *bold*, _italic_, ~strikethrough~, ```code```, `inline code`
+ * We do minimal conversion since the LLM output is already close to what
+ * WhatsApp expects.
+ */
+function formatForWhatsApp(text: string): string {
+  let result = text;
 
-    return formatted;
+  // Convert **bold** to *bold* (WhatsApp uses single asterisks)
+  result = result.replace(/\*\*(.+?)\*\*/g, "*$1*");
+
+  // Convert ### headers to *bold* lines (WhatsApp has no header support)
+  result = result.replace(/^#{1,6}\s+(.+)$/gm, "*$1*");
+
+  // HTML entities that might leak through
+  result = result.replace(/&amp;/g, "&");
+  result = result.replace(/&lt;/g, "<");
+  result = result.replace(/&gt;/g, ">");
+
+  return result;
+}
+
+/**
+ * Split text into chunks at paragraph boundaries.
+ */
+function chunkText(text: string, maxLength: number): string[] {
+  if (text.length <= maxLength) return [text];
+
+  const chunks: string[] = [];
+  let remaining = text;
+
+  while (remaining.length > maxLength) {
+    // Try to split at a double newline (paragraph boundary)
+    let splitAt = remaining.lastIndexOf("\n\n", maxLength);
+    if (splitAt < maxLength * 0.3) {
+      // No good paragraph break, try single newline
+      splitAt = remaining.lastIndexOf("\n", maxLength);
+    }
+    if (splitAt < maxLength * 0.3) {
+      // No good newline, hard split at space
+      splitAt = remaining.lastIndexOf(" ", maxLength);
+    }
+    if (splitAt < maxLength * 0.3) {
+      // Nothing works, hard split
+      splitAt = maxLength;
+    }
+
+    chunks.push(remaining.slice(0, splitAt).trimEnd());
+    remaining = remaining.slice(splitAt).trimStart();
   }
+
+  if (remaining.length > 0) {
+    chunks.push(remaining);
+  }
+
+  return chunks;
 }

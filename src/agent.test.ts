@@ -19,7 +19,7 @@ function makeConfig(model: string, fallbacks: string[] = []): Config {
       fallback_models: fallbacks,
     },
     telegram: { token: "", allowed_users: [] },
-    whatsapp: { enabled: false },
+    whatsapp: { enabled: false, allowed_users: [] },
     models: { providers: [] },
     tools: {
       web_search: { enabled: false, searxng_url: "" },

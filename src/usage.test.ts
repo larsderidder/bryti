@@ -103,6 +103,7 @@ describe("usage cost helpers", () => {
     },
     whatsapp: {
       enabled: false,
+      allowed_users: [],
     },
     models: {
       providers: [

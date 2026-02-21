@@ -53,6 +53,8 @@ export interface Config {
   };
   whatsapp: {
     enabled: boolean;
+    /** Phone numbers in international format without +, e.g. ["31612345678"] */
+    allowed_users: string[];
   };
   models: {
     providers: ProviderConfig[];
@@ -187,6 +189,7 @@ export function loadConfig(configPath?: string): Config {
     },
     whatsapp: {
       enabled: (substituted.whatsapp as { enabled?: boolean })?.enabled ?? false,
+      allowed_users: ((substituted.whatsapp as { allowed_users?: string[] })?.allowed_users ?? []).map(String),
     },
     models: {
       providers: [],

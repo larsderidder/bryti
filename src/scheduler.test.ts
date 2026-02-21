@@ -20,7 +20,7 @@ function makeConfig(cron: Config["cron"] = []): Config {
       fallback_models: [],
     },
     telegram: { token: "tok", allowed_users: [12345] },
-    whatsapp: { enabled: false },
+    whatsapp: { enabled: false, allowed_users: [] },
     models: { providers: [] },
     tools: {
       web_search: { enabled: false, searxng_url: "" },

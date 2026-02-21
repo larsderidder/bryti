@@ -33,7 +33,7 @@ function makeMockConfig(dataDir: string): Config {
       fallback_models: [],
     },
     telegram: { token: "tok", allowed_users: [1] },
-    whatsapp: { enabled: false },
+    whatsapp: { enabled: false, allowed_users: [] },
     models: {
       providers: [
         {

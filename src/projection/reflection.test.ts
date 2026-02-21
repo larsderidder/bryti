@@ -26,7 +26,7 @@ function makeConfig(dataDir: string): Config {
       timezone: "UTC",
     },
     telegram: { token: "", allowed_users: [12345] },
-    whatsapp: { enabled: false },
+    whatsapp: { enabled: false, allowed_users: [] },
     models: {
       providers: [
         {

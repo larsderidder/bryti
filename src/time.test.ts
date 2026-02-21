@@ -23,7 +23,7 @@ function makeConfig(timezone?: string): Config {
       timezone,
     },
     telegram: { token: "", allowed_users: [] },
-    whatsapp: { enabled: false },
+    whatsapp: { enabled: false, allowed_users: [] },
     models: { providers: [] },
     tools: {
       web_search: { enabled: false, searxng_url: "" },

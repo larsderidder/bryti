@@ -28,6 +28,7 @@ import { warmupEmbeddings } from "./memory/embeddings.js";
 import { createTools } from "./tools/index.js";
 import { loadUserSession, repairSessionTranscript, refreshSystemPrompt, promptWithFallback, SILENT_REPLY_TOKEN, type UserSession } from "./agent.js";
 import { TelegramBridge } from "./channels/telegram.js";
+import { WhatsAppBridge } from "./channels/whatsapp.js";
 import { createScheduler, type Scheduler } from "./scheduler.js";
 import { MessageQueue } from "./message-queue.js";
 import type { IncomingMessage, ChannelBridge } from "./channels/types.js";
@@ -50,7 +51,8 @@ interface AppState {
   usageTracker: UsageTracker;
   /** Persistent session cache: one session per userId. */
   sessions: Map<string, UserSession>;
-  bridge: ChannelBridge;
+  /** Active channel bridges (Telegram, WhatsApp, etc.) */
+  bridges: ChannelBridge[];
   scheduler: Scheduler;
 }
 
@@ -97,6 +99,18 @@ function modelNameForLog(
 }
 
 /**
+ * Find the bridge that handles a given platform (or the first available bridge
+ * as fallback for scheduler-injected messages).
+ */
+function getBridge(state: AppState, platform?: string): ChannelBridge {
+  if (platform) {
+    const match = state.bridges.find((b) => b.platform === platform);
+    if (match) return match;
+  }
+  return state.bridges[0];
+}
+
+/**
  * Get or load the persistent session for a user.
  */
 async function getOrLoadSession(state: AppState, userId: string): Promise<UserSession> {
@@ -138,16 +152,16 @@ async function processMessage(
         fs.rmSync(existing.sessionDir, { recursive: true, force: true });
       }
     }
-    await state.bridge.sendMessage(msg.channelId, "Conversation history cleared.");
+    await getBridge(state, msg.platform).sendMessage(msg.channelId, "Conversation history cleared.");
     return;
   }
 
   if (msg.text === "/memory") {
     const memory = state.coreMemory.read();
     if (memory) {
-      await state.bridge.sendMessage(msg.channelId, `Your core memory:\n\n${memory}`);
+      await getBridge(state, msg.platform).sendMessage(msg.channelId, `Your core memory:\n\n${memory}`);
     } else {
-      await state.bridge.sendMessage(
+      await getBridge(state, msg.platform).sendMessage(
         msg.channelId,
         "Your core memory is empty. I haven't saved anything yet.",
       );
@@ -156,7 +170,7 @@ async function processMessage(
   }
 
   // Show typing indicator
-  await state.bridge.sendTyping(msg.channelId);
+  await getBridge(state, msg.platform).sendTyping(msg.channelId);
 
   try {
     // Load (or reuse) the persistent session for this user
@@ -227,7 +241,7 @@ async function processMessage(
     if (lastAssistant?.stopReason === "error") {
       const errorMsg = String(lastAssistant.errorMessage ?? "Unknown model error");
       console.error("Model error:", errorMsg);
-      await state.bridge.sendMessage(msg.channelId, `Model error: ${errorMsg}`);
+      await getBridge(state, msg.platform).sendMessage(msg.channelId, `Model error: ${errorMsg}`);
       return;
     }
 
@@ -253,14 +267,14 @@ async function processMessage(
         role: "assistant",
         content: responseText,
       });
-      await state.bridge.sendMessage(msg.channelId, responseText);
+      await getBridge(state, msg.platform).sendMessage(msg.channelId, responseText);
     } else {
-      await state.bridge.sendMessage(msg.channelId, "Done (no text response).");
+      await getBridge(state, msg.platform).sendMessage(msg.channelId, "Done (no text response).");
     }
   } catch (error) {
     const err = error as Error;
     console.error("Error processing message:", err);
-    await state.bridge.sendMessage(msg.channelId, `Error: ${err.message}`);
+    await getBridge(state, msg.platform).sendMessage(msg.channelId, `Error: ${err.message}`);
   }
 }
 
@@ -287,7 +301,22 @@ async function startApp(): Promise<RunningApp> {
   const historyManager = createHistoryManager(config.data_dir);
   const usageTracker = createUsageTracker(config.data_dir);
 
-  const bridge = new TelegramBridge(config.telegram.token, config.telegram.allowed_users);
+  // Start channel bridges
+  const bridges: ChannelBridge[] = [];
+
+  if (config.telegram.token) {
+    const telegram = new TelegramBridge(config.telegram.token, config.telegram.allowed_users);
+    bridges.push(telegram);
+  }
+
+  if (config.whatsapp.enabled) {
+    const whatsapp = new WhatsAppBridge(config.data_dir, config.whatsapp.allowed_users);
+    bridges.push(whatsapp);
+  }
+
+  if (bridges.length === 0) {
+    throw new Error("No channel bridges configured. Enable Telegram and/or WhatsApp.");
+  }
 
   const state: AppState = {
     config,
@@ -295,7 +324,7 @@ async function startApp(): Promise<RunningApp> {
     historyManager,
     usageTracker,
     sessions: new Map(),
-    bridge,
+    bridges,
     scheduler: null!,
   };
 
@@ -303,6 +332,7 @@ async function startApp(): Promise<RunningApp> {
     (msg) => processMessage(state, msg),
     async (msg) => {
       console.log("Queue full, rejecting message:", msg.text);
+      const bridge = getBridge(state, msg.platform);
       await bridge.sendMessage(
         msg.channelId,
         "I'm a bit overwhelmed right now. Please wait a moment and try again.",
@@ -310,11 +340,15 @@ async function startApp(): Promise<RunningApp> {
     },
   );
 
-  bridge.onMessage(async (msg: IncomingMessage) => {
-    queue.enqueue(msg);
-  });
+  for (const bridge of bridges) {
+    bridge.onMessage(async (msg: IncomingMessage) => {
+      queue.enqueue(msg);
+    });
+  }
 
-  await bridge.start();
+  // Start all bridges concurrently
+  await Promise.all(bridges.map((b) => b.start()));
+  console.log(`Channels: ${bridges.map((b) => b.name).join(", ")}`);
 
   const scheduler = createScheduler(config, async (msg: IncomingMessage) => {
     queue.enqueue(msg);
@@ -416,7 +450,7 @@ async function startApp(): Promise<RunningApp> {
       console.log("Shutting down...");
       state.scheduler.stop();
       for (const job of compactionJobs) job.stop();
-      await bridge.stop();
+      await Promise.all(state.bridges.map((b) => b.stop()));
       for (const [userId, userSession] of state.sessions) {
         console.log(`Disposing session for user ${userId}`);
         userSession.dispose();
