@@ -113,21 +113,6 @@ async function getOrLoadSession(state: AppState, userId: string): Promise<UserSe
     tools,
   );
 
-  // Notify user when auto-compaction happens mid-conversation so they
-  // understand why the agent might not recall earlier details verbatim.
-  const channelId = String(userId);
-  userSession.session.subscribe((event) => {
-    if (event.type === "auto_compaction_end" && event.result) {
-      state.bridge.sendMessage(
-        channelId,
-        "💭 Our conversation was getting long, so I've summarized the earlier parts " +
-        "to stay within my memory limits. I still have the key points, but some " +
-        "details from earlier might be less precise. If you need me to recall " +
-        "something specific, just ask.",
-      ).catch(() => {});
-    }
-  });
-
   state.sessions.set(userId, userSession);
   return userSession;
 }
