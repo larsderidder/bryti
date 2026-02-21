@@ -161,6 +161,14 @@ function buildSystemPrompt(
 
   parts.push(config.agent.system_prompt);
 
+  // Image capability notice — prevents the model from incorrectly claiming it can't see images.
+  parts.push(
+    `## Image Handling\n` +
+    `You can see and interpret images that users send. When a user sends a photo, ` +
+    `describe what you see and respond naturally. You do not need to caveat that you ` +
+    `"can't render" or "can't interpret" images — you can.`,
+  );
+
   // Current date and time — lets the agent resolve relative time expressions correctly.
   // If a user timezone is configured, inject local time alongside UTC.
   const now = new Date();
@@ -205,7 +213,9 @@ function buildSystemPrompt(
     `Before writing or modifying an extension, read the guide:\n` +
     `file_read("extensions/EXTENSIONS.md")\n\n` +
     `It covers the template, available APIs, parameter types, how to use env vars, ` +
-    `and how to disable an extension permanently (write an empty file — never delete).`,
+    `and how to disable an extension permanently (write an empty file — never delete).\n\n` +
+    `After writing or modifying an extension or config.yml, call bryti_restart to reload. ` +
+    `Always tell the user what you changed before restarting.`,
   );
 
   if (coreMemory) {
@@ -551,6 +561,7 @@ function didPromptFail(
  * @param config    App config (for the fallback list)
  * @param modelRegistry  Registry used to resolve model strings to Model objects
  * @param userId    For logging
+ * @param images    Optional image attachments (base64-encoded)
  */
 export async function promptWithFallback(
   session: AgentSession,
@@ -558,10 +569,25 @@ export async function promptWithFallback(
   config: Config,
   modelRegistry: ModelRegistry,
   userId: string,
+  images?: Array<{ data: string; mimeType: string }>,
 ): Promise<FallbackResult> {
   const candidates = [config.agent.model, ...(config.agent.fallback_models ?? [])];
   let lastError: unknown;
   let lastReason = "";
+
+  // Convert to SDK ImageContent format
+  const imageContent = images?.map((img) => ({
+    type: "image" as const,
+    data: img.data,
+    mimeType: img.mimeType,
+  }));
+
+  if (imageContent && imageContent.length > 0) {
+    console.log(
+      `[images] Sending ${imageContent.length} image(s) to model for user ${userId}: ` +
+      imageContent.map((img) => `${img.mimeType} (${Math.round(img.data.length * 0.75 / 1024)}KB base64)`).join(", "),
+    );
+  }
 
   for (let i = 0; i < candidates.length; i++) {
     const modelString = candidates[i];
@@ -582,7 +608,7 @@ export async function promptWithFallback(
 
     let thrownError: unknown = null;
     try {
-      await session.prompt(text);
+      await session.prompt(text, imageContent ? { images: imageContent } : undefined);
     } catch (err) {
       thrownError = err;
     }

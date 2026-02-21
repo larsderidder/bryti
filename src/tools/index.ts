@@ -5,14 +5,15 @@
  * These supplement pi's built-in tools (read/write/edit/bash).
  */
 
-import type { AgentTool } from "@mariozechner/pi-agent-core";
+import type { AgentTool, AgentToolResult } from "@mariozechner/pi-agent-core";
+import { Type } from "@sinclair/typebox";
 import { createFileTools } from "./files.js";
 import { createCoreMemoryTools } from "./core-memory-tool.js";
 import { createArchivalMemoryTools } from "./archival-memory-tool.js";
 import { createConversationSearchTool } from "./conversation-search-tool.js";
 import { createProjectionTools, createProjectionStore } from "../projection/index.js";
 import { createWorkerTools, createWorkerRegistry } from "../workers/index.js";
-
+import { toolSuccess } from "./result.js";
 import { embed } from "../memory/embeddings.js";
 import { createMemoryStore } from "../memory/store.js";
 import path from "node:path";
@@ -21,19 +22,27 @@ import type { CoreMemory } from "../memory/core-memory.js";
 import type { WorkerTriggerCallback } from "../workers/tools.js";
 import { registerToolCapabilities } from "../trust.js";
 
+/** Callback invoked when the agent requests a restart. */
+export type RestartCallback = (reason: string) => Promise<void>;
+
 type BrytiTool = AgentTool<any>;
+
+const restartSchema = Type.Object({
+  reason: Type.String({ description: "Brief description of why a restart is needed (shown in logs)" }),
+});
 
 /**
  * Create all bryti tools based on configuration.
  *
  * @param onWorkerTrigger  Called when a worker's completion fact triggers projections.
- *                         Use this to inject an immediate message into the agent queue.
+ * @param onRestart        Called when the agent requests a process restart.
  */
 export function createTools(
   config: Config,
   coreMemory: CoreMemory,
   userId: string,
   onWorkerTrigger?: WorkerTriggerCallback,
+  onRestart?: RestartCallback,
 ): BrytiTool[] {
   const tools: BrytiTool[] = [];
 
@@ -73,6 +82,36 @@ export function createTools(
   tools.push(...createWorkerTools(
     config, archivalStore, workerRegistry, false, projectionStore, onWorkerTrigger,
   ));
+
+  // Restart tool: agent can trigger a clean process restart.
+  // Used after writing or modifying extensions so new tools load immediately.
+  if (onRestart) {
+    const restartTool: AgentTool<typeof restartSchema> = {
+      name: "bryti_restart",
+      label: "bryti_restart",
+      description:
+        "Restart the bryti process to reload extensions and config. " +
+        "Use this after writing or modifying an extension file, or after changing config.yml. " +
+        "The user will receive a 'Restarting' message, then 'Back online' when ready. " +
+        "Always tell the user what you changed and why you are restarting before calling this.",
+      parameters: restartSchema,
+      async execute(
+        _toolCallId: string,
+        { reason }: { reason: string },
+      ): Promise<AgentToolResult<unknown>> {
+        await onRestart(reason);
+        // process.exit() will have been called by onRestart — this line is unreachable
+        // but satisfies the return type.
+        return toolSuccess({ restarting: true });
+      },
+    };
+    tools.push(restartTool);
+    registerToolCapabilities("bryti_restart", {
+      level: "elevated",
+      capabilities: ["shell"],
+      reason: "Restarts the bryti process.",
+    });
+  }
 
   // Register trust capabilities for well-known elevated tools.
   // Extension tools (loaded by pi SDK from data/files/extensions/) default to

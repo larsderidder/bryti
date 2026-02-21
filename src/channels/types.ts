@@ -23,6 +23,8 @@ export interface IncomingMessage {
   platform: Platform;
   /** Platform-specific raw message object */
   raw: unknown;
+  /** Image attachments (base64-encoded, vision-capable models only). */
+  images?: Array<{ data: string; mimeType: string }>;
 }
 
 export interface SendOpts {

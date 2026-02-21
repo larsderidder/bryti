@@ -48,6 +48,47 @@ import {
 import { createAppLogger, installConsoleFileLogging } from "./logger.js";
 import { getUserTimezone } from "./time.js";
 
+// ---------------------------------------------------------------------------
+// Restart protocol
+//
+// Exit code 42 signals an intentional restart to run.sh, which loops
+// immediately without delay (as opposed to crash restarts which delay).
+//
+// A small marker file records who triggered the restart and on which channel,
+// so the "Back online" notification can be sent to the right user on startup.
+// ---------------------------------------------------------------------------
+
+export const RESTART_EXIT_CODE = 42;
+
+interface RestartMarker {
+  userId: string;
+  channelId: string;
+  platform: string;
+  reason: string;
+}
+
+function restartMarkerPath(dataDir: string): string {
+  return path.join(dataDir, "pending", "restart.json");
+}
+
+function writeRestartMarker(dataDir: string, marker: RestartMarker): void {
+  fs.mkdirSync(path.join(dataDir, "pending"), { recursive: true });
+  fs.writeFileSync(restartMarkerPath(dataDir), JSON.stringify(marker), "utf8");
+}
+
+function readAndClearRestartMarker(dataDir: string): RestartMarker | null {
+  const p = restartMarkerPath(dataDir);
+  if (!fs.existsSync(p)) return null;
+  try {
+    const marker = JSON.parse(fs.readFileSync(p, "utf8")) as RestartMarker;
+    fs.rmSync(p, { force: true });
+    return marker;
+  } catch {
+    fs.rmSync(p, { force: true });
+    return null;
+  }
+}
+
 /**
  * Application state.
  */
@@ -128,7 +169,8 @@ function getBridge(state: AppState, platform?: string): ChannelBridge {
 /**
  * Get or load the persistent session for a user.
  */
-async function getOrLoadSession(state: AppState, userId: string): Promise<UserSession> {
+async function getOrLoadSession(state: AppState, msg: IncomingMessage): Promise<UserSession> {
+  const { userId, channelId, platform } = msg;
   const existing = state.sessions.get(userId);
   if (existing) {
     return existing;
@@ -154,6 +196,9 @@ async function getOrLoadSession(state: AppState, userId: string): Promise<UserSe
       platform: "telegram",
       raw: { type: "worker_trigger" },
     });
+  }, async (reason: string) => {
+    // Agent-triggered restart. Send notification then exit 42.
+    await triggerRestart(state, { userId, channelId, platform, text: "", raw: null }, reason);
   });
 
   // Wrap tools with trust checks + LLM guardrail
@@ -391,6 +436,32 @@ function buildActivityLog(dataDir: string, userId: string, timezone: string): st
 }
 
 /**
+ * Write a restart marker and exit with code 42.
+ *
+ * run.sh treats exit 42 as an intentional restart: it loops immediately
+ * without delay or error logging. On next startup, the marker is read and
+ * a "Back online" message is sent to the user who triggered the restart.
+ */
+async function triggerRestart(
+  state: AppState,
+  msg: IncomingMessage,
+  reason: string,
+): Promise<void> {
+  console.log(`[restart] Requested by user ${msg.userId}: ${reason}`);
+  writeRestartMarker(state.config.data_dir, {
+    userId: msg.userId,
+    channelId: msg.channelId,
+    platform: msg.platform,
+    reason,
+  });
+  await getBridge(state, msg.platform).sendMessage(
+    msg.channelId,
+    "Restarting now. Back in a few seconds.",
+  );
+  process.exit(RESTART_EXIT_CODE);
+}
+
+/**
  * Process an incoming message through the agent.
  */
 async function processMessage(
@@ -434,6 +505,11 @@ async function processMessage(
     return;
   }
 
+  if (msg.text === "/restart") {
+    await triggerRestart(state, msg, "user command");
+    return;
+  }
+
   // Input validation: reject excessively long messages before they waste context
   const MAX_MESSAGE_LENGTH = 10_000;
   if (msg.text.length > MAX_MESSAGE_LENGTH) {
@@ -466,7 +542,7 @@ async function processMessage(
 
   try {
     // Load (or reuse) the persistent session for this user
-    const userSession = await getOrLoadSession(state, msg.userId);
+    const userSession = await getOrLoadSession(state, msg);
     if (state.recoveredSessions.has(msg.userId)) {
       state.recoveredSessions.delete(msg.userId);
       await getBridge(state, msg.platform).sendMessage(
@@ -490,10 +566,17 @@ async function processMessage(
     // it made during the previous turn (memory_core_append / memory_core_replace)
     await refreshSystemPrompt(session);
 
-    // Append user message to audit log
+    // Append user message to audit log (images logged as placeholder, not base64)
+    const imageLogSuffix = msg.images && msg.images.length > 0
+      ? " " + msg.images.map((img) => {
+          const bytes = Math.round(img.data.length * 0.75);
+          const kb = Math.round(bytes / 1024);
+          return `[image: ${img.mimeType}, ${kb}KB]`;
+        }).join(" ")
+      : "";
     await state.historyManager.append({
       role: "user",
-      content: msg.text,
+      content: msg.text + imageLogSuffix,
     });
 
     // Write a crash-recovery checkpoint before the (potentially long) model call.
@@ -512,6 +595,7 @@ async function processMessage(
       state.config,
       userSession.modelRegistry,
       msg.userId,
+      msg.images,
     );
     const latencyMs = Date.now() - promptStart;
 
@@ -761,6 +845,14 @@ async function startApp(): Promise<RunningApp> {
 
   // Recover any pending messages from a previous crash
   await recoverPendingCheckpoints(state);
+
+  // If this startup was triggered by a restart request, notify the user
+  const restartMarker = readAndClearRestartMarker(config.data_dir);
+  if (restartMarker) {
+    console.log(`[restart] Back online after restart requested by ${restartMarker.userId}: ${restartMarker.reason}`);
+    const bridge = bridges.find((b) => b.platform === restartMarker.platform) ?? bridges[0];
+    await bridge.sendMessage(restartMarker.channelId, "Back online.");
+  }
 
   console.log("Bryti ready!");
 

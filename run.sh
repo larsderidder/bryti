@@ -15,7 +15,13 @@ while true; do
   exit_code=$?
 
   if [ "$exit_code" -eq 0 ]; then
+    echo "Bryti stopped cleanly."
     exit 0
+  fi
+
+  if [ "$exit_code" -eq 42 ]; then
+    echo "Bryti restart requested. Restarting immediately..."
+    continue
   fi
 
   echo "Bryti crashed (exit code $exit_code). Restarting in ${RESTART_DELAY_SECONDS}s..."

@@ -321,13 +321,74 @@ export class TelegramBridge implements ChannelBridge {
       }
     });
 
+    // Handle photo messages
+    this.bot.on("message:photo", async (ctx) => {
+      if (!this.isAllowed(ctx)) {
+        await ctx.reply("Sorry, you're not authorized to use this bot.");
+        return;
+      }
+
+      if (!this.handler) return;
+
+      const images = await this.downloadPhoto(ctx);
+      if (!images) {
+        await ctx.reply("Sorry, I couldn't download that photo.");
+        return;
+      }
+
+      const text = ctx.message.caption?.trim() || "The user sent this image.";
+      const msg: IncomingMessage = {
+        channelId: String(ctx.chat.id),
+        userId: String(ctx.from?.id),
+        text,
+        platform: "telegram",
+        raw: ctx.message,
+        images,
+      };
+      await this.handler(msg);
+    });
+
+    // Handle document messages that are images (sent as files instead of photos)
+    this.bot.on("message:document", async (ctx) => {
+      if (!this.isAllowed(ctx)) {
+        await ctx.reply("Sorry, you're not authorized to use this bot.");
+        return;
+      }
+
+      const doc = ctx.message.document;
+      const mimeType = doc.mime_type ?? "";
+      if (!mimeType.startsWith("image/")) {
+        await ctx.reply("Sorry, I can only handle text messages and images for now.");
+        return;
+      }
+
+      if (!this.handler) return;
+
+      const images = await this.downloadDocument(ctx, mimeType);
+      if (!images) {
+        await ctx.reply("Sorry, I couldn't download that image.");
+        return;
+      }
+
+      const text = ctx.message.caption?.trim() || "The user sent this image.";
+      const msg: IncomingMessage = {
+        channelId: String(ctx.chat.id),
+        userId: String(ctx.from?.id),
+        text,
+        platform: "telegram",
+        raw: ctx.message,
+        images,
+      };
+      await this.handler(msg);
+    });
+
     // Handle non-text messages
     this.bot.on("message", async (ctx) => {
       if (!this.isAllowed(ctx)) {
         await ctx.reply("Sorry, you're not authorized to use this bot.");
         return;
       }
-      await ctx.reply("Sorry, I can only handle text messages for now.");
+      await ctx.reply("Sorry, I can only handle text messages and images for now.");
     });
 
     // Initialize bot (fetches bot info) then start polling in background
@@ -458,6 +519,67 @@ export class TelegramBridge implements ChannelBridge {
 
   onMessage(handler: (msg: IncomingMessage) => Promise<void>): void {
     this.handler = handler;
+  }
+
+  /**
+   * Download the largest available photo from a photo message and return it
+   * as a base64-encoded image attachment. Returns null on failure.
+   */
+  private async downloadPhoto(
+    ctx: Context & { message: NonNullable<Context["message"]> & { photo: NonNullable<NonNullable<Context["message"]>["photo"]> } },
+  ): Promise<Array<{ data: string; mimeType: string }> | null> {
+    if (!this.bot) return null;
+
+    // Telegram sends photos as an array of sizes; last entry is largest
+    const sizes = ctx.message.photo;
+    const largest = sizes[sizes.length - 1];
+    if (!largest) return null;
+
+    try {
+      const file = await this.bot.api.getFile(largest.file_id);
+      if (!file.file_path) return null;
+
+      const url = `https://api.telegram.org/file/bot${this.botToken}/${file.file_path}`;
+      const response = await fetch(url);
+      if (!response.ok) return null;
+
+      const buffer = await response.arrayBuffer();
+      const data = Buffer.from(buffer).toString("base64");
+      console.log(`[telegram] Downloaded photo: ${buffer.byteLength} bytes, base64 length ${data.length}`);
+      // Telegram photos are always JPEG
+      return [{ data, mimeType: "image/jpeg" }];
+    } catch (err) {
+      console.error("[telegram] Failed to download photo:", (err as Error).message);
+      return null;
+    }
+  }
+
+  /**
+   * Download an image document and return it as a base64-encoded attachment.
+   * Returns null on failure.
+   */
+  private async downloadDocument(
+    ctx: Context & { message: NonNullable<Context["message"]> & { document: NonNullable<NonNullable<Context["message"]>["document"]> } },
+    mimeType: string,
+  ): Promise<Array<{ data: string; mimeType: string }> | null> {
+    if (!this.bot) return null;
+
+    const doc = ctx.message.document;
+    try {
+      const file = await this.bot.api.getFile(doc.file_id);
+      if (!file.file_path) return null;
+
+      const url = `https://api.telegram.org/file/bot${this.botToken}/${file.file_path}`;
+      const response = await fetch(url);
+      if (!response.ok) return null;
+
+      const buffer = await response.arrayBuffer();
+      const data = Buffer.from(buffer).toString("base64");
+      return [{ data, mimeType }];
+    } catch (err) {
+      console.error("[telegram] Failed to download document:", (err as Error).message);
+      return null;
+    }
   }
 
   /**

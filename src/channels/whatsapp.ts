@@ -11,6 +11,7 @@
 
 import makeWASocket, {
   useMultiFileAuthState,
+  downloadMediaMessage,
   type WASocket,
   DisconnectReason,
 } from "@whiskeysockets/baileys";
@@ -122,11 +123,13 @@ export class WhatsAppBridge implements ChannelBridge {
         if (msg.key.fromMe) continue;
 
         // Extract text from various message types
+        const isImageMessage = !!msg.message?.imageMessage;
         const text =
           msg.message?.conversation ??
           msg.message?.extendedTextMessage?.text ??
           msg.message?.imageMessage?.caption ??
-          msg.message?.videoMessage?.caption;
+          msg.message?.videoMessage?.caption ??
+          (isImageMessage ? "The user sent this image." : undefined);
         if (!text) continue;
 
         // Extract phone number from JID (strip @s.whatsapp.net)
@@ -138,6 +141,18 @@ export class WhatsAppBridge implements ChannelBridge {
           continue;
         }
 
+        // Download image attachment if present
+        let images: Array<{ data: string; mimeType: string }> | undefined;
+        if (isImageMessage && this.socket) {
+          try {
+            const buf = await downloadMediaMessage(msg, "buffer", {});
+            const mimeType = msg.message?.imageMessage?.mimetype ?? "image/jpeg";
+            images = [{ data: buf.toString("base64"), mimeType }];
+          } catch (err) {
+            console.error("[whatsapp] Failed to download image:", (err as Error).message);
+          }
+        }
+
         if (this.handler) {
           const incomingMsg: IncomingMessage = {
             channelId: jid,
@@ -145,6 +160,7 @@ export class WhatsAppBridge implements ChannelBridge {
             text,
             platform: "whatsapp",
             raw: msg,
+            images,
           };
           try {
             await this.handler(incomingMsg);
