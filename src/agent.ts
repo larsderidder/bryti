@@ -19,7 +19,7 @@
  * - Sessions now persist across messages in data/sessions/<userId>.jsonl
  * - History is no longer injected into the system prompt as text
  * - The model sees its actual prior tool calls and results in context
- * - JSONL history files remain as an audit log for conversation_search
+ * - JSONL history files remain as an audit log for memory_conversation_search
  */
 
 import fs from "node:fs";
@@ -111,7 +111,7 @@ function generateModelsJson(config: Config, agentDir: string): void {
  *
  * History is no longer injected here. The persistent pi session file is the
  * source of truth for conversation context. The JSONL audit log remains for
- * conversation_search, which reads the files directly.
+ * memory_conversation_search, which reads the files directly.
  */
 export function buildToolSection(
   tools: ToolSummary[],
@@ -207,23 +207,23 @@ function buildSystemPrompt(
     `**IMPORTANT: Always use a worker for any task that involves fetching or reading external content.** ` +
     `Do not use web_search or fetch_url directly. Delegate to a worker instead. ` +
     `This keeps untrusted content out of your main context.\n\n` +
-    `**When to use a worker (USE dispatch_worker):**\n` +
+    `**When to use a worker (USE worker_dispatch):**\n` +
     `- ANY request that involves searching the web or fetching URLs\n` +
     `- The user asks you to research, look into, find out about, or compile information on something\n` +
     `- The user shares a URL and asks you to read or summarize it\n` +
     `- The task requires reading external pages, APIs, or documents\n\n` +
     `**When NOT to use a worker (answer from what you already know):**\n` +
     `- You can answer from your memory or general knowledge without any web lookup\n` +
-    `- The user is asking about something you discussed before (use archival_memory_search)\n` +
+    `- The user is asking about something you discussed before (use memory_archival_search)\n` +
     `- Simple conversational responses that don't need external data\n\n` +
     `Standard pattern after dispatching a worker:\n` +
-    `1. Call dispatch_worker with a detailed task description.\n` +
-    `2. Create a projection: \`project({ summary: "Inform user about <task> results", trigger_on_fact: "worker <id> complete" })\`\n` +
+    `1. Call worker_dispatch with a detailed task description.\n` +
+    `2. Create a projection: \`projection_create({ summary: "Inform user about <task> results", trigger_on_fact: "worker <id> complete" })\`\n` +
     `3. Tell the user you've started looking into it and will share results when ready.\n\n` +
-    `When the trigger fires: read the result.md file with read_file, summarize the key findings for the user, resolve the projection.\n\n` +
-    `Use check_worker only when the user asks for a progress update.\n` +
-    `Use interrupt_worker to cancel a running worker when the task is no longer needed or the user asks to stop it.\n` +
-    `Use steer_worker to redirect a running worker mid-task — narrow focus, add requirements, correct course. ` +
+    `When the trigger fires: read the result.md file with file_read, summarize the key findings for the user, resolve the projection.\n\n` +
+    `Use worker_check only when the user asks for a progress update.\n` +
+    `Use worker_interrupt to cancel a running worker when the task is no longer needed or the user asks to stop it.\n` +
+    `Use worker_steer to redirect a running worker mid-task — narrow focus, add requirements, correct course. ` +
     `The worker checks for steering after every few tool calls. Each call replaces the previous note.\n` +
     `Workers cannot spawn other workers.\n` +
     `Workers use a cheaper model by default. You can override with the model parameter if needed.`,
@@ -599,7 +599,7 @@ export async function promptWithFallback(
  *
  * The resource loader's systemPromptOverride closure reads coreMemory.read()
  * at call time, so session.reload() picks up any changes the agent made during
- * the previous turn (core_memory_append / core_memory_replace).
+ * the previous turn (memory_core_append / memory_core_replace).
  *
  * Call this right before promptWithFallback() on every message.
  */

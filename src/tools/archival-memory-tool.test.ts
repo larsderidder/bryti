@@ -31,7 +31,7 @@ describe("ArchivalMemoryTools", () => {
     const embed = vi.fn().mockResolvedValue(new Array(768).fill(0.1));
     const tools = createArchivalMemoryTools(store, embed);
 
-    const insertTool = tools.find((tool) => tool.name === "archival_memory_insert")!;
+    const insertTool = tools.find((tool) => tool.name === "memory_archival_insert")!;
     const result = await insertTool.execute("call1", { content: "Meeting notes" });
 
     expect(result.details).toEqual({ success: true });
@@ -44,7 +44,7 @@ describe("ArchivalMemoryTools", () => {
     const projStore = createMockProjectionStore();
     const tools = createArchivalMemoryTools(store, embed, projStore);
 
-    const insertTool = tools.find((tool) => tool.name === "archival_memory_insert")!;
+    const insertTool = tools.find((tool) => tool.name === "memory_archival_insert")!;
     await insertTool.execute("call1", { content: "dentist confirmed for Thursday" });
 
     expect(projStore.checkTriggers).toHaveBeenCalledWith("dentist confirmed for Thursday", embed);
@@ -70,7 +70,7 @@ describe("ArchivalMemoryTools", () => {
     const projStore = createMockProjectionStore([fakeProjection]);
     const tools = createArchivalMemoryTools(store, embed, projStore);
 
-    const insertTool = tools.find((tool) => tool.name === "archival_memory_insert")!;
+    const insertTool = tools.find((tool) => tool.name === "memory_archival_insert")!;
     const result = await insertTool.execute("call1", { content: "dentist confirmed" });
 
     expect((result.details as any).triggered).toEqual(["Book time off after dentist"]);
@@ -82,7 +82,7 @@ describe("ArchivalMemoryTools", () => {
     const projStore = createMockProjectionStore([]);
     const tools = createArchivalMemoryTools(store, embed, projStore);
 
-    const insertTool = tools.find((tool) => tool.name === "archival_memory_insert")!;
+    const insertTool = tools.find((tool) => tool.name === "memory_archival_insert")!;
     const result = await insertTool.execute("call1", { content: "random fact" });
 
     expect(result.details).toEqual({ success: true });
@@ -93,7 +93,7 @@ describe("ArchivalMemoryTools", () => {
     const embed = vi.fn().mockResolvedValue(new Array(768).fill(0.1));
     const tools = createArchivalMemoryTools(store, embed);
 
-    const insertTool = tools.find((tool) => tool.name === "archival_memory_insert")!;
+    const insertTool = tools.find((tool) => tool.name === "memory_archival_insert")!;
     const result = await insertTool.execute("call1", { content: "something" });
 
     expect(result.details).toEqual({ success: true });
@@ -112,7 +112,7 @@ describe("ArchivalMemoryTools", () => {
     const embed = vi.fn().mockResolvedValue(new Array(768).fill(0.2));
     const tools = createArchivalMemoryTools(store, embed);
 
-    const searchTool = tools.find((tool) => tool.name === "archival_memory_search")!;
+    const searchTool = tools.find((tool) => tool.name === "memory_archival_search")!;
     const result = await searchTool.execute("call1", { query: "Alice" });
 
     expect(result.details).toHaveProperty("results");

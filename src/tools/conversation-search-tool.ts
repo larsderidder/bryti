@@ -16,8 +16,8 @@ type ConversationSearchInput = Static<typeof conversationSearchSchema>;
 
 export function createConversationSearchTool(historyDir: string): AgentTool<any> {
   const conversationSearchTool: AgentTool<typeof conversationSearchSchema> = {
-    name: "conversation_search",
-    label: "conversation_search",
+    name: "memory_conversation_search",
+    label: "memory_conversation_search",
     description:
       "Search your past conversations for messages matching a query. Returns relevant messages with timestamps.",
     parameters: conversationSearchSchema,

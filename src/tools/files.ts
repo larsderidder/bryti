@@ -60,8 +60,8 @@ export function createFileTools(baseDir: string): AgentTool<any>[] {
   fs.mkdirSync(baseDir, { recursive: true });
 
   const readFileTool: AgentTool<typeof readFileSchema> = {
-    name: "read_file",
-    label: "read_file",
+    name: "file_read",
+    label: "file_read",
     description: "Read the contents of a file from the sandboxed files directory.",
     parameters: readFileSchema,
     async execute(
@@ -90,8 +90,8 @@ export function createFileTools(baseDir: string): AgentTool<any>[] {
   };
 
   const writeFileTool: AgentTool<typeof writeFileSchema> = {
-    name: "write_file",
-    label: "write_file",
+    name: "file_write",
+    label: "file_write",
     description: "Write content to a file in the sandboxed files directory. Creates parent directories if needed.",
     parameters: writeFileSchema,
     async execute(
@@ -112,8 +112,8 @@ export function createFileTools(baseDir: string): AgentTool<any>[] {
   };
 
   const listFilesTool: AgentTool<typeof listFilesSchema> = {
-    name: "list_files",
-    label: "list_files",
+    name: "file_list",
+    label: "file_list",
     description: "List files in the sandboxed files directory, optionally under a subdirectory.",
     parameters: listFilesSchema,
     async execute(

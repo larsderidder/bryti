@@ -188,7 +188,7 @@ async function processMessage(
     repairSessionTranscript(session, msg.userId);
 
     // Reload the system prompt so the agent sees any core memory changes
-    // it made during the previous turn (core_memory_append / core_memory_replace)
+    // it made during the previous turn (memory_core_append / memory_core_replace)
     await refreshSystemPrompt(session);
 
     // Append user message to audit log

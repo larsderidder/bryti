@@ -483,7 +483,7 @@ export function createWorkerTools(
       if (registry.runningCount() >= maxConcurrent) {
         return toolError(
           `Maximum concurrent workers (${maxConcurrent}) already running. ` +
-          `Use check_worker to see current workers, or wait for one to complete.`,
+          `Use worker_check to see current workers, or wait for one to complete.`,
         );
       }
 

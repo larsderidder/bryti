@@ -30,8 +30,8 @@ export function createArchivalMemoryTools(
   const hybridSearch = createHybridSearch(store, embed);
 
   const insertTool: AgentTool<typeof archivalMemoryInsertSchema> = {
-    name: "archival_memory_insert",
-    label: "archival_memory_insert",
+    name: "memory_archival_insert",
+    label: "memory_archival_insert",
     description:
       "Store a fact in long-term archival memory. Use for detailed information that does not need to be in core memory.",
     parameters: archivalMemoryInsertSchema,
@@ -60,8 +60,8 @@ export function createArchivalMemoryTools(
   };
 
   const searchTool: AgentTool<typeof archivalMemorySearchSchema> = {
-    name: "archival_memory_search",
-    label: "archival_memory_search",
+    name: "memory_archival_search",
+    label: "memory_archival_search",
     description:
       "Search your long-term archival memory for relevant facts. Use when you need detailed information not in core memory.",
     parameters: archivalMemorySearchSchema,

@@ -16,11 +16,11 @@ describe("FileTools", () => {
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
-  describe("read_file", () => {
+  describe("file_read", () => {
     it("should read a file", async () => {
       fs.writeFileSync(path.join(tempDir, "test.txt"), "Hello World", "utf-8");
 
-      const readFileTool = tools.find((t) => t.name === "read_file")!;
+      const readFileTool = tools.find((t) => t.name === "file_read")!;
       const result = await readFileTool.execute("call1", { path: "test.txt" }, undefined, undefined, undefined as any);
 
       expect(result.content[0]).toHaveProperty("text");
@@ -29,7 +29,7 @@ describe("FileTools", () => {
     });
 
     it("should return error for nonexistent file", async () => {
-      const readFileTool = tools.find((t) => t.name === "read_file")!;
+      const readFileTool = tools.find((t) => t.name === "file_read")!;
       const result = await readFileTool.execute("call1", { path: "nonexistent.txt" }, undefined, undefined, undefined as any);
 
       expect(result.content[0]).toHaveProperty("text");
@@ -38,7 +38,7 @@ describe("FileTools", () => {
     });
 
     it("should reject path traversal", async () => {
-      const readFileTool = tools.find((t) => t.name === "read_file")!;
+      const readFileTool = tools.find((t) => t.name === "file_read")!;
       const result = await readFileTool.execute("call1", { path: "../package.json" }, undefined, undefined, undefined as any);
 
       expect(result.content[0]).toHaveProperty("text");
@@ -47,9 +47,9 @@ describe("FileTools", () => {
     });
   });
 
-  describe("write_file", () => {
+  describe("file_write", () => {
     it("should write a file", async () => {
-      const writeFileTool = tools.find((t) => t.name === "write_file")!;
+      const writeFileTool = tools.find((t) => t.name === "file_write")!;
       const result = await writeFileTool.execute(
         "call1",
         { path: "newfile.txt", content: "Test content" },
@@ -68,7 +68,7 @@ describe("FileTools", () => {
     });
 
     it("should create parent directories", async () => {
-      const writeFileTool = tools.find((t) => t.name === "write_file")!;
+      const writeFileTool = tools.find((t) => t.name === "file_write")!;
       await writeFileTool.execute(
         "call1",
         { path: "subdir/nested/file.txt", content: "Nested" },
@@ -82,7 +82,7 @@ describe("FileTools", () => {
     });
 
     it("should reject path traversal", async () => {
-      const writeFileTool = tools.find((t) => t.name === "write_file")!;
+      const writeFileTool = tools.find((t) => t.name === "file_write")!;
       const result = await writeFileTool.execute(
         "call1",
         { path: "../test.txt", content: "Malicious" },
@@ -97,14 +97,14 @@ describe("FileTools", () => {
     });
   });
 
-  describe("list_files", () => {
+  describe("file_list", () => {
     it("should list files in directory", async () => {
       fs.writeFileSync(path.join(tempDir, "file1.txt"), "content1");
       fs.writeFileSync(path.join(tempDir, "file2.txt"), "content2");
       fs.mkdirSync(path.join(tempDir, "subdir"));
       fs.writeFileSync(path.join(tempDir, "subdir", "file3.txt"), "content3");
 
-      const listFilesTool = tools.find((t) => t.name === "list_files")!;
+      const listFilesTool = tools.find((t) => t.name === "file_list")!;
       const result = await listFilesTool.execute("call1", { directory: undefined }, undefined, undefined, undefined as any);
 
       expect(result.content[0]).toHaveProperty("text");
@@ -117,7 +117,7 @@ describe("FileTools", () => {
       fs.mkdirSync(path.join(tempDir, "notes"));
       fs.writeFileSync(path.join(tempDir, "notes", "todo.md"), "- task 1");
 
-      const listFilesTool = tools.find((t) => t.name === "list_files")!;
+      const listFilesTool = tools.find((t) => t.name === "file_list")!;
       const result = await listFilesTool.execute("call1", { directory: "notes" }, undefined, undefined, undefined as any);
 
       expect(result.content[0]).toHaveProperty("text");

@@ -28,7 +28,7 @@ export function formatProjectionsForPrompt(projections: Projection[], maxItems =
   });
 
   const overflow = projections.length > maxItems
-    ? `\n(${projections.length - maxItems} more — use get_projections to see all)`
+    ? `\n(${projections.length - maxItems} more — use projection_list to see all)`
     : "";
 
   return lines.join("\n") + overflow;

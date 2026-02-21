@@ -24,8 +24,8 @@ type CoreMemoryReplaceInput = Static<typeof coreMemoryReplaceSchema>;
 
 export function createCoreMemoryTools(coreMemory: CoreMemory): AgentTool<any>[] {
   const coreMemoryAppendTool: AgentTool<typeof coreMemoryAppendSchema> = {
-    name: "core_memory_append",
-    label: "core_memory_append",
+    name: "memory_core_append",
+    label: "memory_core_append",
     description:
       "Add information to your core memory under a section. Core memory is always visible to you. Use for important facts about the user, preferences, and ongoing context. Sections: 'About the User', 'Preferences', 'Current Projects', or create your own.",
     parameters: coreMemoryAppendSchema,
@@ -52,8 +52,8 @@ export function createCoreMemoryTools(coreMemory: CoreMemory): AgentTool<any>[] 
   };
 
   const coreMemoryReplaceTool: AgentTool<typeof coreMemoryReplaceSchema> = {
-    name: "core_memory_replace",
-    label: "core_memory_replace",
+    name: "memory_core_replace",
+    label: "memory_core_replace",
     description:
       "Update information in your core memory by replacing specific text within a section. Use when facts change or need correction.",
     parameters: coreMemoryReplaceSchema,

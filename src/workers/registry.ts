@@ -44,7 +44,7 @@ export interface WorkerRegistry {
   /** Remove a worker entry from the registry. */
   remove(workerId: string): void;
 
-  /** List all entries (for check_worker). */
+  /** List all entries (for worker_check). */
   list(): WorkerEntry[];
 }
 

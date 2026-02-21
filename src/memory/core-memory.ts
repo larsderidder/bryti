@@ -21,7 +21,7 @@ export interface CoreMemory {
 
 const CORE_MEMORY_MAX_BYTES = 4096;
 const CORE_MEMORY_FULL_MESSAGE =
-  "Core memory is full (4KB limit). Move less important information to archival memory using archival_memory_insert.";
+  "Core memory is full (4KB limit). Move less important information to archival memory using memory_archival_insert.";
 
 function readFile(filePath: string): string {
   if (!fs.existsSync(filePath)) {

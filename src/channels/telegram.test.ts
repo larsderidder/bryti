@@ -95,7 +95,7 @@ describe("markdownToHtml", () => {
   it("does not treat underscores in identifiers as italic", () => {
     // Tool names, variable names, etc. should not become italic
     expect(markdownToHtml("read_file")).toBe("read_file");
-    expect(markdownToHtml("core_memory_append")).toBe("core_memory_append");
+    expect(markdownToHtml("memory_core_append")).toBe("memory_core_append");
     expect(markdownToHtml("**read_file**")).toBe("<b>read_file</b>");
   });
 

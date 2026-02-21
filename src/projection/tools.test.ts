@@ -27,7 +27,7 @@ describe("ProjectionTools dependencies", () => {
 
   it("project supports depends_on", async () => {
     const subjectId = store.add({ summary: "Meeting" });
-    const projectTool = tools.find((t) => t.name === "project");
+    const projectTool = tools.find((t) => t.name === "projection_create");
     expect(projectTool).toBeDefined();
 
     const result = await projectTool!.execute(
@@ -50,10 +50,10 @@ describe("ProjectionTools dependencies", () => {
     expect(deps[0].condition_type).toBe("status_change");
   });
 
-  it("link_projection links existing projections", async () => {
+  it("projection_link links existing projections", async () => {
     const subjectId = store.add({ summary: "Call" });
     const observerId = store.add({ summary: "Follow-up email" });
-    const linkTool = tools.find((t) => t.name === "link_projection");
+    const linkTool = tools.find((t) => t.name === "projection_link");
     expect(linkTool).toBeDefined();
 
     const result = await linkTool!.execute(

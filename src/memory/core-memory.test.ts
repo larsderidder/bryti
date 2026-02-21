@@ -71,7 +71,7 @@ describe("CoreMemory", () => {
     expect(result).toEqual({
       ok: false,
       error:
-        "Core memory is full (4KB limit). Move less important information to archival memory using archival_memory_insert.",
+        "Core memory is full (4KB limit). Move less important information to archival memory using memory_archival_insert.",
     });
     expect(coreMemory.read()).toBe("");
   });

@@ -17,7 +17,7 @@ describe("CoreMemoryTools", () => {
   });
 
   it("appends to core memory", async () => {
-    const appendTool = tools.find((t) => t.name === "core_memory_append")!;
+    const appendTool = tools.find((t) => t.name === "memory_core_append")!;
     const result = await appendTool.execute(
       "call1",
       { section: "Preferences", content: "Likes coffee" },
@@ -30,7 +30,7 @@ describe("CoreMemoryTools", () => {
   });
 
   it("returns error on missing section replace", async () => {
-    const replaceTool = tools.find((t) => t.name === "core_memory_replace")!;
+    const replaceTool = tools.find((t) => t.name === "memory_core_replace")!;
     const result = await replaceTool.execute(
       "call1",
       { section: "Preferences", old_text: "coffee", new_text: "tea" },

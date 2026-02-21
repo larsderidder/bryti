@@ -7,6 +7,9 @@ data/
 # eval raw results (can be large)
 eval/raw/
 
+# Research data (benchmarks, experiments, prior art analysis)
+research/
+
 # internal analysis docs
 docs/internal/
 

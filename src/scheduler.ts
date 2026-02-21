@@ -157,7 +157,7 @@ export function createScheduler(
             text:
               `[Daily review]\n\nHere is what's coming up:\n\n${formatted}\n\n` +
               `Review each item. For each projection, decide whether to surface it TODAY:\n` +
-              `1. Search your memory for related context (use archival_memory_search)\n` +
+              `1. Search your memory for related context (use memory_archival_search)\n` +
               `2. If due today or overdue: compose a message or take action.\n` +
               `3. If due later this week: surface only if today is the right day for it.\n` +
               `4. If further out: only act if something needs attention now.\n` +
@@ -225,7 +225,7 @@ export function createScheduler(
               `[Scheduled reminder]\n\nThe following reminder(s) are due now:\n\n` +
               `${formatted}\n\n` +
               `For each item:\n` +
-              `1. Search your memory for related context (use archival_memory_search)\n` +
+              `1. Search your memory for related context (use memory_archival_search)\n` +
               `2. Send the user a helpful, natural message — or reply NOOP if nothing needs to be said.`,
             platform: "telegram",
             raw: { type: "projection_exact_check" },

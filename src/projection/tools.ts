@@ -1,5 +1,5 @@
 /**
- * Projection agent tools: project, get_projections, resolve_projection, link_projection.
+ * Projection agent tools: project, projection_list, projection_resolve, projection_link.
  */
 
 import type { AgentTool, AgentToolResult } from "@mariozechner/pi-agent-core";
@@ -145,8 +145,8 @@ function toUtcDatetime(naive: string, timezone: string | undefined): string {
  */
 export function createProjectionTools(store: ProjectionStore, timezone?: string): AgentTool<any>[] {
   const projectTool: AgentTool<typeof projectSchema> = {
-    name: "project",
-    label: "project",
+    name: "projection_create",
+    label: "projection_create",
     description:
       "Store a future event, plan, or expectation in projection memory. " +
       "Use when the user mentions anything about the future: appointments, deadlines, " +
@@ -206,12 +206,12 @@ export function createProjectionTools(store: ProjectionStore, timezone?: string)
   };
 
   const getProjectionsTool: AgentTool<typeof getProjectionsSchema> = {
-    name: "get_projections",
-    label: "get_projections",
+    name: "projection_list",
+    label: "projection_list",
     description:
       "Retrieve your active (pending) projections. Default horizon is 7 days. " +
       "Always includes someday items. Use to review what's coming up or to find " +
-      "IDs for resolve_projection.",
+      "IDs for projection_resolve.",
     parameters: getProjectionsSchema,
     async execute(
       _toolCallId: string,
@@ -231,8 +231,8 @@ export function createProjectionTools(store: ProjectionStore, timezone?: string)
   };
 
   const resolveProjectionTool: AgentTool<typeof resolveProjectionSchema> = {
-    name: "resolve_projection",
-    label: "resolve_projection",
+    name: "projection_resolve",
+    label: "projection_resolve",
     description:
       "Mark a projection as resolved. Use 'done' when something happened as expected, " +
       "'cancelled' when a plan fell through, 'passed' when the time passed without confirmation. " +
@@ -260,8 +260,8 @@ export function createProjectionTools(store: ProjectionStore, timezone?: string)
   };
 
   const linkProjectionTool: AgentTool<typeof linkProjectionSchema> = {
-    name: "link_projection",
-    label: "link_projection",
+    name: "projection_link",
+    label: "projection_link",
     description:
       "Create a dependency between two existing projections. " +
       "Use this when the dependency is discovered after both projections already exist.",
