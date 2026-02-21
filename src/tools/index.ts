@@ -17,6 +17,7 @@ import { createMemoryStore } from "../memory/store.js";
 import path from "node:path";
 import type { Config } from "../config.js";
 import type { CoreMemory } from "../memory/core-memory.js";
+import type { WorkerTriggerCallback } from "../workers/tools.js";
 
 export { createFileTools };
 export { createCoreMemoryTools };
@@ -32,11 +33,15 @@ export type PibotTool = AgentTool<any>;
 
 /**
  * Create all pibot tools based on configuration.
+ *
+ * @param onWorkerTrigger  Called when a worker's completion fact triggers projections.
+ *                         Use this to inject an immediate message into the agent queue.
  */
 export function createTools(
   config: Config,
   coreMemory: CoreMemory,
   userId: string,
+  onWorkerTrigger?: WorkerTriggerCallback,
 ): PibotTool[] {
   const tools: PibotTool[] = [];
 
@@ -70,8 +75,12 @@ export function createTools(
   // Worker tools: dispatch and check background research sessions.
   // The registry lives for the lifetime of this tool set (one per user session).
   // Workers write completion facts to the user's archival memory store.
+  // The projection store is passed so worker completion can trigger projections
+  // immediately (instead of waiting for the 5-minute scheduler tick).
   const workerRegistry = createWorkerRegistry();
-  tools.push(...createWorkerTools(config, archivalStore, workerRegistry));
+  tools.push(...createWorkerTools(
+    config, archivalStore, workerRegistry, false, projectionStore, onWorkerTrigger,
+  ));
 
   return tools;
 }

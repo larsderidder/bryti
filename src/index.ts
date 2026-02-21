@@ -54,6 +54,8 @@ interface AppState {
   /** Active channel bridges (Telegram, WhatsApp, etc.) */
   bridges: ChannelBridge[];
   scheduler: Scheduler;
+  /** Enqueue function for injecting messages (used by worker trigger callbacks). */
+  enqueue: ((msg: IncomingMessage) => void) | null;
 }
 
 interface AssistantMessageLike {
@@ -119,7 +121,24 @@ async function getOrLoadSession(state: AppState, userId: string): Promise<UserSe
     return existing;
   }
 
-  const tools = createTools(state.config, state.coreMemory, userId);
+  const tools = createTools(state.config, state.coreMemory, userId, (triggered) => {
+    // Worker completion triggered projections. Inject an immediate message
+    // so the agent reads the results and notifies the user without waiting
+    // for the 5-minute scheduler tick.
+    if (!state.enqueue) return;
+    const channelId = String(state.config.telegram.allowed_users[0] ?? userId);
+    const summaries = triggered.map((p) => `- ${p.summary} (id: ${p.id})`).join("\n");
+    state.enqueue({
+      channelId,
+      userId,
+      text:
+        `[Worker completed]\n\nThe following commitment(s) were triggered:\n\n${summaries}\n\n` +
+        `Read the worker's result file and act on each triggered item. ` +
+        `Summarize the findings for the user.`,
+      platform: "telegram",
+      raw: { type: "worker_trigger" },
+    });
+  });
   const userSession = await loadUserSession(
     state.config,
     state.coreMemory,
@@ -326,6 +345,7 @@ async function startApp(): Promise<RunningApp> {
     sessions: new Map(),
     bridges,
     scheduler: null!,
+    enqueue: null,
   };
 
   const queue = new MessageQueue(
@@ -339,6 +359,9 @@ async function startApp(): Promise<RunningApp> {
       );
     },
   );
+
+  // Wire up the enqueue function so worker trigger callbacks can inject messages
+  state.enqueue = (msg) => queue.enqueue(msg);
 
   for (const bridge of bridges) {
     bridge.onMessage(async (msg: IncomingMessage) => {

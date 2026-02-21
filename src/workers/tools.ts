@@ -40,6 +40,7 @@ import { createFetchUrlTool } from "../tools/fetch-url.js";
 import { createWorkerScopedTools } from "./scoped-tools.js";
 import { toolError, toolSuccess } from "../tools/result.js";
 import type { WorkerRegistry } from "./registry.js";
+import type { ProjectionStore } from "../projection/store.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -183,6 +184,13 @@ function ensureWorkerAgentDir(config: Config): string {
  * Spawn the worker session in the background. Returns immediately.
  * Completion (success or failure) is handled asynchronously.
  */
+/**
+ * Callback invoked when a worker completes and its archival fact triggers
+ * one or more projections. Used to inject an immediate message into the
+ * agent queue instead of waiting for the 5-minute cron tick.
+ */
+export type WorkerTriggerCallback = (triggered: Array<{ id: string; summary: string }>) => void;
+
 async function spawnWorkerSession(opts: {
   config: Config;
   workerId: string;
@@ -191,8 +199,10 @@ async function spawnWorkerSession(opts: {
   modelOverride: string | undefined;
   toolNames: AllowedTool[];
   memoryStore: MemoryStore;
+  projectionStore?: ProjectionStore;
   registry: WorkerRegistry;
   timeoutMs: number;
+  onTrigger?: WorkerTriggerCallback;
 }): Promise<void> {
   const {
     config,
@@ -204,6 +214,7 @@ async function spawnWorkerSession(opts: {
     memoryStore,
     registry,
     timeoutMs,
+    onTrigger,
   } = opts;
 
   const agentDir = ensureWorkerAgentDir(config);
@@ -372,6 +383,24 @@ async function spawnWorkerSession(opts: {
       const embedding = await embed(factContent, modelsDir);
       memoryStore.addFact(factContent, "worker", embedding);
       console.log(`[worker] ${workerId} completion fact archived`);
+
+      // Check if this fact triggers any projections (e.g., "worker w-xxx complete").
+      // If so, invoke the callback to notify the main agent immediately instead
+      // of waiting for the 5-minute scheduler tick.
+      if (onTrigger && opts.projectionStore) {
+        try {
+          const triggered = await opts.projectionStore.checkTriggers(
+            factContent,
+            (text) => embed(text, modelsDir),
+          );
+          if (triggered.length > 0) {
+            console.log(`[worker] ${workerId} triggered ${triggered.length} projection(s)`);
+            onTrigger(triggered);
+          }
+        } catch (triggerErr) {
+          console.error(`[worker] ${workerId} trigger check failed:`, (triggerErr as Error).message);
+        }
+      }
     } catch (err) {
       console.error(`[worker] ${workerId} failed to archive completion fact:`, (err as Error).message);
     }
@@ -451,12 +480,16 @@ function scheduleCleanup(
  * @param memoryStore     The user's archival memory store (for completion signals).
  * @param registry        Shared worker registry for this user.
  * @param isWorkerSession When true, worker_dispatch rejects all calls (no nesting).
+ * @param projectionStore Optional projection store for trigger checking on worker completion.
+ * @param onTrigger       Called when worker completion triggers projections (for immediate notification).
  */
 export function createWorkerTools(
   config: Config,
   memoryStore: MemoryStore,
   registry: WorkerRegistry,
   isWorkerSession = false,
+  projectionStore?: ProjectionStore,
+  onTrigger?: WorkerTriggerCallback,
 ): AgentTool<any>[] {
   const dispatchTool: AgentTool<typeof dispatchWorkerSchema> = {
     name: "worker_dispatch",
@@ -548,8 +581,10 @@ export function createWorkerTools(
         modelOverride,
         toolNames,
         memoryStore,
+        projectionStore,
         registry,
         timeoutMs,
+        onTrigger,
       }).catch((err: Error) => {
         console.error(`[worker] ${workerId} spawn failed:`, err.message);
         registry.update(workerId, {
