@@ -157,22 +157,24 @@ export class WhatsAppBridge implements ChannelBridge {
       }
     });
 
-    // Wait for initial connection (or timeout after 30s for QR scanning)
+    // Wait for the connection to open. No timeout — QR scanning + the initial
+    // WhatsApp sync can take a while on a phone. The promise resolves as soon
+    // as the connection is "open", or if the socket closes without ever
+    // connecting (e.g. loggedOut), in which case startup continues anyway
+    // and the reconnect logic takes over.
     await new Promise<void>((resolve) => {
-      const timeout = setTimeout(() => {
-        console.log("[whatsapp] Connection timeout (QR not scanned?). Continuing startup.");
-        resolve();
-      }, 30000);
-
-      const check = () => {
-        if (this.connectionState === "open") {
-          clearTimeout(timeout);
+      const onUpdate = (update: { connection?: string }) => {
+        if (update.connection === "open" || update.connection === "close") {
+          this.socket?.ev.off("connection.update", onUpdate);
           resolve();
-        } else {
-          setTimeout(check, 200);
         }
       };
-      check();
+      // If already open (shouldn't happen on first connect but just in case)
+      if (this.connectionState === "open") {
+        resolve();
+        return;
+      }
+      this.socket!.ev.on("connection.update", onUpdate);
     });
   }
 
