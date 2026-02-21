@@ -8,7 +8,7 @@
  * Model files are stored in `<dataDir>/.models/`.
  */
 
-import { getLlama, resolveModelFile } from "node-llama-cpp";
+import { getLlama, LlamaLogLevel, resolveModelFile } from "node-llama-cpp";
 import type { Llama, LlamaEmbeddingContext, LlamaModel } from "node-llama-cpp";
 
 const EMBEDDING_MODEL_URI =
@@ -33,7 +33,18 @@ async function getEmbeddingContext(modelsDir?: string): Promise<LlamaEmbeddingCo
   }
 
   initPromise = (async () => {
-    const llama = await getLlama({ gpu: "auto" });
+    const llama = await getLlama({
+      gpu: "auto",
+      // Suppress noisy tokenizer metadata warnings from the embedding model GGUF
+      logger(level, message) {
+        if (level === LlamaLogLevel.warn && message.includes("special_eos_id is not in special_eog_ids")) {
+          return;
+        }
+        if (level === LlamaLogLevel.error || level === LlamaLogLevel.fatal) {
+          console.error("[llama]", message);
+        }
+      },
+    });
     llamaInstance = llama;
 
     const modelPath = await resolveModelFile(EMBEDDING_MODEL_URI, {
