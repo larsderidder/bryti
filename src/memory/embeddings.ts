@@ -9,11 +9,13 @@
  */
 
 import { getLlama, resolveModelFile } from "node-llama-cpp";
-import type { LlamaEmbeddingContext } from "node-llama-cpp";
+import type { Llama, LlamaEmbeddingContext, LlamaModel } from "node-llama-cpp";
 
 const EMBEDDING_MODEL_URI =
   "hf:ggml-org/embeddinggemma-300M-GGUF/embeddinggemma-300M-Q8_0.gguf";
 
+let llamaInstance: Llama | null = null;
+let llamaModel: LlamaModel | null = null;
 let embeddingContext: LlamaEmbeddingContext | null = null;
 let initPromise: Promise<LlamaEmbeddingContext> | null = null;
 
@@ -32,6 +34,7 @@ async function getEmbeddingContext(modelsDir?: string): Promise<LlamaEmbeddingCo
 
   initPromise = (async () => {
     const llama = await getLlama({ gpu: "auto" });
+    llamaInstance = llama;
 
     const modelPath = await resolveModelFile(EMBEDDING_MODEL_URI, {
       directory: modelsDir,
@@ -44,6 +47,7 @@ async function getEmbeddingContext(modelsDir?: string): Promise<LlamaEmbeddingCo
     process.stdout.write("\n");
 
     const model = await llama.loadModel({ modelPath });
+    llamaModel = model;
     const ctx = await model.createEmbeddingContext();
 
     embeddingContext = ctx;
@@ -103,4 +107,25 @@ export async function embedBatch(texts: string[], modelsDir?: string): Promise<n
  */
 export async function warmupEmbeddings(modelsDir?: string): Promise<void> {
   await getEmbeddingContext(modelsDir);
+}
+
+/**
+ * Release the embedding context, model, and llama instance.
+ * Call during shutdown so node-llama-cpp's native thread pool exits cleanly
+ * and the Node process doesn't hang waiting for it.
+ */
+export async function disposeEmbeddings(): Promise<void> {
+  if (embeddingContext) {
+    await embeddingContext.dispose();
+    embeddingContext = null;
+  }
+  if (llamaModel) {
+    await llamaModel.dispose();
+    llamaModel = null;
+  }
+  if (llamaInstance) {
+    await llamaInstance.dispose();
+    llamaInstance = null;
+  }
+  initPromise = null;
 }

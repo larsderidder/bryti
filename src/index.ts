@@ -24,7 +24,7 @@ import { Cron } from "croner";
 import { loadConfig, ensureDataDirs, type Config } from "./config.js";
 import { createCoreMemory, type CoreMemory } from "./memory/core-memory.js";
 import { createHistoryManager, type HistoryManager } from "./history.js";
-import { warmupEmbeddings } from "./memory/embeddings.js";
+import { warmupEmbeddings, disposeEmbeddings } from "./memory/embeddings.js";
 import { createTools } from "./tools/index.js";
 import { loadUserSession, repairSessionTranscript, refreshSystemPrompt, promptWithFallback, SILENT_REPLY_TOKEN, type UserSession } from "./agent.js";
 import { TelegramBridge } from "./channels/telegram.js";
@@ -519,6 +519,7 @@ async function startApp(): Promise<RunningApp> {
         console.log(`Disposing session for user ${userId}`);
         userSession.dispose();
       }
+      await disposeEmbeddings();
     },
   };
 }
