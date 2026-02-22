@@ -191,6 +191,25 @@ tools:
 
   workers:
     max_concurrent: 3
+    # Default model for background workers. Falls back to the first
+    # fallback_model, then the primary agent model.
+    # model: "opencode/minimax-m2.5-free"
+
+    # Named worker types. The agent selects a type when dispatching to get
+    # preset defaults for model, tools, and timeout. Explicit parameters on
+    # the dispatch call still override type defaults.
+    # The agent can also define new types by editing this file and restarting.
+    # types:
+    #   research:
+    #     description: "Web research and content gathering"
+    #     model: "opencode/minimax-m2.5-free"
+    #     tools: [web_search, fetch_url]
+    #     timeout_seconds: 3600
+    #   analysis:
+    #     description: "Deep analysis using a stronger model"
+    #     model: "anthropic/claude-sonnet-4-6"
+    #     tools: [fetch_url]
+    #     timeout_seconds: 1800
 
 # ---------------------------------------------------------------------------
 # Integrations (optional)

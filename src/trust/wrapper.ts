@@ -13,10 +13,10 @@ import {
   setPendingApproval,
   getToolCapabilities,
   type TrustStore,
-} from "./trust.js";
+} from "./store.js";
 import { evaluateToolCall, type GuardrailResult } from "./guardrail.js";
-import type { Config } from "./config.js";
-import type { ApprovalResult } from "./channels/types.js";
+import type { Config } from "../config.js";
+import type { ApprovalResult } from "../channels/types.js";
 
 /**
  * Callback for interactive approval requests. Sends a prompt to the user

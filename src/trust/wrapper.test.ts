@@ -8,8 +8,8 @@ import {
   createTrustStore,
   registerToolCapabilities,
   checkPendingApproval,
-} from "./trust.js";
-import { wrapToolWithTrustCheck, wrapToolsWithTrustChecks, type ApprovalCallback } from "./trust-wrapper.js";
+} from "./store.js";
+import { wrapToolWithTrustCheck, wrapToolsWithTrustChecks, type ApprovalCallback } from "./wrapper.js";
 
 let tmpDir: string;
 

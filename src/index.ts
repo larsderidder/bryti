@@ -14,7 +14,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { Cron } from "croner";
+import type { Cron } from "croner";
 import { loadConfig, ensureDataDirs, applyIntegrationEnvVars, type Config } from "./config.js";
 import { createCoreMemory, type CoreMemory } from "./memory/core-memory.js";
 import { createHistoryManager, type HistoryManager } from "./history.js";
@@ -31,8 +31,9 @@ import {
   checkPendingApproval,
   isAlwaysApproval,
   type TrustStore,
-} from "./trust.js";
-import { wrapToolsWithTrustChecks, type TrustWrapperContext } from "./trust-wrapper.js";
+  wrapToolsWithTrustChecks,
+  type TrustWrapperContext,
+} from "./trust/index.js";
 import {
   calculateCostUsd,
   createUsageTracker,
@@ -40,7 +41,13 @@ import {
   type UsageTracker,
 } from "./usage.js";
 import { createAppLogger, installConsoleFileLogging } from "./logger.js";
-import { getUserTimezone } from "./time.js";
+import { handleSlashCommand } from "./commands.js";
+import {
+  writePendingCheckpoint,
+  deletePendingCheckpoint,
+  recoverPendingCheckpoints,
+} from "./crash-recovery.js";
+import { startProactiveCompaction } from "./compaction/proactive.js";
 
 // ---------------------------------------------------------------------------
 // Restart protocol
@@ -68,16 +75,93 @@ function writeRestartMarker(dataDir: string, marker: RestartMarker): void {
   fs.writeFileSync(restartMarkerPath(dataDir), JSON.stringify(marker), "utf8");
 }
 
-function readAndClearRestartMarker(dataDir: string): RestartMarker | null {
+interface RestartMarkerResult {
+  marker: RestartMarker;
+  /** True if config.yml was corrupted and auto-rolled back to the pre-restart snapshot. */
+  configRolledBack: boolean;
+  /** The parse/validation error message if a rollback occurred. */
+  rollbackReason?: string;
+}
+
+function readAndClearRestartMarker(dataDir: string): RestartMarkerResult | null {
   const p = restartMarkerPath(dataDir);
   if (!fs.existsSync(p)) return null;
   try {
     const marker = JSON.parse(fs.readFileSync(p, "utf8")) as RestartMarker;
     fs.rmSync(p, { force: true });
-    return marker;
+    return { marker, configRolledBack: false };
   } catch {
     fs.rmSync(p, { force: true });
     return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Config snapshot / rollback
+//
+// Before restarting with a potentially-modified config.yml, we snapshot the
+// current (known-good) file. On the next startup, if loadConfig() fails, we
+// restore the snapshot and retry so the process comes back up even after a
+// bad config edit. On successful startup the snapshot is deleted.
+// ---------------------------------------------------------------------------
+
+function configSnapshotPath(dataDir: string): string {
+  return path.join(dataDir, "pending", "config.yml.pre-restart");
+}
+
+/**
+ * Snapshot the current config.yml before triggering a restart.
+ * Called only when config.yml exists (successful boot confirms it was valid).
+ */
+function snapshotConfig(dataDir: string): void {
+  const dataDir_ = path.resolve(process.env.BRYTI_DATA_DIR || "./data");
+  // Use the resolved data dir from env, not the one stored in config (same value, but safer).
+  const src = path.join(dataDir_, "config.yml");
+  const dst = configSnapshotPath(dataDir_);
+  if (fs.existsSync(src)) {
+    fs.mkdirSync(path.dirname(dst), { recursive: true });
+    fs.copyFileSync(src, dst);
+    console.log("[config] Snapshotted config.yml for rollback if restart fails.");
+  }
+}
+
+/**
+ * On startup: if loadConfig() throws and a snapshot exists, restore it and
+ * return the error that triggered the rollback. Otherwise rethrow.
+ *
+ * Returns the loaded config (from snapshot or original).
+ * Throws only if loadConfig() fails AND no snapshot is available.
+ */
+function loadConfigWithRollback(): { config: ReturnType<typeof loadConfig>; rolledBack: boolean; rollbackReason?: string } {
+  const dataDir = path.resolve(process.env.BRYTI_DATA_DIR || "./data");
+  try {
+    const config = loadConfig();
+    // Success: delete any leftover snapshot (previous good restart).
+    const snap = configSnapshotPath(dataDir);
+    if (fs.existsSync(snap)) {
+      fs.rmSync(snap, { force: true });
+      console.log("[config] Deleted config snapshot (current config loaded successfully).");
+    }
+    return { config, rolledBack: false };
+  } catch (err) {
+    const snap = configSnapshotPath(dataDir);
+    if (!fs.existsSync(snap)) {
+      // No snapshot to fall back on — propagate the error.
+      throw err;
+    }
+
+    const reason = (err as Error).message;
+    console.warn(`[config] loadConfig() failed: ${reason}`);
+    console.warn("[config] Restoring config.yml from pre-restart snapshot...");
+
+    const cfgPath = path.join(dataDir, "config.yml");
+    fs.copyFileSync(snap, cfgPath);
+    fs.rmSync(snap, { force: true });
+
+    // Retry with the restored config — if this also fails, propagate.
+    const config = loadConfig();
+    console.warn("[config] Rollback successful. Running on previous config.");
+    return { config, rolledBack: true, rollbackReason: reason };
   }
 }
 
@@ -232,200 +316,9 @@ async function getOrLoadSession(state: AppState, msg: IncomingMessage): Promise<
   return userSession;
 }
 
-// ---------------------------------------------------------------------------
-// Crash recovery: pending-message checkpoints
-// ---------------------------------------------------------------------------
 
-interface PendingCheckpoint {
-  text: string;
-  channelId: string;
-  platform: string;
-  timestamp: number;
-}
 
-function pendingDir(config: Config): string {
-  return path.join(config.data_dir, "pending");
-}
 
-function pendingPath(config: Config, userId: string): string {
-  return path.join(pendingDir(config), `${userId}.json`);
-}
-
-function writePendingCheckpoint(config: Config, msg: IncomingMessage): void {
-  const checkpoint: PendingCheckpoint = {
-    text: msg.text,
-    channelId: msg.channelId,
-    platform: msg.platform,
-    timestamp: Date.now(),
-  };
-  try {
-    fs.writeFileSync(pendingPath(config, msg.userId), JSON.stringify(checkpoint), "utf8");
-  } catch (err) {
-    console.warn("[pending] Failed to write checkpoint:", (err as Error).message);
-  }
-}
-
-function deletePendingCheckpoint(config: Config, userId: string): void {
-  try {
-    fs.rmSync(pendingPath(config, userId), { force: true });
-  } catch (err) {
-    console.warn("[pending] Failed to delete checkpoint:", (err as Error).message);
-  }
-}
-
-/**
- * Scan for leftover pending files from a previous crash. Files between
- * 2 min and 1 hour old get a notification; older ones are silently discarded.
- */
-async function recoverPendingCheckpoints(state: AppState): Promise<void> {
-  const dir = pendingDir(state.config);
-  let entries: string[];
-  try {
-    entries = fs.readdirSync(dir).filter((f) => f.endsWith(".json") && f !== "restart.json");
-  } catch {
-    return;
-  }
-
-  if (entries.length === 0) return;
-
-  const now = Date.now();
-  const MIN_AGE_MS = 2 * 60 * 1000;   // 2 minutes: ignore files written moments before a clean restart
-  const MAX_AGE_MS = 60 * 60 * 1000;  // 1 hour: too stale to be useful
-
-  // Group by userId (filename = <userId>.json), keep most recent per user
-  const byUser = new Map<string, { checkpoint: PendingCheckpoint; filePath: string }>();
-
-  for (const entry of entries) {
-    const filePath = path.join(dir, entry);
-    let checkpoint: PendingCheckpoint;
-    try {
-      checkpoint = JSON.parse(fs.readFileSync(filePath, "utf8")) as PendingCheckpoint;
-    } catch {
-      fs.rmSync(filePath, { force: true });
-      continue;
-    }
-
-    const userId = entry.slice(0, -5); // strip .json
-    const existing = byUser.get(userId);
-    if (!existing || checkpoint.timestamp > existing.checkpoint.timestamp) {
-      byUser.set(userId, { checkpoint, filePath });
-    }
-  }
-
-  for (const [userId, { checkpoint, filePath }] of byUser) {
-    const age = now - checkpoint.timestamp;
-
-    // Always delete the file first to prevent repeat notifications on the next restart
-    try {
-      fs.rmSync(filePath, { force: true });
-    } catch {
-      // ignore
-    }
-
-    if (age < MIN_AGE_MS || age > MAX_AGE_MS) {
-      console.log(`[pending] Skipping stale checkpoint for ${userId} (age ${Math.round(age / 1000)}s)`);
-      continue;
-    }
-
-    console.log(`[pending] Crash recovery: notifying ${userId} (age ${Math.round(age / 1000)}s)`);
-    try {
-      const bridge = getBridge(state, checkpoint.platform);
-      await bridge.sendMessage(
-        checkpoint.channelId,
-        "Sorry, I crashed while working on your last message. Could you resend it?",
-      );
-    } catch (err) {
-      console.warn(`[pending] Failed to notify ${userId}:`, (err as Error).message);
-    }
-  }
-}
-
-// ---------------------------------------------------------------------------
-// /log — recent activity audit
-// ---------------------------------------------------------------------------
-
-/**
- * Human-readable labels for the /log output. Tool names never leak to the user.
- */
-const TOOL_DESCRIPTIONS: Record<string, string> = {
-  memory_archival_search: "Searched memory",
-  memory_archival_insert: "Saved a memory",
-  memory_core_append: "Updated core memory",
-  memory_core_replace: "Updated core memory",
-  memory_conversation_search: "Searched conversation history",
-  projection_create: "Set a reminder",
-  projection_resolve: "Resolved a reminder",
-  projection_list: "Checked upcoming reminders",
-  projection_link: "Linked memory to a reminder",
-  worker_dispatch: "Started background research",
-  worker_check: "Checked background task",
-  worker_interrupt: "Cancelled a background task",
-  worker_steer: "Adjusted a background task",
-  file_read: "Read a file",
-  file_write: "Wrote a file",
-  file_list: "Listed files",
-};
-
-interface ToolCallLogEntry {
-  timestamp: string;
-  userId: string;
-  toolName: string;
-  args_summary: string;
-}
-
-/**
- * Build a human-readable activity summary from the tool call log.
- */
-function buildActivityLog(dataDir: string, userId: string, timezone: string): string {
-  const logPath = path.join(dataDir, "logs", "tool-calls.jsonl");
-
-  if (!fs.existsSync(logPath)) {
-    return "No recent activity on record yet.";
-  }
-
-  let entries: ToolCallLogEntry[];
-  try {
-    const raw = fs.readFileSync(logPath, "utf-8");
-    entries = raw
-      .split("\n")
-      .filter((line) => line.trim())
-      .map((line) => {
-        try {
-          return JSON.parse(line) as ToolCallLogEntry;
-        } catch {
-          return null;
-        }
-      })
-      .filter((entry): entry is ToolCallLogEntry => entry !== null);
-  } catch {
-    return "Could not read the activity log.";
-  }
-
-  // Filter to this user, take the last 20 entries
-  const userEntries = entries
-    .filter((e) => e.userId === userId)
-    .slice(-20);
-
-  if (userEntries.length === 0) {
-    return "No recent activity on record yet.";
-  }
-
-  const lines = userEntries.map((entry) => {
-    const ts = new Date(entry.timestamp);
-    const time = ts.toLocaleString("sv-SE", {
-      timeZone: timezone,
-      hour: "2-digit",
-      minute: "2-digit",
-      hour12: false,
-    });
-
-    const description = TOOL_DESCRIPTIONS[entry.toolName] ?? "Ran a task";
-    const detail = entry.args_summary ? `: ${entry.args_summary}` : "";
-    return `- ${time}  ${description}${detail}`;
-  });
-
-  return `Recent activity:\n${lines.join("\n")}`;
-}
 
 /**
  * Write a restart marker and exit with code 42 (intentional restart).
@@ -437,6 +330,9 @@ async function triggerRestart(
 ): Promise<void> {
   console.log(`[restart] Requested by user ${msg.userId}: ${reason}`);
   deletePendingCheckpoint(state.config, msg.userId);
+  // Snapshot current config.yml before restarting so we can roll back if the
+  // agent left it in a broken state.
+  snapshotConfig(state.config.data_dir);
   writeRestartMarker(state.config.data_dir, {
     userId: msg.userId,
     channelId: msg.channelId,
@@ -457,45 +353,29 @@ async function processMessage(
   state: AppState,
   msg: IncomingMessage,
 ): Promise<void> {
-  // Special commands handled before touching the agent
-  if (msg.text === "/clear") {
-    // Clear the JSONL audit log and dispose the in-memory session so the next
-    // message starts fresh (a new session file will be created).
-    await state.historyManager.clear();
-    const existing = state.sessions.get(msg.userId);
-    if (existing) {
-      existing.dispose();
-      state.sessions.delete(msg.userId);
-      // Delete the session directory so the next message creates a fresh session
-      if (fs.existsSync(existing.sessionDir)) {
-        fs.rmSync(existing.sessionDir, { recursive: true, force: true });
+  // Handle slash commands first
+  const wasCommand = await handleSlashCommand(msg, {
+    config: state.config,
+    coreMemory: state.coreMemory,
+    historyManager: state.historyManager,
+    disposeSession: (userId: string) => {
+      const existing = state.sessions.get(userId);
+      if (existing) {
+        existing.dispose();
+        state.sessions.delete(userId);
+        // Delete the session directory so the next message creates a fresh session
+        if (fs.existsSync(existing.sessionDir)) {
+          fs.rmSync(existing.sessionDir, { recursive: true, force: true });
+        }
       }
-    }
-    await getBridge(state, msg.platform).sendMessage(msg.channelId, "Conversation history cleared.");
-    return;
-  }
+    },
+    sendMessage: (channelId: string, text: string) =>
+      getBridge(state, msg.platform).sendMessage(channelId, text),
+    triggerRestart: (msg: IncomingMessage, reason: string) =>
+      triggerRestart(state, msg, reason),
+  });
 
-  if (msg.text === "/memory") {
-    const memory = state.coreMemory.read();
-    if (memory) {
-      await getBridge(state, msg.platform).sendMessage(msg.channelId, `Your core memory:\n\n${memory}`);
-    } else {
-      await getBridge(state, msg.platform).sendMessage(
-        msg.channelId,
-        "Your core memory is empty. I haven't saved anything yet.",
-      );
-    }
-    return;
-  }
-
-  if (msg.text === "/log") {
-    const logText = buildActivityLog(state.config.data_dir, msg.userId, getUserTimezone(state.config));
-    await getBridge(state, msg.platform).sendMessage(msg.channelId, logText);
-    return;
-  }
-
-  if (msg.text === "/restart") {
-    await triggerRestart(state, msg, "user command");
+  if (wasCommand) {
     return;
   }
 
@@ -666,7 +546,7 @@ async function processMessage(
  * Start one app instance.
  */
 async function startApp(): Promise<RunningApp> {
-  const config = loadConfig();
+  const { config, rolledBack, rollbackReason } = loadConfigWithRollback();
   applyIntegrationEnvVars(config);
   ensureDataDirs(config);
   installConsoleFileLogging(createAppLogger(config.data_dir));
@@ -749,97 +629,39 @@ async function startApp(): Promise<RunningApp> {
   scheduler.start();
   state.scheduler = scheduler;
 
-  // -----------------------------------------------------------------------
-  // Proactive compaction: idle and nightly
-  //
-  // Pi SDK auto-compacts when the context fills, but that's mid-conversation
-  // and adds latency. Proactive compaction runs during quiet periods instead.
-  // -----------------------------------------------------------------------
-
-  const IDLE_THRESHOLD_MS = 30 * 60 * 1000; // 30 minutes
-  const compactionJobs: Cron[] = [];
-
-  /**
-   * Try to compact a session. Skips if already in progress or if the session
-   * is too small to bother with.
-   */
-  const IDLE_CONTEXT_THRESHOLD = 30; // percent of context window
-
-  async function tryCompact(userSession: UserSession, reason: string): Promise<void> {
-    const { session, userId } = userSession;
-    if (session.isCompacting) return;
-
-    // Don't compact tiny sessions (system + a couple messages)
-    const messageCount = session.messages.length;
-    if (messageCount < 6) return;
-
-    // Idle compaction: only when context is above threshold. No point compacting
-    // a mostly-empty context just because the user stepped away.
-    // Nightly compaction always runs (fresh start for the morning).
-    if (reason !== "nightly") {
-      const usage = session.getContextUsage();
-      const percent = usage?.percent ?? 0;
-      if (percent < IDLE_CONTEXT_THRESHOLD) {
-        return;
-      }
-    }
-
-    console.log(`[compaction] proactive ${reason} for user ${userId} (${messageCount} messages)`);
-    try {
-      const reasonHint = reason === "nightly"
-        ? "This is a nightly compaction. The user is asleep. " +
-          "Summarize the entire day's conversation into a concise recap. " +
-          "Tomorrow's session should start clean with full context of what happened today."
-        : "The user has been inactive for a while and may return to continue. " +
-          "Summarize completed topics but preserve the thread of any ongoing discussion.";
-
-      await session.compact(
-        `${reasonHint} ` +
-        "This is a personal assistant conversation. " +
-        "Preserve: user preferences, commitments and promises made, ongoing tasks, " +
-        "facts learned about the user, decisions made, and any context the user would " +
-        "expect the assistant to remember. " +
-        "Discard: verbose tool outputs, raw search results, intermediate reasoning, " +
-        "and conversational filler.",
-      );
-      console.log(`[compaction] proactive ${reason} done for user ${userId}`);
-    } catch (err) {
-      console.error(`[compaction] proactive ${reason} failed for user ${userId}:`, (err as Error).message);
-    }
-  }
-
-  // Check every 10 minutes: compact sessions idle for 30+ minutes
-  const idleCheck = new Cron("*/10 * * * *", { timezone: "UTC" }, () => {
-    const now = Date.now();
-    for (const [_userId, userSession] of state.sessions) {
-      const idleMs = now - userSession.lastUserMessageAt;
-      if (idleMs >= IDLE_THRESHOLD_MS) {
-        tryCompact(userSession, "idle").catch(() => {});
-      }
-    }
-  });
-  compactionJobs.push(idleCheck);
-
-  // Nightly compaction at 03:00 user timezone (all sessions)
-  const tz = getUserTimezone(config);
-  const nightlyCompact = new Cron("0 3 * * *", { timezone: tz }, () => {
-    for (const [_userId, userSession] of state.sessions) {
-      tryCompact(userSession, "nightly").catch(() => {});
-    }
-  });
-  compactionJobs.push(nightlyCompact);
-
-  console.log(`Proactive compaction: idle check every 10 min (threshold: 30 min), nightly at 03:00 ${tz}`);
+  // Start proactive compaction (idle + nightly)
+  const compactionJobs = startProactiveCompaction(config, () => state.sessions);
 
   // Recover any pending messages from a previous crash
-  await recoverPendingCheckpoints(state);
+  await recoverPendingCheckpoints(config, async (checkpoint, userId) => {
+    const bridge = getBridge(state, checkpoint.platform);
+    await bridge.sendMessage(
+      checkpoint.channelId,
+      "Sorry, I crashed while working on your last message. Could you resend it?",
+    );
+  });
 
-  // If this startup was triggered by a restart request, notify the user
-  const restartMarker = readAndClearRestartMarker(config.data_dir);
-  if (restartMarker) {
-    console.log(`[restart] Back online after restart requested by ${restartMarker.userId}: ${restartMarker.reason}`);
-    const bridge = bridges.find((b) => b.platform === restartMarker.platform) ?? bridges[0];
-    await bridge.sendMessage(restartMarker.channelId, "Back online.");
+  // If this startup was triggered by a restart request, notify the user.
+  // If config.yml was rolled back due to a bad edit, include a warning.
+  const restartResult = readAndClearRestartMarker(config.data_dir);
+  if (restartResult) {
+    const { marker } = restartResult;
+    console.log(`[restart] Back online after restart requested by ${marker.userId}: ${marker.reason}`);
+    const bridge = bridges.find((b) => b.platform === marker.platform) ?? bridges[0];
+
+    if (rolledBack) {
+      console.warn(`[config] Config was rolled back due to: ${rollbackReason}`);
+      await bridge.sendMessage(
+        marker.channelId,
+        `Back online, but your config.yml change was invalid and has been rolled back.\n\nError: ${rollbackReason}\n\nThe previous working config is still active.`,
+      );
+    } else {
+      await bridge.sendMessage(marker.channelId, "Back online.");
+    }
+  } else if (rolledBack) {
+    // Rare: a snapshot existed but there was no restart marker (e.g. previous crash).
+    // Log a warning but don't notify — we don't know which channel to use.
+    console.warn(`[config] Config rolled back from snapshot (no restart marker). Reason: ${rollbackReason}`);
   }
 
   console.log("Bryti ready!");

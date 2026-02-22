@@ -15,7 +15,7 @@ import Database from "better-sqlite3";
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
-import { cosineSimilarity } from "../math.js";
+import { cosineSimilarity } from "../util/math.js";
 
 // ---------------------------------------------------------------------------
 // Types

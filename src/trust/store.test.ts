@@ -10,7 +10,7 @@ import {
   setPendingApproval,
   checkPendingApproval,
   isAlwaysApproval,
-} from "./trust.js";
+} from "./store.js";
 
 let tmpDir: string;
 

@@ -34,6 +34,17 @@ export interface ModelEntry {
   compat?: Record<string, unknown>;
 }
 
+export interface WorkerTypeConfig {
+  /** Description shown in the system prompt so the agent knows when to use this type. */
+  description?: string;
+  /** Model override for this worker type. */
+  model?: string;
+  /** Tools available to this worker type. Default: ["web_search", "fetch_url"]. */
+  tools?: string[];
+  /** Timeout in seconds. Default: 3600. */
+  timeout_seconds?: number;
+}
+
 export interface CronJob {
   schedule: string;
   message: string;
@@ -83,6 +94,12 @@ export interface Config {
     workers: {
       /** Maximum number of workers that may run concurrently. Default: 3. */
       max_concurrent: number;
+      /** Default model for workers. Falls back to first fallback model, then primary. */
+      model?: string;
+      /** Named worker types with preset defaults. The agent can select a type
+       *  when dispatching to get its model, tools, and timeout without
+       *  specifying them individually. */
+      types?: Record<string, WorkerTypeConfig>;
     };
   };
   /**

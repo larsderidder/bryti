@@ -15,8 +15,8 @@
  */
 
 import { completeSimple } from "@mariozechner/pi-ai";
-import type { Config } from "./config.js";
-import { createModelInfra, resolveFirstModel, type ModelInfra } from "./model-infra.js";
+import type { Config } from "../config.js";
+import { createModelInfra, resolveFirstModel, type ModelInfra } from "../model-infra.js";
 
 // ---------------------------------------------------------------------------
 // Types

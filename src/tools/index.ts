@@ -19,7 +19,7 @@ import path from "node:path";
 import type { Config } from "../config.js";
 import type { CoreMemory } from "../memory/core-memory.js";
 import type { WorkerTriggerCallback } from "../workers/tools.js";
-import { registerToolCapabilities } from "../trust.js";
+import { registerToolCapabilities } from "../trust/index.js";
 
 /** Callback invoked when the agent requests a restart. */
 export type RestartCallback = (reason: string) => Promise<void>;

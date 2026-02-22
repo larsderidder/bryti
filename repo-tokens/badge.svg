@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="333" height="20">
-  <title>codebase size: 88.5k tokens · 44.2% of 200k ctx</title>
+  <title>codebase size: 91.9k tokens · 46.0% of 200k ctx</title>
   <linearGradient id="s" x2="0" y2="100%">
     <stop offset="0" stop-color="#bbb" stop-opacity=".1"/>
     <stop offset="1" stop-opacity=".1"/>
@@ -11,7 +11,7 @@
   <g fill="#fff" text-anchor="middle" font-family="DejaVu Sans,Verdana,Geneva,sans-serif" font-size="11">
     <text x="52.5" y="15" fill="#010101" fill-opacity=".3">codebase size</text>
     <text x="52.5" y="14">codebase size</text>
-    <text x="219" y="15" fill="#010101" fill-opacity=".3">88.5k tokens · 44.2% of 200k ctx</text>
-    <text x="219" y="14">88.5k tokens · 44.2% of 200k ctx</text>
+    <text x="219" y="15" fill="#010101" fill-opacity=".3">91.9k tokens · 46.0% of 200k ctx</text>
+    <text x="219" y="14">91.9k tokens · 46.0% of 200k ctx</text>
   </g>
 </svg>
