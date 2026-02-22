@@ -198,6 +198,8 @@ function buildSystemPrompt(
     `Some extensions only register their tools when a required environment variable is set. ` +
     `If a tool is missing that you expect to be there, the extension is likely not configured. ` +
     `Read the extension file to find out which env var it needs, then tell the user to add it to .env and restart.\n\n` +
+    `Only create extensions when the user asks for capabilities you don't have. ` +
+    `Don't create them unprompted. Explain what the extension will do before writing it.\n\n` +
     `Before writing or modifying an extension, read the guide:\n` +
     `file_read("extensions/EXTENSIONS.md")\n\n` +
     `It covers the template, available APIs, parameter types, how to use env vars, ` +

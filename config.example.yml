@@ -5,24 +5,49 @@
 agent:
   name: "Bryti"
 
-  # Your additions to the system prompt. This is where you tell the agent who
-  # you are, how you want it to behave, and what it should know about your life.
-  # The framework adds memory, tool docs, and all other sections automatically.
-  # This part is yours.
+  # System prompt. Memory contents, tool listings, extensions, and projections
+  # are injected automatically; this is the behavioral core. Personal details
+  # about you are best shared in conversation; the agent stores them in core
+  # memory and keeps them across sessions.
   system_prompt: |
-    You are Bryti, a personal AI assistant.
+    You are Bryti, a personal AI assistant. You run on the pi agent framework
+    with persistent memory and tool-calling capabilities. You are concise,
+    practical, and honest about what you can and cannot do.
 
-    About me:
-    - My name is [Your Name]. I live in [City/Country].
-    - I work as [your role] at [company/org].
-    - My main projects right now: [list a few].
+    ## Your memory
+    Your core memory (shown below) persists across conversations. Update it when
+    you learn something worth keeping: user preferences, facts, ongoing projects,
+    recurring topics. Do this proactively without telling the user unless asked.
 
-    How I want you to work:
-    - Be direct. Don't pad responses with filler.
-    - When I ask you to remember something, actually store it. Don't just say "noted."
-    - If you're unsure about something, say so. Don't guess and present it as fact.
-    - Proactively remind me of things I've told you about, when relevant.
-    - When researching something, give me a summary first, then ask if I want details.
+    Archival memory is for details that don't need to be always visible but should
+    be searchable later.
+
+    ## Projection memory
+    Projections are your forward-looking memory. Store anything about the
+    future: appointments, deadlines, plans, reminders, commitments. Your
+    current projections are shown below; use `projection_list` to see more.
+
+    Guidelines:
+    - Store ALL items, even far-future ones. If unsure about timing, use
+      resolution "month" or "someday"
+    - Connect new information to existing projections when you see a link
+    - When the user postpones a discussion, create a separate projection for
+      each distinct topic being deferred
+    - ALWAYS populate the context field with keywords to search archival
+      memory with and a brief description of why this matters
+    - Before creating a projection, search archival memory first to find
+      existing relevant context. Note key terms in the context field so you
+      can find them again at activation time
+    - If you just discussed something worth projecting, archive the key
+      points first, then create the projection referencing what you archived
+    - When a projection activates, search archival memory for related context
+      before responding. Projections are the "what" and "when"; archival
+      memory holds the "why"
+
+    ## What you cannot do
+    - You cannot modify your own source code or core configuration
+    - You cannot access the internet directly. Use worker_dispatch for any
+      web research.
 
   # Primary model. Format: provider/model-id
   # Option 1: Anthropic OAuth (Claude Pro/Max subscription, no API key needed)
@@ -42,7 +67,7 @@ agent:
   # reflection_model: "opencode/minimax-m2.5-free"
 
 # ---------------------------------------------------------------------------
-# Channels — enable at least one
+# Channels (enable at least one)
 # ---------------------------------------------------------------------------
 
 telegram:
@@ -65,7 +90,7 @@ models:
     # Defaults: 200K context, 32K output. Only set them when a model differs.
     # Only list the models you actually use in agent.model / fallback_models.
 
-    # Anthropic OAuth — uses your Claude Pro or Max subscription.
+    # Anthropic OAuth: uses your Claude Pro or Max subscription.
     # No api_key needed; bryti reads the OAuth token from ~/.pi/agent/auth.json.
     # One-time setup: install pi (`npm i -g @mariozechner/pi-coding-agent`)
     # and run `pi login anthropic`. Opens a browser, token is stored locally.
@@ -94,6 +119,7 @@ models:
         - id: "kimi-k2.5-free"
           name: "Kimi K2.5 (Free)"
           api: openai-completions
+          context_window: 128000
           max_tokens: 32000
           compat:
             maxTokensField: max_tokens
@@ -109,7 +135,7 @@ models:
     #       context_window: 200000
     #       max_tokens: 64000
 
-    # OpenRouter — access 200+ models with one API key
+    # OpenRouter: access 200+ models with one API key
     # - name: openrouter
     #   base_url: https://openrouter.ai/api/v1
     #   api_key: ${OPENROUTER_API_KEY}
@@ -150,11 +176,11 @@ tools:
   # If both are set, Brave takes priority.
   # If neither is set, web search is disabled for workers.
   web_search:
-    # Option A: Brave Search API — free tier 2000 queries/month, no self-hosting.
+    # Option A: Brave Search API. Free tier: 2000 queries/month, no self-hosting.
     #           Get a key at https://api.search.brave.com/
     # brave_api_key: "${BRAVE_API_KEY}"
 
-    # Option B: SearXNG — self-hosted or public instance, no API key needed.
+    # Option B: SearXNG. Self-hosted or public instance, no API key needed.
     searxng_url: "https://searx.be"
 
   # fetch_url:
@@ -212,7 +238,7 @@ cron: []
 #     - weather_weert
 
 # ---------------------------------------------------------------------------
-# Active hours (optional — limits when the scheduler can send messages)
+# Active hours (optional; limits when the scheduler can send messages)
 # ---------------------------------------------------------------------------
 
 # active_hours:
