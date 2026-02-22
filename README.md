@@ -1,5 +1,10 @@
 # Bryti
 
+[![CI](https://github.com/larsderidder/bryti/actions/workflows/ci.yml/badge.svg)](https://github.com/larsderidder/bryti/actions/workflows/ci.yml)
+[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
+[![Node](https://img.shields.io/badge/node-%3E%3D22-brightgreen.svg)](https://nodejs.org)
+![Codebase tokens](repo-tokens/badge.svg)
+
 Your AI colleague, in the apps you already use.
 
 Bryti is a personal AI agent that lives in Telegram and WhatsApp (Discord and Slack next). It remembers everything, anticipates what you need, runs background research, and gets better at helping you over time by writing its own tools.
