@@ -1,12 +1,12 @@
 /**
  * WhatsApp bridge using baileys.
  *
- * Implements ChannelBridge for WhatsApp DMs.
- * QR code auth on first run, then persistent multi-file auth state.
- * Auto-reconnects on disconnect with exponential backoff.
+ * ChannelBridge for WhatsApp DMs. QR code auth on first run, persistent
+ * multi-file auth state after that. Auto-reconnects on disconnect with
+ * exponential backoff up to 10 attempts.
  *
- * Formatting: WhatsApp supports *bold*, _italic_, ~strikethrough~, ```code```.
- * We convert basic markdown patterns. No HTML support.
+ * WhatsApp supports *bold*, _italic_, ~strikethrough~, and ```code```.
+ * We convert basic markdown patterns; no HTML.
  */
 
 import makeWASocket, {
@@ -301,11 +301,8 @@ export class WhatsAppBridge implements ChannelBridge {
 // ---------------------------------------------------------------------------
 
 /**
- * Convert markdown-ish text to WhatsApp formatting.
- *
- * WhatsApp supports: *bold*, _italic_, ~strikethrough~, ```code```, `inline code`
- * We do minimal conversion since the LLM output is already close to what
- * WhatsApp expects.
+ * Convert markdown to WhatsApp formatting. Minimal conversion since LLM
+ * output is already close to what WhatsApp expects.
  */
 function formatForWhatsApp(text: string): string {
   let result = text;

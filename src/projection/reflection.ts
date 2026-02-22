@@ -1,21 +1,15 @@
 /**
  * Projection reflection pass.
  *
- * A lightweight background job that scans recent conversation history and
- * extracts future references the agent missed during the live conversation.
+ * Lightweight background job that scans recent conversation history for
+ * future references the agent missed during live chat.
  *
- * Design:
- * - Runs every 30 minutes via cron.
- * - Reads the JSONL audit log for the last windowMinutes of conversation.
- * - Makes a single SDK completion call (no agent loop, no tools, no session
- *   history) with a narrow extraction prompt.
- * - Uses the pi SDK's ModelRegistry + completeSimple so all providers work:
- *   Anthropic, OpenAI, OAuth tokens, etc. No raw fetch.
- * - Parses the JSON output and writes projections directly to SQLite.
- * - Tracks last-reflection timestamp per user in the same SQLite DB to
- *   avoid re-processing unchanged transcripts.
- * - Idempotent: current pending projections are included in the prompt so
- *   the model won't re-create items that are already stored.
+ * Runs every 30 min via cron. Reads the JSONL audit log, makes a single
+ * completeSimple() call with a narrow extraction prompt (no agent loop,
+ * no tools), parses the JSON output, and writes projections directly to
+ * SQLite. Existing pending projections are included in the prompt so the
+ * model won't duplicate them. A per-user timestamp tracks the last run
+ * to skip unchanged transcripts.
  */
 
 import fs from "node:fs";
@@ -71,9 +65,8 @@ interface HistoryEntry {
 }
 
 /**
- * Read user+assistant messages from the JSONL audit log written in the last
- * windowMinutes minutes. Returns them in chronological order, capped at
- * maxMessages most-recent turns.
+ * Read user+assistant messages from the JSONL audit log for the last
+ * windowMinutes. Returns chronological order, capped at maxMessages.
  */
 export function readRecentHistory(
   historyDir: string,
@@ -127,8 +120,7 @@ export function readRecentHistory(
 // ---------------------------------------------------------------------------
 
 /**
- * Read/write the last reflection timestamp from a small metadata table in
- * the user's memory.db. Returns null if never reflected.
+ * Read/write the last reflection timestamp from a metadata table in memory.db.
  */
 function getLastReflectionTimestamp(db: Database.Database): string | null {
   db.exec(`
@@ -157,15 +149,9 @@ interface CompletionMessage {
 }
 
 /**
- * Make a single chat completion call via the pi SDK's provider layer.
- *
- * Uses the shared model infrastructure so all providers work: Anthropic
- * (direct or OAuth), OpenAI, opencode, etc. No raw fetch, no manual API
- * key wiring.
- *
- * The model is resolved from config.agent.reflection_model first, then
- * config.agent.model, then the first available fallback. This lets operators
- * use a cheaper model for reflection without affecting the main agent.
+ * Single chat completion via the pi SDK provider layer. Uses reflection_model
+ * if configured, otherwise falls back to the primary model and then the
+ * fallback chain. This lets operators use a cheaper model for reflection.
  */
 export async function sdkComplete(
   config: Config,
@@ -288,13 +274,8 @@ export function parseReflectionOutput(raw: string): ReflectionOutput {
 // ---------------------------------------------------------------------------
 
 /**
- * Run one reflection pass for a user.
- *
- * @param config        App config (for model, data_dir, timezone).
- * @param userId        User to reflect for.
- * @param windowMinutes How far back to look in the conversation history.
- * @param store         Optional pre-opened projection store (for testing).
- * @param completeFn    Optional override for the LLM completion call (for testing).
+ * Run one reflection pass for a user. Reads recent conversation, extracts
+ * future references via LLM, and writes new projections to the store.
  */
 export async function runReflection(
   config: Config,

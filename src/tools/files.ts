@@ -1,8 +1,6 @@
 /**
- * Sandboxed file read/write/list tools.
- *
- * Operates within the user's /data/files/ directory.
- * Path traversal protection: resolve and verify under base_dir.
+ * Sandboxed file read/write/list tools. Operates within data/files/ with
+ * path traversal protection (resolve and verify under base_dir).
  */
 
 import fs from "node:fs";

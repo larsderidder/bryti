@@ -1,12 +1,7 @@
 /**
- * Memory store using SQLite with FTS5 (keyword search).
- *
- * Per-user database with:
- * - facts table: id, content, source, timestamp, hash
- * - facts_fts FTS5 virtual table: keyword search over facts.content
- * - fact_embeddings table: stores embeddings as binary Float32Array blobs
- *
- * Vector search is implemented manually using cosine similarity.
+ * Per-user memory store backed by SQLite with FTS5 for keyword search and
+ * binary Float32Array blobs for embeddings. Vector search runs in-memory
+ * via cosine similarity.
  */
 
 import Database from "better-sqlite3";

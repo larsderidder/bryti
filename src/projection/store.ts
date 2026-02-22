@@ -1,27 +1,14 @@
 /**
  * Projection store: SQLite-backed storage for forward-looking agent memory.
  *
- * Stores future events, plans, and commitments. Projections are temporal:
- * they have a resolution (exact/day/week/month/someday) and a lifecycle
- * (pending -> done/cancelled/passed).
+ * Stores future events, plans, and commitments with a resolution
+ * (exact/day/week/month/someday) and lifecycle (pending -> done/cancelled/passed).
  *
- * Uses the same per-user database as archival memory (memory.db) but its
- * own table. No imports from the memory layer.
+ * Lives in the same per-user memory.db as archival memory, its own table.
  *
- * Schema:
- *   id            - UUID primary key
- *   summary       - one-line description of the event/expectation
- *   raw_when      - what the user said ("tomorrow at 10", "next week")
- *   resolved_when - ISO datetime or date the agent resolved raw_when to
- *   resolution    - granularity: exact | day | week | month | someday
- *   recurrence    - cron expression for repeating events, or null for one-off
- *   context       - optional free-text context (linked events, notes)
- *   linked_ids    - JSON array of related projection ids
- *   status        - pending | done | cancelled | passed
- *   created_at    - ISO datetime
- *   resolved_at   - ISO datetime when status changed from pending
- *   trigger_on_fact - keyword/phrase that activates this projection when a matching
- *                     fact is archived, or null for time-driven projections
+ * Key columns: summary, raw_when (what the user said), resolved_when (ISO
+ * datetime), resolution, recurrence (cron), trigger_on_fact (keyword trigger),
+ * status, and dependencies (separate table for DAG relationships).
  */
 
 import Database from "better-sqlite3";
@@ -220,7 +207,7 @@ function rowToDependency(row: ProjectionDependencyRow): ProjectionDependency {
 // ---------------------------------------------------------------------------
 
 /**
- * Open (or create) the per-user projection store in the same DB file as
+ * Open (or create) the per-user projection store. Shares memory.db with
  * archival memory.
  */
 export function createProjectionStore(userId: string, dataDir: string): ProjectionStore {

@@ -1,21 +1,15 @@
 /**
  * Bryti entry point.
  *
- * Wires together:
- * - Config loading
- * - Pi agent sessions (persistent, one per user)
- * - Telegram bridge
- * - Cron scheduler
- * - Message queue (FIFO, per channel, with merge)
+ * Wires config, persistent pi sessions (one per user), channel bridges
+ * (Telegram, WhatsApp), cron scheduler, and the message queue together.
  *
- * Flow:
- * 1. Load config
- * 2. Ensure data directories exist
- * 3. Warm up embedding model
- * 4. Start Telegram bridge
- * 5. Start cron scheduler
- * 6. On message: load (or reuse) the user's persistent session, repair
- *    transcript, prompt, persist response to JSONL audit log
+ * Startup: load config, ensure data dirs, warm up embedding model, start
+ * bridges, start scheduler, begin processing messages.
+ *
+ * Each message: load (or reuse) the user's persistent session, run
+ * transcript repair, prompt the model with fallback, persist the
+ * response to the JSONL audit log.
  */
 
 import fs from "node:fs";
@@ -51,11 +45,9 @@ import { getUserTimezone } from "./time.js";
 // ---------------------------------------------------------------------------
 // Restart protocol
 //
-// Exit code 42 signals an intentional restart to run.sh, which loops
-// immediately without delay (as opposed to crash restarts which delay).
-//
-// A small marker file records who triggered the restart and on which channel,
-// so the "Back online" notification can be sent to the right user on startup.
+// Exit code 42 tells run.sh this was intentional, so it loops immediately
+// without delay. A marker file records who triggered the restart and which
+// channel they're on, so the "Back online" message goes to the right place.
 // ---------------------------------------------------------------------------
 
 export const RESTART_EXIT_CODE = 42;
@@ -155,8 +147,7 @@ function modelNameForLog(
 }
 
 /**
- * Find the bridge that handles a given platform (or the first available bridge
- * as fallback for scheduler-injected messages).
+ * Find the bridge for a platform, falling back to the first available one.
  */
 function getBridge(state: AppState, platform?: string): ChannelBridge {
   if (platform) {
@@ -283,9 +274,8 @@ function deletePendingCheckpoint(config: Config, userId: string): void {
 }
 
 /**
- * On startup, scan for leftover pending files from a previous crash.
- * For each stale file (between 2 min and 1 hour old), notify the user.
- * Files older than 1 hour are silently discarded.
+ * Scan for leftover pending files from a previous crash. Files between
+ * 2 min and 1 hour old get a notification; older ones are silently discarded.
  */
 async function recoverPendingCheckpoints(state: AppState): Promise<void> {
   const dir = pendingDir(state.config);
@@ -355,8 +345,7 @@ async function recoverPendingCheckpoints(state: AppState): Promise<void> {
 // ---------------------------------------------------------------------------
 
 /**
- * Maps internal tool names to human-readable descriptions for the /log output.
- * Follows the same "never leak tool names" rule used elsewhere in the system.
+ * Human-readable labels for the /log output. Tool names never leak to the user.
  */
 const TOOL_DESCRIPTIONS: Record<string, string> = {
   memory_archival_search: "Searched memory",
@@ -385,8 +374,7 @@ interface ToolCallLogEntry {
 }
 
 /**
- * Read the tool call log, filter to the given user, and format a
- * human-readable activity summary for display.
+ * Build a human-readable activity summary from the tool call log.
  */
 function buildActivityLog(dataDir: string, userId: string, timezone: string): string {
   const logPath = path.join(dataDir, "logs", "tool-calls.jsonl");
@@ -440,11 +428,7 @@ function buildActivityLog(dataDir: string, userId: string, timezone: string): st
 }
 
 /**
- * Write a restart marker and exit with code 42.
- *
- * run.sh treats exit 42 as an intentional restart: it loops immediately
- * without delay or error logging. On next startup, the marker is read and
- * a "Back online" message is sent to the user who triggered the restart.
+ * Write a restart marker and exit with code 42 (intentional restart).
  */
 async function triggerRestart(
   state: AppState,
@@ -768,17 +752,16 @@ async function startApp(): Promise<RunningApp> {
   // -----------------------------------------------------------------------
   // Proactive compaction: idle and nightly
   //
-  // Pi SDK auto-compacts when the context window fills, but that's the worst
-  // time (mid-conversation, adds latency). Proactive compaction keeps context
-  // lean during quiet periods.
+  // Pi SDK auto-compacts when the context fills, but that's mid-conversation
+  // and adds latency. Proactive compaction runs during quiet periods instead.
   // -----------------------------------------------------------------------
 
   const IDLE_THRESHOLD_MS = 30 * 60 * 1000; // 30 minutes
   const compactionJobs: Cron[] = [];
 
   /**
-   * Try to compact a session. Skips if already compacting or if there are
-   * very few messages (not worth compacting).
+   * Try to compact a session. Skips if already in progress or if the session
+   * is too small to bother with.
    */
   const IDLE_CONTEXT_THRESHOLD = 30; // percent of context window
 

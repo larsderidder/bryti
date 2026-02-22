@@ -54,11 +54,8 @@ export function calculateCostUsd(
 }
 
 /**
- * Look up a model's cost config. Accepts an optional provider hint and a model
- * id that may be a bare id or a "provider/model" string. Resolution order:
- *   1. provider hint + bare model id
- *   2. provider parsed from "provider/model" string
- *   3. bare model id searched across all providers
+ * Look up a model's cost config. Tries provider hint + bare id first, then
+ * parses "provider/model" prefix, then searches all providers for bare id.
  */
 export function resolveModelCost(
   config: Config,

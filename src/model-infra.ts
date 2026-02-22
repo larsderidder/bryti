@@ -1,12 +1,11 @@
 /**
- * Shared model infrastructure.
- *
- * Centralizes AuthStorage, ModelRegistry creation, models.json generation,
- * and model string resolution. Used by the main agent session, workers,
+ * Shared model infrastructure: AuthStorage, ModelRegistry, models.json
+ * generation, and model string resolution. Used by the main agent, workers,
  * reflection, and the guardrail.
  */
 
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import type { Model } from "@mariozechner/pi-ai";
 import {
@@ -30,8 +29,8 @@ export interface ModelInfra {
 // ---------------------------------------------------------------------------
 
 /**
- * Generate models.json from bryti config so the pi SDK's ModelRegistry
- * can discover all configured providers and models.
+ * Generate models.json from bryti config so pi's ModelRegistry discovers
+ * all configured providers and models.
  */
 function generateModelsJson(config: Config, agentDir: string): void {
   const modelsJsonPath = path.join(agentDir, "models.json");
@@ -56,9 +55,9 @@ function generateModelsJson(config: Config, agentDir: string): void {
       models: provider.models.map((m) => ({
         id: m.id,
         name: m.name || m.id,
-        contextWindow: m.context_window || 131072,
+        contextWindow: m.context_window || 200000,
+        maxTokens: m.max_tokens || 32000,
         ...(m.api && { api: m.api }),
-        ...(m.max_tokens && { maxTokens: m.max_tokens }),
         ...(m.cost && { cost: m.cost }),
         ...(m.compat && { compat: m.compat }),
       })),
@@ -73,15 +72,86 @@ function generateModelsJson(config: Config, agentDir: string): void {
 }
 
 // ---------------------------------------------------------------------------
+// Claude CLI credential bridge
+// ---------------------------------------------------------------------------
+
+/**
+ * Claude CLI credential shape in ~/.claude/.credentials.json.
+ */
+interface ClaudeCliCredentials {
+  claudeAiOauth?: {
+    accessToken?: string;
+    refreshToken?: string;
+    expiresAt?: number;
+  };
+}
+
+/**
+ * Seed AuthStorage with Anthropic credentials from the Claude CLI credential
+ * file (~/.claude/.credentials.json) if no Anthropic credential is already
+ * present in auth.json.
+ *
+ * Claude CLI is the primary auth source for users who have it installed.
+ * Pi auth.json is used as the fallback (for users who logged in via `pi login`).
+ *
+ * Once seeded, pi's AuthStorage manages the refresh lifecycle going forward:
+ * it will auto-refresh the token using the refresh token when it expires.
+ */
+function seedFromClaudeCliIfNeeded(authStorage: AuthStorage): void {
+  // Already have Anthropic creds — nothing to do
+  if (authStorage.has("anthropic")) {
+    return;
+  }
+
+  const claudeCredPath = path.join(os.homedir(), ".claude", ".credentials.json");
+  let raw: string;
+  try {
+    raw = fs.readFileSync(claudeCredPath, "utf-8");
+  } catch {
+    // File doesn't exist or isn't readable — Claude CLI not installed
+    return;
+  }
+
+  let parsed: ClaudeCliCredentials;
+  try {
+    parsed = JSON.parse(raw) as ClaudeCliCredentials;
+  } catch {
+    console.warn("[auth] ~/.claude/.credentials.json is not valid JSON, skipping");
+    return;
+  }
+
+  const creds = parsed.claudeAiOauth;
+  if (!creds?.accessToken || !creds?.refreshToken) {
+    console.warn("[auth] ~/.claude/.credentials.json has no usable claudeAiOauth credentials, skipping");
+    return;
+  }
+
+  // Convert Claude CLI format → pi AuthStorage OAuthCredential format:
+  //   Claude CLI: { accessToken, refreshToken, expiresAt }
+  //   pi:         { type: "oauth", access, refresh, expires }
+  authStorage.set("anthropic", {
+    type: "oauth",
+    access: creds.accessToken,
+    refresh: creds.refreshToken,
+    expires: creds.expiresAt ?? Date.now(),
+  });
+
+  console.log("[auth] Seeded Anthropic credentials from Claude CLI (~/.claude/.credentials.json)");
+}
+
+// ---------------------------------------------------------------------------
 // Infrastructure creation
 // ---------------------------------------------------------------------------
 
 /**
- * Create the auth and model registry infrastructure from config.
+ * Create the auth and model registry infrastructure from config. Generates
+ * models.json, sets up AuthStorage with runtime API keys, and initializes
+ * ModelRegistry. Shared by everything that talks to an LLM.
  *
- * Shared by the main agent, workers, reflection, and the guardrail.
- * Generates models.json, sets up AuthStorage with runtime API keys,
- * and initializes ModelRegistry.
+ * Auth priority for Anthropic:
+ *   1. Claude CLI credentials (~/.claude/.credentials.json) — primary source
+ *   2. Pi auth.json (~/.pi/agent/auth.json) — fallback for pi CLI users
+ *   3. Explicit api_key in config — always wins as a runtime override
  */
 export function createModelInfra(config: Config): ModelInfra {
   const agentDir = path.join(config.data_dir, ".pi");
@@ -89,10 +159,15 @@ export function createModelInfra(config: Config): ModelInfra {
 
   generateModelsJson(config, agentDir);
 
-  // Auth: share ~/.pi/agent/auth.json so bryti uses the same OAuth creds as
-  // the pi CLI (Anthropic OAuth, etc.). AuthStorage uses file-level locking so
-  // concurrent token refreshes from pi CLI and bryti are safe.
+  // Auth: start with ~/.pi/agent/auth.json (pi CLI OAuth creds), then
+  // seed from Claude CLI if no Anthropic credential is present there.
+  // AuthStorage uses file-level locking so concurrent token refreshes are safe.
   const authStorage = new AuthStorage();
+
+  // Seed from Claude CLI before applying runtime overrides, so an explicit
+  // api_key in config still wins (setRuntimeApiKey takes precedence).
+  seedFromClaudeCliIfNeeded(authStorage);
+
   for (const provider of config.models.providers) {
     if (provider.api_key) {
       authStorage.setRuntimeApiKey(provider.name, provider.api_key);
@@ -110,12 +185,8 @@ export function createModelInfra(config: Config): ModelInfra {
 // ---------------------------------------------------------------------------
 
 /**
- * Resolve a "provider/modelId" string against the model registry.
- * Returns null if the model is not found.
- *
- * Resolution order:
- *   1. Exact match via registry.find(provider, modelId)
- *   2. Fuzzy match: same provider, modelId as substring of available model ids
+ * Resolve a "provider/modelId" string against the registry. Tries exact
+ * match first, then fuzzy (modelId as substring). Returns null if not found.
  */
 export function resolveModel(
   modelString: string,

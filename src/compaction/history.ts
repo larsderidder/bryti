@@ -1,14 +1,9 @@
 /**
  * History turn limiting.
  *
- * Ported from OpenClaw (src/agents/pi-embedded-runner/history.ts).
- *
- * Limits the session message list to the last N user turns (and their
- * associated assistant/tool responses). Used as a safety valve when compaction
- * is not available or as an additional guard against runaway context growth.
- *
- * With 200K+ context models this is unlikely to trigger in practice, but it
- * prevents edge cases where a very long session survives compaction intact.
+ * Safety valve that limits the session to the last N user turns and their
+ * responses. Unlikely to trigger with 200K+ context models, but prevents
+ * edge cases where a very long session survives compaction intact.
  */
 
 import type { AgentMessage } from "@mariozechner/pi-agent-core";

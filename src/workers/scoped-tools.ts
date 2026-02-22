@@ -1,12 +1,9 @@
 /**
  * Scoped tools for workers.
  *
- * Workers get a minimal tool set that can only write to their own directory.
- * No read access to other directories, no list, no shell, no memory.
- *
- * TODO: In the product, which tools a worker gets (and which SearXNG instance,
- * fetch_url limits, etc.) will be operator-configurable per bot instance.
- * For now this is hardcoded to our own infrastructure.
+ * Workers get a minimal tool set: read and write files in their own directory.
+ * No access to other directories, no shell, no memory. Which tools a worker
+ * gets will eventually be operator-configurable; for now it's hardcoded.
  */
 
 import fs from "node:fs";
@@ -48,10 +45,8 @@ function isValidFilename(filename: string): boolean {
 }
 
 /**
- * Create scoped tools for a worker session.
- *
- * The worker can only write files into its own workerDir (flat, no subdirs).
- * It can read back files it wrote. That's it.
+ * Create scoped tools for a worker session. Write files into workerDir
+ * (flat, no subdirs) and read them back. That's it.
  */
 export function createWorkerScopedTools(workerDir: string): AgentTool<any>[] {
   const writeTool: AgentTool<typeof writeResultSchema> = {

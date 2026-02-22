@@ -1,8 +1,6 @@
 /**
  * Worker registry: in-memory tracking of active and recently-completed workers.
- *
- * Each worker entry records status, timing, file paths, and a reference to
- * the timeout handle so it can be cancelled on demand.
+ * Each entry records status, timing, file paths, and the timeout handle.
  */
 
 export type WorkerStatus = "running" | "complete" | "failed" | "timeout" | "cancelled";

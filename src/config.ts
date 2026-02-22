@@ -75,9 +75,11 @@ export interface Config {
       enabled: boolean;
       /** SearXNG instance URL (no trailing slash). Workers only. */
       searxng_url: string;
+      /** Brave Search API key. If set, used instead of SearXNG. Workers only. */
+      brave_api_key?: string;
     };
-    fetch_url: { enabled: boolean; timeout_ms: number };
-    files: { enabled: boolean; base_dir: string };
+    fetch_url: { timeout_ms: number };
+    files: { base_dir: string };
     workers: {
       /** Maximum number of workers that may run concurrently. Default: 3. */
       max_concurrent: number;
@@ -217,15 +219,14 @@ function toolsFromConfig(substituted: Record<string, unknown>, dataDir: string):
   return {
     web_search: {
       enabled: webRaw.enabled !== false,
-      searxng_url: (webRaw.searxng_url as string) ?? "https://search.xithing.eu",
+      searxng_url: (webRaw.searxng_url as string) ?? "https://searx.be",
+      brave_api_key: (webRaw.brave_api_key as string) ?? undefined,
     },
     fetch_url: {
-      enabled: true,
       timeout_ms: 10000,
       ...(raw.fetch_url as object | undefined),
     },
     files: {
-      enabled: true,
       base_dir: path.join(dataDir, "files"),
       ...(raw.files as object | undefined),
     },

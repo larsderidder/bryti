@@ -1,20 +1,12 @@
 /**
  * Trust levels and runtime permissions.
  *
- * Tools declare their required capability level. Before a tool executes,
- * the trust system checks whether the capability is granted.
+ * Three capability levels: Safe (local data the agent owns), Guarded
+ * (external content processed through worker isolation), and Elevated
+ * (direct external access: network, shell, unreviewed extensions).
  *
- * Capability taxonomy:
- * - Safe:     local data the agent already owns (memory, files in sandbox, projections)
- * - Guarded:  external content processed through worker isolation
- * - Elevated: direct external access in the main agent's context (network, shell, unreviewed extensions)
- *
- * Approval flow:
- * 1. Tool declares its capability level
- * 2. On first call, if elevated and not pre-approved, execution is blocked
- * 3. The blocked result tells the agent to ask the user for permission
- * 4. User approves via chat ("yes", "allow it", etc.)
- * 5. Approval is persisted to disk so it survives restarts
+ * Elevated tools require explicit user approval on first use. Approvals
+ * are persisted to disk so they survive restarts.
  */
 
 import fs from "node:fs";
@@ -82,10 +74,8 @@ export interface TrustStore {
 }
 
 /**
- * Create a trust store backed by a JSON file.
- *
- * Pre-approved tools from config are always approved. Runtime approvals
- * are stored in `data/trust-approvals.json`.
+ * Create a trust store backed by a JSON file. Pre-approved tools from config
+ * are always allowed; runtime approvals are stored in trust-approvals.json.
  */
 export function createTrustStore(dataDir: string, preApproved: string[] = []): TrustStore {
   const filePath = path.join(dataDir, "trust-approvals.json");
@@ -198,11 +188,8 @@ export interface PermissionCheckResult {
 }
 
 /**
- * Check whether a tool call should be allowed.
- *
- * - Safe tools: always allowed
- * - Guarded tools: always allowed (worker isolation handles security)
- * - Elevated tools: require explicit approval
+ * Check whether a tool call should be allowed. Safe and guarded tools always
+ * pass; elevated tools require explicit user approval.
  */
 export function checkPermission(
   toolName: string,

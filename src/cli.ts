@@ -1,27 +1,8 @@
 /**
- * Bryti management CLI.
+ * Bryti management CLI. Single entry point for all operator tasks.
+ * Run via: npm run cli -- <command> [options]
  *
- * Single entry point for all operator tasks. Run via:
- *   npm run cli -- <command> [options]
- *
- * Commands:
- *   help                                   Show this help text
- *   memory                                 Inspect all memory tiers
- *   memory core                            Show core memory file
- *   memory projections [--all]             Show projections (--all includes resolved)
- *   memory archival [--query <text>] [--limit <n>]  Search or list archival facts
- *   reflect [--window <minutes>]           Run the reflection pass on demand
- *   timeskip <summary> [--minutes <n>]     Move a projection's time to now+N min
- *   timeskip --list                        List all projections
- *   import-openclaw [--dry-run]            Import from /home/lars/clawd into memory
- *   fill-context [--count <n>] [--dataset <path>] [--dry-run]
- *                                          Inject synthetic conversations into history
- *                                          to fill the context window (for compaction testing)
- *   archive-fact "<content>"               Insert a fact and check trigger-based projections
- *
- * Global options:
- *   --user-id <id>     User ID (default: first allowed_users entry or BRYTI_USER_ID env)
- *   --data-dir <path>  Data directory (default: BRYTI_DATA_DIR env or ./data)
+ * See `npm run cli -- help` for full command listing.
  */
 
 import fs from "node:fs";
@@ -462,11 +443,9 @@ interface SyntheticConversation {
 }
 
 /**
- * Inject synthetic conversations into the history JSONL log.
- *
- * Writes entries back-dated by a configurable offset so they appear as
- * real history to the reflection pass and the agent's context loader.
- * Prioritises context-window-pressure subcategory conversations.
+ * Inject synthetic conversations into history for compaction testing.
+ * Back-dates entries so they look like real history. Prioritises
+ * context-window-pressure subcategory conversations.
  */
 function cmdFillContext(
   dataDir: string,

@@ -1,8 +1,7 @@
 /**
- * URL fetch and content extraction tool.
- *
- * HTTP GET, extract readable text via @mozilla/readability + linkedom.
- * Truncates to ~4000 chars to avoid blowing up context.
+ * URL fetch and content extraction. HTTP GET, extract readable text via
+ * @mozilla/readability + linkedom, truncate to ~4000 chars so it doesn't
+ * blow up the context window.
  */
 
 import axios from "axios";

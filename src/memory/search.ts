@@ -1,10 +1,8 @@
 /**
- * Hybrid search combining keyword (FTS5) and vector search using Reciprocal Rank Fusion.
+ * Hybrid search: keyword (FTS5) + vector, fused with Reciprocal Rank Fusion.
  *
- * Fusion formula:
- * score(doc) = weight_vector * (1 / (k + rank_vector)) + weight_keyword * (1 / (k + rank_keyword))
- *
- * Default weights: 0.7 vector, 0.3 keyword. k = 60.
+ * RRF formula: score(doc) = w_vec * 1/(k + rank_vec) + w_kw * 1/(k + rank_kw)
+ * Defaults: 0.7 vector, 0.3 keyword, k = 60.
  */
 
 import type { MemoryStore, ScoredResult } from "./store.js";

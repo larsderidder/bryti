@@ -1,8 +1,6 @@
 /**
  * Projection: forward-looking agent memory.
- *
- * Separate from the memory layer (which is backward-looking).
- * Memory answers "what do I know?" Projection answers "what do I expect?"
+ * Memory answers "what do I know?"; projection answers "what do I expect?"
  */
 
 export { createProjectionStore } from "./store.js";

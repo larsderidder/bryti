@@ -43,9 +43,7 @@ export function createTools(
   const tools: BrytiTool[] = [];
 
   // File tools (main agent can read/write in its sandbox)
-  if (config.tools.files.enabled) {
-    tools.push(...createFileTools(config.tools.files.base_dir));
-  }
+  tools.push(...createFileTools(config.tools.files.base_dir));
 
   // Skill installation: fetch and install skills from URLs or local paths
   tools.push(createSkillInstallTool(config.data_dir));

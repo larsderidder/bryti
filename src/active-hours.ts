@@ -2,17 +2,8 @@
  * Active hours guard.
  *
  * Determines whether the current time falls within the configured active
- * window. Scheduler callbacks use this to skip firing during quiet hours
- * (nights, weekends if needed, etc.).
- *
- * Config shape:
- *   active_hours:
- *     timezone: Europe/Amsterdam   # IANA timezone name
- *     start: "08:00"               # local time, inclusive
- *     end:   "23:00"               # local time, exclusive
- *
- * When active_hours is absent from config, all hours are considered active.
- * Overnight windows (start > end, e.g. 22:00–06:00) are supported.
+ * window so scheduler callbacks skip during quiet hours. Absent config
+ * means always active. Overnight windows (start > end) are supported.
  */
 
 export interface ActiveHoursConfig {

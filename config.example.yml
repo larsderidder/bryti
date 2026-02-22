@@ -5,26 +5,34 @@
 agent:
   name: "Bryti"
 
-  # Your additions to the system prompt. Persona, standing instructions, context
-  # about you and your work. The framework adds memory, tool descriptions, and
-  # all other sections automatically.
+  # Your additions to the system prompt. This is where you tell the agent who
+  # you are, how you want it to behave, and what it should know about your life.
+  # The framework adds memory, tool docs, and all other sections automatically.
+  # This part is yours.
   system_prompt: |
-    You are Bryti, a personal AI assistant. You are concise and practical.
+    You are Bryti, a personal AI assistant.
+
+    About me:
+    - My name is [Your Name]. I live in [City/Country].
+    - I work as [your role] at [company/org].
+    - My main projects right now: [list a few].
+
+    How I want you to work:
+    - Be direct. Don't pad responses with filler.
+    - When I ask you to remember something, actually store it. Don't just say "noted."
+    - If you're unsure about something, say so. Don't guess and present it as fact.
+    - Proactively remind me of things I've told you about, when relevant.
+    - When researching something, give me a summary first, then ask if I want details.
 
   # Primary model. Format: provider/model-id
   # Option 1: Anthropic OAuth (Claude Pro/Max subscription, no API key needed)
   # Requires pi CLI login first: `pi login anthropic`
-  model: "anthropic/claude-sonnet-4-20250514"
+  model: "anthropic/claude-sonnet-4-6"
 
   # Tried in order when primary model fails
   fallback_models:
     - "opencode/minimax-m2.5-free"
     - "opencode/kimi-k2.5-free"
-
-  # Option 2: Free models only (no subscription needed)
-  # model: "opencode/minimax-m2.5-free"
-  # fallback_models:
-  #   - "opencode/kimi-k2.5-free"
 
   # IANA timezone for projection scheduling and display
   timezone: "Europe/Amsterdam"
@@ -53,23 +61,22 @@ whatsapp:
 
 models:
   providers:
+    # context_window and max_tokens are optional on every model.
+    # Defaults: 200K context, 32K output. Only set them when a model differs.
+    # Only list the models you actually use in agent.model / fallback_models.
+
     # Anthropic OAuth — uses your Claude Pro or Max subscription.
     # No api_key needed; bryti reads the OAuth token from ~/.pi/agent/auth.json.
-    # One-time setup: install the pi CLI and run `pi login anthropic`.
-    # This opens a browser for Anthropic OAuth; the token is stored locally.
+    # One-time setup: install pi (`npm i -g @mariozechner/pi-coding-agent`)
+    # and run `pi login anthropic`. Opens a browser, token is stored locally.
     - name: anthropic
       base_url: ""
       api: anthropic-messages
       api_key: ""
       models:
-        - id: "claude-sonnet-4-20250514"
-          name: "Claude Sonnet 4.5"
+        - id: "claude-sonnet-4-6"
           context_window: 200000
-          max_tokens: 16384
-        - id: "claude-opus-4-20250514"
-          name: "Claude Opus 4"
-          context_window: 200000
-          max_tokens: 16384
+          max_tokens: 64000
 
     # Free open models via opencode.ai (no subscription, no API key)
     - name: opencode
@@ -87,33 +94,29 @@ models:
         - id: "kimi-k2.5-free"
           name: "Kimi K2.5 (Free)"
           api: openai-completions
-          context_window: 128000
           max_tokens: 32000
           compat:
             maxTokensField: max_tokens
 
-    # --- Paid API providers (uncomment and add your keys) ---
+    # --- More providers (uncomment and add your keys) ---
 
     # Anthropic API key (alternative to OAuth above)
     # - name: anthropic
-    #   base_url: ""
     #   api: anthropic-messages
     #   api_key: ${ANTHROPIC_API_KEY}
     #   models:
-    #     - id: "claude-sonnet-4-20250514"
-    #       name: "Claude Sonnet 4.5"
+    #     - id: "claude-sonnet-4-6"
     #       context_window: 200000
-    #       max_tokens: 16384
+    #       max_tokens: 64000
 
     # OpenRouter — access 200+ models with one API key
     # - name: openrouter
     #   base_url: https://openrouter.ai/api/v1
     #   api_key: ${OPENROUTER_API_KEY}
     #   models:
-    #     - id: "anthropic/claude-sonnet-4"
-    #       name: "Claude Sonnet 4 (OpenRouter)"
+    #     - id: "anthropic/claude-sonnet-4-6"
     #       context_window: 200000
-    #       max_tokens: 16384
+    #       max_tokens: 64000
 
     # Google Gemini
     # - name: google
@@ -121,7 +124,6 @@ models:
     #   api_key: ${GOOGLE_API_KEY}
     #   models:
     #     - id: "gemini-2.5-flash"
-    #       name: "Gemini 2.5 Flash"
     #       context_window: 1048576
     #       max_tokens: 65536
 
@@ -131,9 +133,6 @@ models:
     #   api_key: "ollama"
     #   models:
     #     - id: "qwen3:32b"
-    #       name: "Qwen 3 32B"
-    #       context_window: 131072
-    #       max_tokens: 8192
 
     # Together AI
     # - name: together
@@ -141,28 +140,28 @@ models:
     #   api_key: ${TOGETHER_API_KEY}
     #   models:
     #     - id: "Qwen/Qwen3-235B-A22B"
-    #       name: "Qwen 3 235B"
-    #       context_window: 131072
-    #       max_tokens: 8192
 
 # ---------------------------------------------------------------------------
 # Tools
 # ---------------------------------------------------------------------------
 
 tools:
-  # Web search via SearXNG (used by workers for web research).
-  # Self-host SearXNG or use a public instance.
+  # Web search for workers. Set brave_api_key OR searxng_url (not both).
+  # If both are set, Brave takes priority.
+  # If neither is set, web search is disabled for workers.
   web_search:
-    enabled: true
-    searxng_url: "https://searx.be"   # Replace with your own SearXNG instance
+    # Option A: Brave Search API — free tier 2000 queries/month, no self-hosting.
+    #           Get a key at https://api.search.brave.com/
+    # brave_api_key: "${BRAVE_API_KEY}"
 
-  fetch_url:
-    enabled: true
-    timeout_ms: 10000
+    # Option B: SearXNG — self-hosted or public instance, no API key needed.
+    searxng_url: "https://searx.be"
 
-  files:
-    enabled: true
-    base_dir: ./data/files
+  # fetch_url:
+  #   timeout_ms: 10000    # default: 10s
+
+  # files:
+  #   base_dir: ./data/files  # default
 
   workers:
     max_concurrent: 3

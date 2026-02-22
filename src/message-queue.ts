@@ -1,14 +1,10 @@
 /**
  * Per-channel FIFO message queue with merge and backpressure.
  *
- * Behaviour:
- * - Messages are processed one at a time per channel.
- * - While processing, new messages are queued (up to MAX_DEPTH).
- * - If the queue is full, the caller receives a rejection callback so it can
- *   notify the user.
- * - Messages that arrive within MERGE_WINDOW_MS of each other while the queue
- *   is idle-but-draining are merged into a single prompt, separated by newlines.
- *   This handles the common "user sends three quick messages" pattern.
+ * Messages are processed one at a time per channel. New messages queue up to
+ * MAX_DEPTH; beyond that the caller gets a rejection callback. Messages
+ * arriving within MERGE_WINDOW_MS of each other are merged into a single
+ * prompt, handling the "user sends three quick messages" pattern.
  */
 
 import type { IncomingMessage } from "./channels/types.js";
@@ -30,8 +26,7 @@ interface ChannelQueue {
 }
 
 /**
- * A message queue that serialises processing per channel and merges rapid
- * follow-up messages into a single prompt.
+ * Serialises processing per channel and merges rapid follow-up messages.
  */
 export class MessageQueue {
   private readonly queues = new Map<string, ChannelQueue>();

@@ -1,21 +1,15 @@
 /**
- * Worker tools: worker_dispatch, worker_check, worker_interrupt, worker_steer.
+ * Worker tools: dispatch, check, interrupt, steer.
  *
- * Workers are stateless background LLM sessions that run independently of the
- * main agent. They have a scoped tool set, write results to a file, and signal
- * completion by inserting an archival fact (which triggers any matching
- * trigger_on_fact projection the main agent has set up).
+ * Workers are background LLM sessions with a scoped tool set. They write
+ * results to a file and signal completion by archiving a fact, which triggers
+ * any matching projection in the main agent.
  *
  * Lifecycle:
- *   1. worker_dispatch → creates worker dir, writes task.md, spawns session
- *   2. Worker runs (web search, fetch URL, write to result.md)
- *      - Worker polls steering.md after every few tool calls and adjusts if found
- *   3. On completion (or failure/timeout/cancellation), bryti:
- *      - writes status.json
- *      - archives a fact into the user's memory store
- *   4. worker_check → query current status of a worker
- *   5. worker_interrupt → cancel a running worker immediately
- *   6. worker_steer → write guidance into steering.md for the worker to pick up
+ *   1. dispatch: create worker dir, write task.md, spawn session
+ *   2. Worker runs autonomously (web search, fetch URL, write result.md)
+ *   3. On completion/failure/timeout: write status.json, archive a fact
+ *   4. check: query status; interrupt: cancel immediately; steer: redirect
  */
 
 import fs from "node:fs";
@@ -33,7 +27,7 @@ import {
 import type { Config } from "../config.js";
 import type { MemoryStore } from "../memory/store.js";
 import { embed } from "../memory/embeddings.js";
-import { createWebSearchTool } from "../tools/web-search.js";
+import { createBraveSearchTool, createWebSearchTool } from "../tools/web-search.js";
 import { createFetchUrlTool } from "../tools/fetch-url.js";
 import { createWorkerScopedTools } from "./scoped-tools.js";
 import { toolError, toolSuccess } from "../tools/result.js";
@@ -175,13 +169,9 @@ type SteerWorkerInput = Static<typeof steerWorkerSchema>;
 // ---------------------------------------------------------------------------
 
 /**
- * Spawn the worker session in the background. Returns immediately.
- * Completion (success or failure) is handled asynchronously.
- */
-/**
- * Callback invoked when a worker completes and its archival fact triggers
- * one or more projections. Used to inject an immediate message into the
- * agent queue instead of waiting for the 5-minute cron tick.
+ * Callback invoked when a worker's completion fact triggers projections.
+ * Injects an immediate message into the agent queue instead of waiting
+ * for the 5-minute cron tick.
  */
 export type WorkerTriggerCallback = (triggered: Array<{ id: string; summary: string }>) => void;
 
@@ -229,9 +219,15 @@ async function spawnWorkerSession(opts: {
   const workerTools: AgentTool<any>[] = [];
 
   if (toolNames.includes("web_search") && config.tools.web_search.enabled) {
-    workerTools.push(createWebSearchTool(config.tools.web_search.searxng_url));
+    const ws = config.tools.web_search;
+    if (ws.brave_api_key) {
+      workerTools.push(createBraveSearchTool(ws.brave_api_key));
+    } else if (ws.searxng_url) {
+      workerTools.push(createWebSearchTool(ws.searxng_url));
+    }
+    // If neither is configured, web_search is silently omitted from worker tools.
   }
-  if (toolNames.includes("fetch_url") && config.tools.fetch_url.enabled) {
+  if (toolNames.includes("fetch_url")) {
     workerTools.push(createFetchUrlTool(config.tools.fetch_url.timeout_ms));
   }
 
@@ -425,8 +421,8 @@ async function spawnWorkerSession(opts: {
 // ---------------------------------------------------------------------------
 
 /**
- * Schedule removal of the worker's registry entry after 24 hours.
- * The result files remain on disk; only the in-memory tracking is cleared.
+ * Remove the worker's registry entry after 24 hours. Result files stay on
+ * disk; only the in-memory tracking is cleared.
  */
 function scheduleCleanup(
   registry: WorkerRegistry,
@@ -445,14 +441,8 @@ function scheduleCleanup(
 // ---------------------------------------------------------------------------
 
 /**
- * Create the worker_dispatch and worker_check tools.
- *
- * @param config          App config (for model, tools, data_dir).
- * @param memoryStore     The user's archival memory store (for completion signals).
- * @param registry        Shared worker registry for this user.
- * @param isWorkerSession When true, worker_dispatch rejects all calls (no nesting).
- * @param projectionStore Optional projection store for trigger checking on worker completion.
- * @param onTrigger       Called when worker completion triggers projections (for immediate notification).
+ * Create worker tools (dispatch, check, interrupt, steer).
+ * When isWorkerSession is true, dispatch rejects all calls (no nesting).
  */
 export function createWorkerTools(
   config: Config,

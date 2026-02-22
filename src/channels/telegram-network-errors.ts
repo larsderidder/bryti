@@ -1,9 +1,8 @@
 /**
  * Telegram network error classifier.
  *
- * Lifted from clawdbot-source/src/telegram/network-errors.ts.
- * Classifies errors as recoverable (transient network) vs permanent (API errors).
- * Used by the polling restart loop and by getFile retry logic.
+ * Classifies errors as recoverable (transient network) vs permanent (API).
+ * Used by the polling restart loop and getFile retry logic.
  */
 
 const RECOVERABLE_ERROR_CODES = new Set([
@@ -72,7 +71,7 @@ function formatErrorMessage(err: unknown): string {
 /**
  * Walk the error chain: err -> err.cause -> err.reason -> err.errors[].
  * Grammy's HttpError wraps the underlying fetch error in .error (not .cause),
- * so we follow that too — but only for HttpError to avoid widening the search.
+ * so we follow that too, but only for HttpError to avoid widening the search.
  */
 function collectErrorCandidates(err: unknown): unknown[] {
   const queue = [err];
@@ -113,12 +112,9 @@ function collectErrorCandidates(err: unknown): unknown[] {
 export type TelegramNetworkErrorContext = "polling" | "send" | "getfile" | "unknown";
 
 /**
- * Returns true if the error is a transient network error that warrants a retry
- * or a polling loop restart. Returns false for permanent API errors (4xx).
- *
- * @param options.context    Where the error occurred. Message matching is disabled
- *                           for "send" to avoid suppressing real delivery errors.
- * @param options.allowMessageMatch  Override the context-based message-match default.
+ * True if the error is a transient network error worth retrying. False for
+ * permanent API errors (4xx). Message-based matching is disabled for "send"
+ * context to avoid suppressing real delivery errors.
  */
 export function isRecoverableTelegramNetworkError(
   err: unknown,

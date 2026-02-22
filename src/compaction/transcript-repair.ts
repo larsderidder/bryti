@@ -1,17 +1,12 @@
 /**
  * Transcript repair for pi session files.
  *
- * Ported from OpenClaw (src/agents/session-transcript-repair.ts).
+ * Anthropic-compatible providers reject requests where assistant tool calls
+ * aren't immediately followed by matching tool results. Session files can
+ * end up with displaced or duplicated results from partial writes or crashes.
  *
- * Anthropic-compatible providers (including MiniMax) reject requests where
- * assistant tool calls are not immediately followed by matching tool results.
- * Session files can end up with results displaced or duplicated across messages.
- *
- * This module repairs the transcript before each prompt by:
- * - Moving toolResult messages to directly follow their matching assistant toolCall
- * - Inserting synthetic error results for any tool calls that have no result
- * - Dropping duplicate toolResults for the same ID
- * - Dropping orphaned toolResults that match no assistant tool call
+ * Repairs by: reordering results to follow their matching tool call, inserting
+ * synthetic error results for missing ones, and dropping duplicates and orphans.
  */
 
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
@@ -90,10 +85,9 @@ export type ToolUseRepairReport = {
 };
 
 /**
- * Repair tool-call/tool-result pairing in a message list.
- *
- * Returns the repaired list and a report of what was done. If nothing needed
- * fixing the original array is returned unchanged (same reference).
+ * Repair tool-call/tool-result pairing in a message list. Returns the
+ * repaired list and a report. If nothing needed fixing, returns the
+ * original array unchanged (same reference).
  */
 export function repairToolUseResultPairing(messages: AgentMessage[]): ToolUseRepairReport {
   const out: AgentMessage[] = [];

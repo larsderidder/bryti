@@ -1,13 +1,9 @@
 /**
  * Channel bridge interface.
  *
- * Abstracts messaging platforms. Telegram first, then Discord, Slack, Matrix.
- * Each platform has different threading models:
- * - Telegram: flat DM chat (v1), forum topics (later)
- * - WhatsApp: flat DM chat via baileys (no Meta Business API)
- * - Discord: DM channel (v1), server threads (later)
- * - Slack: DM (v1), channel threads (later)
- * - Matrix: room per user
+ * Abstracts messaging platforms behind a common send/receive API.
+ * Currently: Telegram (flat DMs) and WhatsApp (baileys, no Meta Business API).
+ * Planned: Discord, Slack, Matrix.
  */
 
 export type Platform = "telegram" | "whatsapp" | "discord" | "slack" | "matrix";

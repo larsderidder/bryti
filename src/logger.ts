@@ -89,11 +89,7 @@ const LEVEL_PREFIX: Record<LogLevel, string> = {
 };
 
 /**
- * Format a log line for stdio.
- *
- * Output: `2026-02-18 22:14:27 [WRN] message text`
- *
- * Color is applied only when writing to a TTY so that piped/redirected
+ * Format a log line for stdio. Color only when writing to a TTY so piped
  * output stays plain text.
  */
 function formatLine(level: LogLevel, message: string, isTty: boolean): string {
@@ -125,12 +121,8 @@ function formatLine(level: LogLevel, message: string, isTty: boolean): string {
 // ---------------------------------------------------------------------------
 
 /**
- * Intercept console.* calls to:
- * 1. Write a timestamped, level-prefixed line to stdout/stderr.
- * 2. Mirror the structured entry to the JSONL file logger.
- *
- * After this runs, all console output includes timestamps. The raw
- * console.* methods are replaced permanently for the process lifetime.
+ * Intercept console.* calls to write timestamped lines to stdio and mirror
+ * them to the JSONL file logger. Replaces the raw methods permanently.
  */
 export function installConsoleFileLogging(logger: AppLogger): void {
   if (consoleFileLoggingInstalled) {

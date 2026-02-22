@@ -1,12 +1,10 @@
 /**
  * Trust-aware tool wrapper.
  *
- * Wraps tool execute() functions with permission checks. For elevated tools:
- * 1. If pre-approved or user-approved: run through LLM guardrail
- * 2. If guardrail says ALLOW: execute silently
- * 3. If guardrail says ASK: block and ask the user
- * 4. If guardrail says BLOCK: block with explanation
- * 5. If not approved at all: block and ask for tool-level approval first
+ * Wraps tool execute() with permission checks and the LLM guardrail.
+ * Elevated tools first need tool-level approval, then each invocation
+ * goes through the guardrail (ALLOW / ASK / BLOCK). Safe and guarded
+ * tools pass through without checks.
  */
 
 import type { AgentTool, AgentToolResult } from "@mariozechner/pi-agent-core";
@@ -21,15 +19,8 @@ import type { Config } from "./config.js";
 import type { ApprovalResult } from "./channels/types.js";
 
 /**
- * Callback for interactive approval requests.
- *
- * Called when a tool needs explicit user approval before executing.
- * Sends a prompt to the user (via inline buttons or text) and resolves
- * with the user's decision. Implementations handle the channel-specific
- * UI (e.g. Telegram inline keyboard, WhatsApp text reply).
- *
- * @param prompt     Human-readable description shown to the user.
- * @param approvalKey Unique key for this request.
+ * Callback for interactive approval requests. Sends a prompt to the user
+ * (inline buttons or text) and resolves with their decision.
  */
 export type ApprovalCallback = (prompt: string, approvalKey: string) => Promise<ApprovalResult>;
 
@@ -52,8 +43,7 @@ function escapeHtml(text: string): string {
 }
 
 /**
- * Human-readable descriptions for elevated tools. Shown in approval prompts
- * instead of raw tool names. Falls back to the tool's reason field.
+ * Human-readable labels for elevated tools, shown instead of raw tool names.
  */
 const TOOL_DESCRIPTIONS: Record<string, string> = {
   system_restart: "Restart to pick up changes",

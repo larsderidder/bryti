@@ -1,5 +1,5 @@
 /**
- * Projection agent tools: project, projection_list, projection_resolve, projection_link.
+ * Projection tools: create, list, resolve, and link projections.
  */
 
 import type { AgentTool, AgentToolResult } from "@mariozechner/pi-agent-core";
@@ -102,11 +102,8 @@ type LinkProjectionInput = Static<typeof linkProjectionSchema>;
 // ---------------------------------------------------------------------------
 
 /**
- * Convert a naive local datetime string (YYYY-MM-DD HH:MM or YYYY-MM-DDTHH:MM)
- * to a UTC datetime string (YYYY-MM-DD HH:MM), given an IANA timezone name.
- *
- * If the input already has a Z or +/- offset, it is returned as-is (space-separated).
- * If no timezone is provided, the input is returned unchanged.
+ * Convert a naive local datetime to UTC ("YYYY-MM-DD HH:MM"). Strings with
+ * explicit offsets are normalized; no timezone means returned unchanged.
  */
 function toUtcDatetime(naive: string, timezone: string | undefined): string {
   if (!timezone) return naive.replace("T", " ");
@@ -135,13 +132,8 @@ function toUtcDatetime(naive: string, timezone: string | undefined): string {
 }
 
 /**
- * Create projection tools backed by the given store.
- *
- * @param store     Projection store.
- * @param timezone  Optional IANA timezone (e.g. "Europe/Amsterdam"). When set,
- *                  naive datetime strings from the agent are treated as local
- *                  time and converted to UTC before storage. SQLite datetime()
- *                  comparisons always use UTC, so this keeps times consistent.
+ * Create projection tools. When timezone is set, naive datetimes from the
+ * agent are converted to UTC before storage.
  */
 export function createProjectionTools(store: ProjectionStore, timezone?: string): AgentTool<any>[] {
   const projectTool: AgentTool<typeof projectSchema> = {

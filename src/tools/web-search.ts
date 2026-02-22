@@ -1,10 +1,16 @@
 /**
- * Web search tool using SearXNG.
+ * Web search tools for workers.
  *
- * Self-hosted metasearch at search.xithing.eu. No API key, no rate limits.
- * Aggregates results from Google, Bing, DuckDuckGo, Brave, and more.
+ * Two backends:
+ * - Brave Search: paid API, free tier 2000 queries/month, no self-hosting needed.
+ * - SearXNG: self-hosted metasearch, aggregates Google/Bing/DDG/Brave/etc.
  *
- * Workers only — not available to the main agent (security boundary).
+ * Workers only; the main agent has no access to these tools (security boundary).
+ *
+ * Selection logic (in workers/tools.ts):
+ *   - brave_api_key set → Brave Search
+ *   - searxng_url set  → SearXNG
+ *   - neither          → web search disabled
  */
 
 import https from "node:https";
@@ -80,6 +86,147 @@ function fetchJson(url: string, timeoutMs: number): Promise<SearxngResponse> {
     });
   });
 }
+
+// ---------------------------------------------------------------------------
+// Brave Search backend
+// ---------------------------------------------------------------------------
+
+interface BraveWebResult {
+  title: string;
+  url: string;
+  description?: string;
+  page_age?: string;
+}
+
+interface BraveSearchResponse {
+  web?: {
+    results?: BraveWebResult[];
+  };
+  query?: {
+    original?: string;
+  };
+}
+
+/**
+ * Fetch from Brave Search API using Node https (no axios dependency,
+ * keeps parity with the SearXNG implementation).
+ */
+function fetchBraveJson(
+  url: string,
+  apiKey: string,
+  timeoutMs: number,
+): Promise<BraveSearchResponse> {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    const options = {
+      hostname: parsed.hostname,
+      path: parsed.pathname + parsed.search,
+      headers: {
+        "Accept": "application/json",
+        "Accept-Encoding": "gzip",
+        "X-Subscription-Token": apiKey,
+      },
+      timeout: timeoutMs,
+    };
+
+    const req = https.get(options, (res) => {
+      const chunks: Buffer[] = [];
+      res.on("data", (chunk: Buffer) => chunks.push(chunk));
+      res.on("end", () => {
+        try {
+          resolve(JSON.parse(Buffer.concat(chunks).toString()) as BraveSearchResponse);
+        } catch (err) {
+          reject(new Error(`Failed to parse Brave response: ${(err as Error).message}`));
+        }
+      });
+    });
+
+    req.on("error", (err: Error) => {
+      reject(new Error(`Brave Search request failed: ${err.message}`));
+    });
+    req.on("timeout", () => {
+      req.destroy();
+      reject(new Error("Brave Search request timed out"));
+    });
+  });
+}
+
+/**
+ * Create the web search tool backed by Brave Search API.
+ *
+ * Brave free tier: 2000 queries/month, no credit card required.
+ * Docs: https://api.search.brave.com/
+ */
+export function createBraveSearchTool(apiKey: string): AgentTool<typeof webSearchSchema> {
+  return {
+    name: "web_search",
+    label: "web_search",
+    description:
+      "Search the web using Brave Search. Returns titles, URLs, and snippets.",
+    parameters: webSearchSchema,
+    async execute(
+      _toolCallId: string,
+      { query, count, freshness, language }: WebSearchInput,
+    ): Promise<AgentToolResult<unknown>> {
+      const limit = Math.min(count ?? 10, 20);
+
+      const params = new URLSearchParams({
+        q: query,
+        count: String(limit),
+      });
+
+      if (language) {
+        params.set("search_lang", language);
+      }
+
+      if (freshness) {
+        // Brave freshness values: pd, pw, pm, py
+        const timeMap: Record<string, string> = {
+          day: "pd",
+          week: "pw",
+          month: "pm",
+          year: "py",
+          pd: "pd",
+          pw: "pw",
+          pm: "pm",
+          py: "py",
+        };
+        const bf = timeMap[freshness];
+        if (bf) params.set("freshness", bf);
+      }
+
+      const url = `https://api.search.brave.com/res/v1/web/search?${params.toString()}`;
+
+      try {
+        const response = await fetchBraveJson(url, apiKey, 10000);
+
+        const results = (response.web?.results ?? []).slice(0, limit).map((r) => ({
+          title: r.title ?? "",
+          url: r.url ?? "",
+          snippet: (r.description ?? "").slice(0, 300),
+          engine: "brave",
+        }));
+
+        const text = JSON.stringify({ results }, null, 2);
+        return {
+          content: [{ type: "text", text }],
+          details: { query, results, total: results.length },
+        };
+      } catch (error) {
+        const err = error as Error;
+        const text = JSON.stringify({ error: `Search failed: ${err.message}` });
+        return {
+          content: [{ type: "text", text }],
+          details: { error: err.message },
+        };
+      }
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// SearXNG backend
+// ---------------------------------------------------------------------------
 
 /**
  * Create the web search tool backed by SearXNG.

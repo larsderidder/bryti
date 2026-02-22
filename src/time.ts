@@ -1,12 +1,9 @@
 /**
- * Centralized timezone utilities.
+ * Timezone utilities. Single source of truth for all timezone-aware ops.
  *
- * Single source of truth for all timezone-aware operations in bryti.
- * All datetime strings stored in SQLite use space-separated UTC format
- * ("YYYY-MM-DD HH:MM") so SQLite's datetime() comparisons stay correct.
- *
- * The IANA timezone is sourced from config.agent.timezone. When omitted,
- * all operations fall back to UTC.
+ * All datetimes in SQLite use space-separated UTC ("YYYY-MM-DD HH:MM") so
+ * datetime() comparisons work correctly. IANA timezone comes from config;
+ * falls back to UTC when not set.
  */
 
 import type { Config } from "./config.js";
@@ -65,18 +62,11 @@ export function currentTimePromptLine(timezone: string): string {
 // ---------------------------------------------------------------------------
 
 /**
- * Convert a naive local datetime string to a UTC datetime string in
- * "YYYY-MM-DD HH:MM" format.
+ * Convert a naive local datetime string to UTC ("YYYY-MM-DD HH:MM").
  *
- * Accepts "YYYY-MM-DD HH:MM" or "YYYY-MM-DDTHH:MM" (with optional seconds).
- * If the input already carries an offset indicator (Z, +HH:MM, -HH:MM), it is
- * parsed as-is and returned in UTC without applying the timezone offset.
- * Date-only strings ("YYYY-MM-DD") are returned unchanged — only strings with a
- * time component are converted.
- *
- * @param naive     Local datetime string from the agent (no offset).
- * @param timezone  IANA timezone the local time is expressed in.
- * @returns         UTC datetime in "YYYY-MM-DD HH:MM" format.
+ * Accepts "YYYY-MM-DD HH:MM" or "YYYY-MM-DDTHH:MM". If the input already
+ * carries an offset (Z, +/-HH:MM), it's parsed as-is. Date-only strings
+ * are returned unchanged.
  */
 export function toUtc(naive: string, timezone: string): string {
   const normalized = naive.replace("T", " ").trim();

@@ -1,8 +1,6 @@
 /**
- * Conversation history management.
- *
- * JSONL files rotated by day. Used as an audit log; conversation_search reads
- * these files directly for semantic search. Persistent pi sessions are the
+ * Conversation history as JSONL files, rotated by day. Used as an audit log;
+ * conversation_search reads these directly. Persistent pi sessions are the
  * source of truth for agent context.
  */
 

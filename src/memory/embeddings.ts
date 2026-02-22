@@ -1,11 +1,9 @@
 /**
  * Local embeddings via node-llama-cpp.
  *
- * Uses a small GGUF embedding model downloaded on first use.
- * No external API key required.
- *
- * The model and embedding context are loaded once and reused across calls.
- * Model files are stored in `<dataDir>/.models/`.
+ * Uses a small GGUF embedding model downloaded on first use; no external
+ * API key required. The model and context are loaded once and reused across
+ * calls. Model files live in <dataDir>/.models/.
  */
 
 import { getLlama, LlamaLogLevel, resolveModelFile } from "node-llama-cpp";
@@ -85,12 +83,8 @@ export async function embed(text: string, modelsDir?: string): Promise<number[]>
 }
 
 /**
- * Generate embeddings for multiple texts.
- * Calls embed() sequentially; the model is fast enough on CPU that batching
- * provides no meaningful advantage here.
- *
- * @param texts Array of input texts (each must be non-empty)
- * @param modelsDir Directory to store/load the model
+ * Generate embeddings for multiple texts. Sequential; the model is fast
+ * enough on CPU that batching provides no meaningful advantage.
  */
 export async function embedBatch(texts: string[], modelsDir?: string): Promise<number[][]> {
   if (texts.length === 0) {
@@ -121,9 +115,8 @@ export async function warmupEmbeddings(modelsDir?: string): Promise<void> {
 }
 
 /**
- * Release the embedding context, model, and llama instance.
- * Call during shutdown so node-llama-cpp's native thread pool exits cleanly
- * and the Node process doesn't hang waiting for it.
+ * Release the embedding context, model, and llama instance. Call during
+ * shutdown so node-llama-cpp's native threads exit and Node doesn't hang.
  */
 export async function disposeEmbeddings(): Promise<void> {
   if (embeddingContext) {

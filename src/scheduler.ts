@@ -1,16 +1,12 @@
 /**
  * Scheduler.
  *
- * Manages two kinds of scheduled jobs:
- * - Config-driven: defined in config.yml under `cron`, operator-controlled.
- * - Projection-driven: two automatic jobs that surface projections to the agent.
+ * Two kinds of jobs: config-driven (operator cron entries) and projection-driven
+ * (automatic daily review, exact-time checks, reflection). Both inject synthetic
+ * messages into the agent loop routed to the primary user's channel.
  *
- * Both kinds inject synthetic IncomingMessages into the agent loop, routed to
- * the first allowed Telegram user's channel.
- *
- * Agent-managed schedules (create/list/delete) have been removed. The agent
- * uses projections for everything about the future: reminders, deadlines,
- * plans. Projections are the single concept for forward-looking behavior.
+ * The agent uses projections for everything about the future; there is no
+ * separate agent-managed schedule concept.
  */
 
 import { Cron } from "croner";
@@ -106,14 +102,11 @@ export function createScheduler(
   }
 
   /**
-   * Start the two projection-aware scheduled jobs for the primary user:
-   *
-   * - Daily review at 8am UTC: surfaces all of today's and this week's
-   *   projections. Auto-expires stale ones first. One LLM call per day.
-   *
-   * - Exact-time check every 5 minutes: queries for 'exact' projections due
-   *   within the next 15 minutes. Fires the agent only when something matches.
-   *   Tight enough for precise reminders ("remind me at 13:45").
+   * Two projection jobs for the primary user:
+   * - Daily review at 8am UTC: surfaces today's and this week's projections,
+   *   auto-expiring stale ones first.
+   * - Exact-time check every 5 min: fires when an 'exact' projection is due
+   *   within the next 15 minutes.
    */
   function startProjectionJobs(): void {
     const primaryUserId = String(config.telegram.allowed_users[0] ?? "");
@@ -240,13 +233,9 @@ export function createScheduler(
   }
 
   /**
-   * Start the reflection cron job.
-   *
-   * Runs every 30 minutes and scans the last 30 minutes of conversation
-   * history for future references the agent may have missed. Writes new
-   * projections directly to SQLite — no agent loop involved.
-   *
-   * Skips automatically when there are no new messages since the last run.
+   * Reflection cron: every 30 minutes, scan recent conversation for future
+   * references the agent missed. Writes projections directly to SQLite
+   * without touching the agent loop. Skips when there are no new messages.
    */
   function startReflectionJob(): void {
     const primaryUserId = String(config.telegram.allowed_users[0] ?? "");

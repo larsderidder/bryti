@@ -77,8 +77,8 @@ cron: []
     const config = loadConfig();
 
     expect(config.tools.web_search.enabled).toBe(true);
-    expect(config.tools.fetch_url.enabled).toBe(true);
-    expect(config.tools.files.enabled).toBe(true);
+    expect(config.tools.fetch_url.timeout_ms).toBe(10000);
+    expect(config.tools.files.base_dir).toContain("files");
   });
 
   it("should create data directories", () => {
