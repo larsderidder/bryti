@@ -91,7 +91,50 @@ models:
           compat:
             maxTokensField: max_tokens
 
-    # Paid API providers (uncomment and add your keys)
+    # --- Paid API providers (uncomment and add your keys) ---
+
+    # Anthropic API key (alternative to OAuth above)
+    # - name: anthropic
+    #   base_url: ""
+    #   api: anthropic-messages
+    #   api_key: ${ANTHROPIC_API_KEY}
+    #   models:
+    #     - id: "claude-sonnet-4-20250514"
+    #       name: "Claude Sonnet 4.5"
+    #       context_window: 200000
+    #       max_tokens: 16384
+
+    # OpenRouter — access 200+ models with one API key
+    # - name: openrouter
+    #   base_url: https://openrouter.ai/api/v1
+    #   api_key: ${OPENROUTER_API_KEY}
+    #   models:
+    #     - id: "anthropic/claude-sonnet-4"
+    #       name: "Claude Sonnet 4 (OpenRouter)"
+    #       context_window: 200000
+    #       max_tokens: 16384
+
+    # Google Gemini
+    # - name: google
+    #   base_url: https://generativelanguage.googleapis.com/v1beta/openai
+    #   api_key: ${GOOGLE_API_KEY}
+    #   models:
+    #     - id: "gemini-2.5-flash"
+    #       name: "Gemini 2.5 Flash"
+    #       context_window: 1048576
+    #       max_tokens: 65536
+
+    # Ollama (local or remote)
+    # - name: ollama
+    #   base_url: http://localhost:11434/v1
+    #   api_key: "ollama"
+    #   models:
+    #     - id: "qwen3:32b"
+    #       name: "Qwen 3 32B"
+    #       context_window: 131072
+    #       max_tokens: 8192
+
+    # Together AI
     # - name: together
     #   base_url: https://api.together.xyz/v1
     #   api_key: ${TOGETHER_API_KEY}
