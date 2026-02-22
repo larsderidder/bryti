@@ -1,25 +1,16 @@
 /**
  * Agent session management.
  *
- * Wraps pi's SDK createAgentSession() with bryti-specific configuration:
- * - Persistent sessions per user (session file survives across messages)
- * - Transcript repair before every prompt (fixes tool-call/result pairing)
- * - Auto-compaction via pi SDK (triggers automatically when context fills)
- * - Core memory always injected into system prompt
- * - Custom tools (web search, fetch URL, files, memory)
+ * Wraps pi's createAgentSession() with bryti-specific config: persistent
+ * per-user sessions, transcript repair before every prompt, core memory
+ * injection into the system prompt, and custom tools.
  *
- * The pi SDK handles:
- * - Agent loop (prompt -> tool calls -> response)
- * - Model routing and API communication
- * - Session persistence (append-only JSONL)
- * - Auto-compaction (summarises old turns when context fills)
- * - Streaming and auto-retry
+ * The pi SDK handles the agent loop, model routing, session persistence
+ * (append-only JSONL), auto-compaction, streaming, and retry logic.
  *
- * Architecture change from v0 (fresh-session-per-message):
- * - Sessions now persist across messages in data/sessions/<userId>.jsonl
- * - History is no longer injected into the system prompt as text
- * - The model sees its actual prior tool calls and results in context
- * - JSONL history files remain as an audit log for memory_conversation_search
+ * Sessions persist across messages in data/sessions/<userId>/. The model
+ * sees its actual prior tool calls and results in context; JSONL history
+ * files are kept as an audit log for conversation search.
  */
 
 import fs from "node:fs";
@@ -67,11 +58,7 @@ interface ToolSummary {
 
 
 /**
- * Build the system prompt with core memory.
- *
- * History is no longer injected here. The persistent pi session file is the
- * source of truth for conversation context. The JSONL audit log remains for
- * memory_conversation_search, which reads the files directly.
+ * Build the tool listing section of the system prompt.
  */
 export function buildToolSection(
   tools: ToolSummary[],
@@ -97,9 +84,8 @@ export function buildToolSection(
 export const SILENT_REPLY_TOKEN = "NOOP";
 
 /**
- * Extract a short human-readable summary of the tool arguments for the audit log.
- * The goal is to give the /log command enough context to show a useful line,
- * without storing raw LLM arguments verbatim.
+ * Short human-readable summary of tool arguments for the audit log.
+ * Gives the /log command enough context without storing raw LLM args.
  */
 function buildArgsSummary(toolName: string, args: unknown): string {
   if (!args || typeof args !== "object") {
@@ -193,6 +179,8 @@ function buildSystemPrompt(
     `or internal concepts like "projections." Say "I'll remember that" not "I'll call memory_core_append." ` +
     `Say "I'll look into that in the background" not "I'll use worker_dispatch." ` +
     `Say "I've set a reminder" not "I've created a projection."\n\n` +
+    `When dispatching a worker, always tell the user what the worker is researching and roughly how long it will take. ` +
+    `Never just say "back in a few minutes" without context.\n\n` +
     `Do not narrate routine tool calls. Just call the tool.\n` +
     `Narrate only when it helps: multi-step work, sensitive actions (deletions, external sends), or when the user asks.\n` +
     `Keep narration brief.\n` +
@@ -216,6 +204,19 @@ function buildSystemPrompt(
     `and how to disable an extension permanently (write an empty file — never delete).\n\n` +
     `After writing or modifying an extension or config.yml, call system_restart to reload. ` +
     `Always tell the user what you changed before restarting.`,
+  );
+
+  parts.push(
+    `## Skills\n` +
+    `Skills are instruction sets loaded from: data/skills/\n` +
+    `Each skill is a directory with a SKILL.md file and optional reference files.\n\n` +
+    `When the user points you at a skill (URL, local path, or git repo), install it:\n` +
+    `- **URL**: Dispatch a worker to fetch the content, then write it to skills/<name>/SKILL.md\n` +
+    `- **Local path**: Use shell_exec to copy the directory into skills/\n` +
+    `- **Git repo**: Use shell_exec to clone into skills/\n\n` +
+    `After installing a skill, call system_restart to load it.\n` +
+    `You can also create skills from scratch by writing a SKILL.md to skills/<name>/.\n\n` +
+    `A SKILL.md should have YAML frontmatter with name and description, followed by instructions.`,
   );
 
   if (coreMemory) {
@@ -282,8 +283,8 @@ function buildSystemPrompt(
 }
 
 /**
- * Return the per-user session directory. Each user gets their own directory
- * so that SessionManager.continueRecent() picks up the right session.
+ * Per-user session directory. Each user gets their own so continueRecent()
+ * picks up the right session.
  */
 function userSessionDir(config: Config, userId: string): string {
   const dir = path.join(config.data_dir, "sessions", userId);
@@ -294,12 +295,12 @@ function userSessionDir(config: Config, userId: string): string {
 /**
  * Load (or create) a persistent agent session for a user.
  *
- * If the session file already exists, it is opened and its history is loaded
- * into the agent. Transcript repair runs on every load to guard against
- * corrupted tool-call/result pairings that would cause API errors.
+ * Opens an existing session file and loads its history, or creates a new
+ * one if none exists. Transcript repair runs on load to fix any corrupted
+ * tool-call/result pairings from a previous run.
  *
- * Call dispose() to clean up event listeners when shutting down. The session
- * file is NOT deleted on dispose; it survives for the next message.
+ * Call dispose() to clean up event listeners. The session file itself
+ * survives; it's reused on the next message.
  */
 export async function loadUserSession(
   config: Config,
@@ -335,9 +336,15 @@ export async function loadUserSession(
   // Resource loader with system prompt (no history injection).
   // The override closure reads core memory and projections at call time so that
   // session.reload() picks up any changes made by the agent during the conversation.
+  // Bryti has its own skills directory in the data dir, separate from
+  // the global pi CLI skills. Curate skills for bryti independently.
+  const brytiSkillsDir = path.join(config.data_dir, "skills");
+  const additionalSkillPaths = fs.existsSync(brytiSkillsDir) ? [brytiSkillsDir] : [];
+
   const loader = new DefaultResourceLoader({
     cwd: config.data_dir,
     agentDir,
+    additionalSkillPaths,
     settingsManager: SettingsManager.create(config.data_dir, agentDir),
     systemPromptOverride: () => {
       // Auto-expire stale projections before injecting so the agent never
@@ -482,10 +489,8 @@ export async function loadUserSession(
 }
 
 /**
- * Run transcript repair on the session's current messages before prompting.
- *
- * Called immediately before each session.prompt() to catch any pairing issues
- * that arose during the previous turn (race conditions, partial writes, etc.).
+ * Run transcript repair on the session's messages before prompting.
+ * Catches pairing issues from the previous turn (partial writes, races).
  */
 export function repairSessionTranscript(session: AgentSession, userId: string): void {
   const messages = session.messages;
@@ -518,13 +523,9 @@ interface FallbackResult {
 }
 
 /**
- * Detect whether pi gave up on a prompt.
- *
- * Two failure signals from pi:
- * - `session.prompt()` throws (network-level failure after all retries)
- * - Last assistant message has `stopReason === "error"` (model-level failure)
- *
- * We treat both as "try the next model."
+ * Detect whether pi gave up on a prompt. Two failure signals: prompt()
+ * throws (network failure after retries) or the last assistant message has
+ * stopReason "error" (model failure). Both mean "try the next model."
  */
 function didPromptFail(
   session: AgentSession,
@@ -552,16 +553,8 @@ function didPromptFail(
 /**
  * Send a prompt, trying the primary model first then each fallback in order.
  *
- * On failure the session's model is switched via `session.setModel()` so the
- * persistent session file stays intact. If all candidates fail, the last error
- * is thrown.
- *
- * @param session   The user's persistent session
- * @param text      The prompt text
- * @param config    App config (for the fallback list)
- * @param modelRegistry  Registry used to resolve model strings to Model objects
- * @param userId    For logging
- * @param images    Optional image attachments (base64-encoded)
+ * On failure the session's model is switched via setModel() so the persistent
+ * session file stays intact. Throws the last error if all candidates fail.
  */
 export async function promptWithFallback(
   session: AgentSession,
@@ -634,13 +627,8 @@ export async function promptWithFallback(
 }
 
 /**
- * Reload the session's system prompt with the latest core memory content.
- *
- * The resource loader's systemPromptOverride closure reads coreMemory.read()
- * at call time, so session.reload() picks up any changes the agent made during
- * the previous turn (memory_core_append / memory_core_replace).
- *
- * Call this right before promptWithFallback() on every message.
+ * Reload the system prompt so it picks up any core memory or projection
+ * changes the agent made during the previous turn.
  */
 export async function refreshSystemPrompt(session: AgentSession): Promise<void> {
   await session.reload();

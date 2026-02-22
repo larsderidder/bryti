@@ -1,13 +1,12 @@
 /**
- * Tool registry.
- *
- * Bryti-specific tools registered as pi SDK custom tools.
- * These supplement pi's built-in tools (read/write/edit/bash).
+ * Tool registry. Bryti-specific tools registered as pi SDK custom tools,
+ * supplementing pi's built-in tools.
  */
 
 import type { AgentTool, AgentToolResult } from "@mariozechner/pi-agent-core";
 import { Type } from "@sinclair/typebox";
 import { createFileTools } from "./files.js";
+import { createSkillInstallTool } from "./skill-install.js";
 import { createCoreMemoryTools } from "./core-memory-tool.js";
 import { createArchivalMemoryTools } from "./archival-memory-tool.js";
 import { createConversationSearchTool } from "./conversation-search-tool.js";
@@ -33,9 +32,6 @@ const restartSchema = Type.Object({
 
 /**
  * Create all bryti tools based on configuration.
- *
- * @param onWorkerTrigger  Called when a worker's completion fact triggers projections.
- * @param onRestart        Called when the agent requests a process restart.
  */
 export function createTools(
   config: Config,
@@ -50,6 +46,9 @@ export function createTools(
   if (config.tools.files.enabled) {
     tools.push(...createFileTools(config.tools.files.base_dir));
   }
+
+  // Skill installation: fetch and install skills from URLs or local paths
+  tools.push(createSkillInstallTool(config.data_dir));
 
   // NOTE: web_search and fetch_url are NOT given to the main agent.
   // External content is processed by workers in isolation (security boundary).

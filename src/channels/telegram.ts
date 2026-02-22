@@ -1,13 +1,12 @@
 /**
  * Telegram bridge using grammy.
  *
- * Implements ChannelBridge for Telegram DMs.
- * Long polling for local dev, webhook for production (later).
+ * ChannelBridge for Telegram DMs. Long polling for now, webhook later.
  *
- * Formatting: all outgoing messages use HTML parse mode. LLM output (markdown)
- * is converted with markdownToHtml() before sending. HTML is far simpler to
- * produce correctly than MarkdownV2, which requires escaping 18 characters and
- * is easily broken by LLM output.
+ * All outgoing messages use HTML parse mode. LLM markdown output is converted
+ * via a proper markdown IR (not regex) before sending. HTML is far simpler
+ * than MarkdownV2, which requires escaping 18 characters and breaks constantly
+ * on LLM output.
  */
 
 import crypto from "node:crypto";
@@ -75,17 +74,9 @@ const TELEGRAM_IR_OPTIONS = {
 };
 
 /**
- * Convert LLM markdown output to Telegram HTML using a proper markdown IR.
- *
- * Uses markdown-it to parse, then renders to Telegram-compatible HTML tags:
- * - Bold (**text**) -> <b>text</b>
- * - Italic (*text*) -> <i>text</i>
- * - Strikethrough (~~text~~) -> <s>text</s>
- * - Inline code (`...`) -> <code>...</code>
- * - Code blocks (```...```) -> <pre><code>...</code></pre>
- * - Headings -> <b>text</b> (Telegram has no heading tags)
- * - Links -> <a href="...">text</a>
- * - Tables -> bullet list format (Telegram has no table support)
+ * Convert LLM markdown to Telegram HTML via the markdown IR.
+ * Handles bold, italic, strikethrough, code, links, headings (as bold),
+ * and tables (as bullet lists, since Telegram has no table support).
  */
 export function markdownToHtml(text: string): string {
   const ir = markdownToIR(text ?? "", TELEGRAM_IR_OPTIONS);
@@ -93,11 +84,9 @@ export function markdownToHtml(text: string): string {
 }
 
 /**
- * Parse markdown into an IR, split at semantic boundaries (never mid-fence),
- * and render each chunk to Telegram HTML.
- *
- * This is the safe way to chunk large responses: splitting after IR parsing
- * means code blocks, bold spans, and links are never cut in half.
+ * Parse markdown into an IR, split at semantic boundaries, and render each
+ * chunk to Telegram HTML. Splitting after IR parsing means code blocks,
+ * bold spans, and links are never cut in half.
  */
 export function markdownToTelegramChunks(text: string, maxLength = MAX_MESSAGE_LENGTH): string[] {
   if (!text) return [];
@@ -114,8 +103,8 @@ const RETRY_BASE_DELAY_MS = 1000;
 
 /**
  * How long to wait for more photos in the same album before flushing.
- * Telegram sends album photos as separate updates arriving within ~100–400 ms.
- * 600 ms gives ample headroom without noticeable latency.
+ * Telegram sends album photos as separate updates within ~100-400 ms;
+ * 600 ms gives headroom without noticeable latency.
  */
 const MEDIA_GROUP_FLUSH_MS = 600;
 
@@ -129,11 +118,8 @@ interface MediaGroupEntry {
 }
 
 /**
- * Split text into chunks that fit within Telegram's message limit.
- *
- * Strategy: split on double newlines (paragraphs) first, then single newlines,
- * then sentence boundaries, then hard-cut at the limit. Tries to keep code
- * blocks intact when possible.
+ * Split text into chunks that fit Telegram's message limit.
+ * Prefers paragraph boundaries, then newlines, then sentences, then hard cut.
  */
 export function chunkMessage(text: string, maxLength = MAX_MESSAGE_LENGTH): string[] {
   if (text.length <= maxLength) {
@@ -189,11 +175,7 @@ export function chunkMessage(text: string, maxLength = MAX_MESSAGE_LENGTH): stri
 
 /**
  * Retry a Telegram API call with exponential backoff.
- *
- * Retries on:
- * - Rate limits (429) using Telegram's retry_after value
- * - Server errors (5xx)
- * - Recoverable network errors (ECONNRESET, timeouts, fetch failures, etc.)
+ * Retries on 429 (using retry_after), 5xx, and recoverable network errors.
  */
 async function withRetry<T>(
   fn: () => Promise<T>,
@@ -790,8 +772,10 @@ export class TelegramBridge implements ChannelBridge {
       const buffer = await response.arrayBuffer();
       const data = Buffer.from(buffer).toString("base64");
       // Use Content-Type from response; Telegram serves JPEG for compressed photos,
-      // but PNG/WebP for images sent uncompressed.
-      const mimeType = response.headers.get("content-type")?.split(";")[0].trim() || "image/jpeg";
+      // but PNG/WebP for images sent uncompressed. Treat application/octet-stream
+      // as unknown (Telegram sometimes returns it for valid images).
+      const rawMime = response.headers.get("content-type")?.split(";")[0].trim();
+      const mimeType = (!rawMime || rawMime === "application/octet-stream") ? "image/jpeg" : rawMime;
       console.log(
         `[telegram] Downloaded photo: ${buffer.byteLength} bytes ` +
         `(${largest.width}x${largest.height}), mime=${mimeType}`,

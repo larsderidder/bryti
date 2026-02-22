@@ -1,8 +1,8 @@
 /**
  * Config loading and validation.
  *
- * Loads config.yml from data directory, substitutes ${ENV_VAR} references,
- * validates required fields.
+ * Loads config.yml from the data directory, substitutes ${ENV_VAR} references,
+ * and validates required fields at startup so misconfigurations fail early.
  */
 
 import fs from "node:fs";
@@ -193,14 +193,9 @@ function integrationsFromConfig(substituted: Record<string, unknown>): Config["i
 }
 
 /**
- * Inject integration config values into process.env so extensions can read them.
- *
- * Convention: integrations.<name>.<key> → <NAME>_<KEY> (uppercased).
- * Example: integrations.hedgedoc.url → HEDGEDOC_URL
- *          integrations.hedgedoc.public_url → HEDGEDOC_PUBLIC_URL
- *
- * Existing env vars are never overwritten — .env always wins.
- * Call this once after loadConfig(), before extensions are loaded.
+ * Inject integration config values into process.env.
+ * Convention: integrations.<name>.<key> becomes <NAME>_<KEY> (uppercased).
+ * Existing env vars are never overwritten; .env always wins.
  */
 export function applyIntegrationEnvVars(config: Config): void {
   for (const [name, values] of Object.entries(config.integrations)) {
@@ -299,8 +294,8 @@ export function loadConfig(configPath?: string): Config {
 }
 
 /**
- * Validate config at startup. Catches misconfigurations early rather than
- * failing at runtime (e.g., 30 minutes later when a cron job fires).
+ * Validate config at startup so bad config doesn't surface 30 minutes later
+ * when a cron job fires.
  */
 function validateConfig(config: Config): void {
   const errors: string[] = [];
@@ -383,6 +378,7 @@ export function ensureDataDirs(config: Config): void {
     path.join(config.data_dir, "logs"),
     path.join(config.data_dir, ".pi"),
     path.join(config.data_dir, "pending"),
+    path.join(config.data_dir, "skills"),
   ];
 
   // WhatsApp auth directory (always create in case user adds WhatsApp later)
@@ -404,16 +400,11 @@ export function ensureDataDirs(config: Config): void {
 }
 
 /**
- * Seed default extensions shipped with bryti into the user's extensions directory.
+ * Seed default extensions into the user's extensions directory.
  *
- * Rules:
- *   - Copy only when the target file does not exist (first run / fresh install).
- *   - Never overwrite an existing file, even if the source has changed.
- *   - An empty file (0 bytes) means the agent intentionally deleted the
- *     extension. Treat it as "do not seed" — never replace it.
- *
- * Source: src/defaults/extensions/ (tracked in git, compiled to dist/defaults/extensions/)
- * Target: data/files/extensions/ (gitignored, user-owned, agent-writable)
+ * Only copies when the target file doesn't exist. Never overwrites. An empty
+ * file (0 bytes) is a tombstone meaning the agent intentionally deleted it;
+ * never replace those either.
  */
 function seedDefaultExtensions(extensionsDir: string): void {
   // In production (dist/): defaults are copied alongside the compiled output.
@@ -439,10 +430,8 @@ function seedDefaultExtensions(extensionsDir: string): void {
 }
 
 /**
- * Write pi project settings that point to the agent's extension directory.
- *
- * Pi reads extensions from settings.extensions[] paths. We point it at
- * data/files/extensions/ where the agent writes extensions via file_write.
+ * Write pi settings pointing to the agent's extension directory so pi
+ * discovers extensions the agent writes via file_write.
  */
 function writeExtensionSettings(config: Config): void {
   const settingsPath = path.join(config.data_dir, ".pi", "settings.json");
