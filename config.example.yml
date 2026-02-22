@@ -53,9 +53,10 @@ whatsapp:
 
 models:
   providers:
-    # Anthropic OAuth — uses ~/.pi/agent/auth.json (shared with pi CLI).
-    # No api_key needed; bryti reads the OAuth token automatically.
-    # Prerequisite: run `pi login anthropic` once.
+    # Anthropic OAuth — uses your Claude Pro or Max subscription.
+    # No api_key needed; bryti reads the OAuth token from ~/.pi/agent/auth.json.
+    # One-time setup: install the pi CLI and run `pi login anthropic`.
+    # This opens a browser for Anthropic OAuth; the token is stored locally.
     - name: anthropic
       base_url: ""
       api: anthropic-messages
