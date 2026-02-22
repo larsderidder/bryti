@@ -100,25 +100,28 @@ function buildGuardrailPrompt(input: GuardrailInput): string {
 // ---------------------------------------------------------------------------
 
 function parseVerdict(response: string): GuardrailResult {
-  const line = response.trim().split("\n")[0].trim();
+  const lines = response.trim().split("\n");
 
-  // Match "VERDICT: reason" pattern
-  const match = line.match(/^(ALLOW|ASK|BLOCK):\s*(.+)$/i);
-  if (match) {
-    return {
-      verdict: match[1].toUpperCase() as GuardrailVerdict,
-      reason: match[2].trim(),
-    };
+  // Scan all lines for "VERDICT: reason" pattern (models sometimes prefix with explanation)
+  for (const raw of lines) {
+    const line = raw.trim();
+    const match = line.match(/^(ALLOW|ASK|BLOCK):\s*(.+)$/i);
+    if (match) {
+      return {
+        verdict: match[1].toUpperCase() as GuardrailVerdict,
+        reason: match[2].trim(),
+      };
+    }
   }
 
-  // Try to extract just the verdict word
-  const upper = line.toUpperCase();
-  if (upper.startsWith("ALLOW")) return { verdict: "ALLOW", reason: line };
-  if (upper.startsWith("BLOCK")) return { verdict: "BLOCK", reason: line };
-  if (upper.startsWith("ASK")) return { verdict: "ASK", reason: line };
+  // Fallback: look for the verdict word anywhere in the response
+  const upper = response.toUpperCase();
+  if (upper.includes("BLOCK")) return { verdict: "BLOCK", reason: lines[0].trim() };
+  if (upper.includes("ALLOW")) return { verdict: "ALLOW", reason: lines[0].trim() };
+  if (upper.includes("ASK")) return { verdict: "ASK", reason: lines[0].trim() };
 
   // Unparseable: fail safe
-  return { verdict: "ASK", reason: `Guardrail returned unparseable response: ${line.slice(0, 100)}` };
+  return { verdict: "ASK", reason: `Guardrail returned unparseable response: ${lines[0].trim().slice(0, 100)}` };
 }
 
 // ---------------------------------------------------------------------------
@@ -149,11 +152,11 @@ export async function evaluateToolCall(
 ): Promise<GuardrailResult> {
   const { modelRegistry } = getModelInfra(config);
 
-  // Use the cheapest model: last fallback, then first fallback, then primary.
-  // Guardrail is a classification task; doesn't need Sonnet.
+  // Use the primary model for guardrail evaluation. This is a security boundary;
+  // reliability matters more than cost. The prompt is tiny (~300 tokens in, ~20 out).
   const candidates = [
-    ...(config.agent.fallback_models ?? []).slice().reverse(),
     config.agent.model,
+    ...(config.agent.fallback_models ?? []),
   ];
 
   const model = resolveFirstModel(candidates, modelRegistry);

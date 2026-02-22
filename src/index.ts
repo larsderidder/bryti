@@ -291,7 +291,7 @@ async function recoverPendingCheckpoints(state: AppState): Promise<void> {
   const dir = pendingDir(state.config);
   let entries: string[];
   try {
-    entries = fs.readdirSync(dir).filter((f) => f.endsWith(".json"));
+    entries = fs.readdirSync(dir).filter((f) => f.endsWith(".json") && f !== "restart.json");
   } catch {
     return;
   }
@@ -452,6 +452,7 @@ async function triggerRestart(
   reason: string,
 ): Promise<void> {
   console.log(`[restart] Requested by user ${msg.userId}: ${reason}`);
+  deletePendingCheckpoint(state.config, msg.userId);
   writeRestartMarker(state.config.data_dir, {
     userId: msg.userId,
     channelId: msg.channelId,

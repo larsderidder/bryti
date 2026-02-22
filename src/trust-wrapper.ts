@@ -51,6 +51,20 @@ function escapeHtml(text: string): string {
     .replace(/>/g, "&gt;");
 }
 
+/**
+ * Human-readable descriptions for elevated tools. Shown in approval prompts
+ * instead of raw tool names. Falls back to the tool's reason field.
+ */
+const TOOL_DESCRIPTIONS: Record<string, string> = {
+  system_restart: "Restart to pick up changes",
+  shell_exec: "Run a shell command",
+  http_request: "Make a web request",
+};
+
+function humanToolDescription(toolName: string, reason?: string): string {
+  return TOOL_DESCRIPTIONS[toolName] ?? reason ?? "Perform an action that needs your permission";
+}
+
 function denied(toolName: string): AgentToolResult<unknown> {
   return {
     content: [{
@@ -82,13 +96,10 @@ export function wrapToolWithTrustCheck<T extends AgentTool<any>>(
     // Elevated: first check if the tool itself is approved
     const permResult = checkPermission(tool.name, trustStore);
     if (!permResult.allowed) {
-      const caps = getToolCapabilities(tool.name);
-      const capList = caps.capabilities?.join(", ") ?? "elevated access";
-      const reason = caps.reason ?? `Needs ${capList}.`;
+      const description = humanToolDescription(tool.name, caps.reason);
       const prompt =
-        `⚡ Permission request\n\n` +
-        `<b>${escapeHtml(tool.name)}</b> wants to use: <b>${escapeHtml(capList)}</b>\n` +
-        `${escapeHtml(reason)}`;
+        `⚡ <b>Permission request</b>\n\n` +
+        `${escapeHtml(description)}`;
 
       if (context?.onApprovalNeeded) {
         const approvalKey = `tool:${userId}:${tool.name}`;
@@ -140,12 +151,11 @@ export function wrapToolWithTrustCheck<T extends AgentTool<any>>(
       }
 
       if (guardrailResult.verdict === "ASK") {
-        const argsStr = typeof params === "string" ? params : JSON.stringify(params);
+        const description = humanToolDescription(tool.name, caps.reason);
         const prompt =
-          `⚠️ Confirmation needed\n\n` +
-          `<b>${escapeHtml(tool.name)}</b>\n` +
-          `${escapeHtml(guardrailResult.reason)}\n\n` +
-          `Args: <code>${escapeHtml(argsStr.slice(0, 200))}</code>`;
+          `⚠️ <b>Confirmation needed</b>\n\n` +
+          `${escapeHtml(description)}\n` +
+          `${escapeHtml(guardrailResult.reason)}`;
 
         if (context?.onApprovalNeeded) {
           const approvalKey = `guardrail:${userId}:${toolCallId}`;

@@ -3,16 +3,14 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-# Always rebuild so the running binary is never stale.
-echo "Building TypeScript..."
-npm run build
-
-# Auto-restart on crashes (non-zero exit). Clean exits do not restart.
 RESTART_DELAY_SECONDS="${RESTART_DELAY_SECONDS:-2}"
 
 while true; do
-  node --env-file=.env dist/index.js
-  exit_code=$?
+  echo "Building TypeScript..."
+  npm run build
+
+  exit_code=0
+  node --env-file=.env dist/index.js || exit_code=$?
 
   if [ "$exit_code" -eq 0 ]; then
     echo "Bryti stopped cleanly."
@@ -20,7 +18,7 @@ while true; do
   fi
 
   if [ "$exit_code" -eq 42 ]; then
-    echo "Bryti restart requested. Restarting immediately..."
+    echo "Bryti restart requested. Rebuilding and restarting..."
     continue
   fi
 

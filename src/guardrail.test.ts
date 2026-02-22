@@ -36,10 +36,28 @@ describe("parseVerdict", () => {
     expect(result.reason).toContain("unparseable");
   });
 
-  it("handles multiline response (takes first line)", () => {
+  it("handles multiline response (takes first line with verdict)", () => {
     const result = parseVerdict("ALLOW: safe operation\nThis is additional explanation");
     expect(result.verdict).toBe("ALLOW");
     expect(result.reason).toBe("safe operation");
+  });
+
+  it("finds verdict on a later line (models sometimes prefix with explanation)", () => {
+    const result = parseVerdict(
+      "Let me evaluate this tool call.\nThe user asked for a restart.\nALLOW: user explicitly requested restart",
+    );
+    expect(result.verdict).toBe("ALLOW");
+    expect(result.reason).toBe("user explicitly requested restart");
+  });
+
+  it("falls back to word search when no VERDICT: pattern found", () => {
+    const result = parseVerdict("This action should be ALLOWED because it is safe");
+    expect(result.verdict).toBe("ALLOW");
+  });
+
+  it("word search prefers BLOCK over ALLOW", () => {
+    const result = parseVerdict("I would not allow this, it should be blocked");
+    expect(result.verdict).toBe("BLOCK");
   });
 
   it("handles empty response", () => {

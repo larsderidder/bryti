@@ -10,10 +10,16 @@
  * is easily broken by LLM output.
  */
 
+import crypto from "node:crypto";
 import { Bot, InlineKeyboard, type Context } from "grammy";
 import type { ApprovalResult, ChannelBridge, IncomingMessage, SendOpts } from "./types.js";
 import { markdownToIR, chunkMarkdownIR, type MarkdownLinkSpan } from "../markdown/ir.js";
 import { renderMarkdownWithMarkers } from "../markdown/render.js";
+import {
+  isRecoverableTelegramNetworkError,
+  isRetryableGetFileError,
+  isFileTooBigError,
+} from "./telegram-network-errors.js";
 
 /**
  * Telegram message handler function.
@@ -107,6 +113,22 @@ const MAX_SEND_RETRIES = 3;
 const RETRY_BASE_DELAY_MS = 1000;
 
 /**
+ * How long to wait for more photos in the same album before flushing.
+ * Telegram sends album photos as separate updates arriving within ~100–400 ms.
+ * 600 ms gives ample headroom without noticeable latency.
+ */
+const MEDIA_GROUP_FLUSH_MS = 600;
+
+interface MediaGroupEntry {
+  images: Array<{ data: string; mimeType: string }>;
+  caption: string;
+  channelId: string;
+  userId: string;
+  raw: unknown;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+/**
  * Split text into chunks that fit within Telegram's message limit.
  *
  * Strategy: split on double newlines (paragraphs) first, then single newlines,
@@ -167,7 +189,11 @@ export function chunkMessage(text: string, maxLength = MAX_MESSAGE_LENGTH): stri
 
 /**
  * Retry a Telegram API call with exponential backoff.
- * Respects Telegram's retry_after header on 429 responses.
+ *
+ * Retries on:
+ * - Rate limits (429) using Telegram's retry_after value
+ * - Server errors (5xx)
+ * - Recoverable network errors (ECONNRESET, timeouts, fetch failures, etc.)
  */
 async function withRetry<T>(
   fn: () => Promise<T>,
@@ -189,18 +215,57 @@ async function withRetry<T>(
         parameters?: { retry_after?: number };
       };
 
-      // Only retry on rate limits (429) and server errors (5xx)
       const code = err.error_code;
-      if (code && code !== 429 && (code < 500 || code >= 600)) {
-        throw error;
+
+      // Telegram API rate limit: use retry_after if provided
+      if (code === 429) {
+        const retryAfter = err.parameters?.retry_after;
+        const delayMs = retryAfter ? retryAfter * 1000 : baseDelay * 2 ** attempt;
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        continue;
       }
 
-      // Use Telegram's retry_after if provided, otherwise exponential backoff
-      const retryAfter = err.parameters?.retry_after;
-      const delayMs = retryAfter
-        ? retryAfter * 1000
-        : baseDelay * 2 ** attempt;
+      // Telegram server errors (5xx): exponential backoff
+      if (code && code >= 500 && code < 600) {
+        await new Promise((resolve) => setTimeout(resolve, baseDelay * 2 ** attempt));
+        continue;
+      }
 
+      // Recoverable network errors (ECONNRESET, timeouts, fetch failures, etc.)
+      if (isRecoverableTelegramNetworkError(error, { context: "send" })) {
+        await new Promise((resolve) => setTimeout(resolve, baseDelay * 2 ** attempt));
+        continue;
+      }
+
+      // Permanent error — don't retry
+      throw error;
+    }
+  }
+
+  throw lastError;
+}
+
+/**
+ * Retry a getFile call with exponential backoff.
+ * Skips retry for permanent "file is too big" errors.
+ */
+async function retryGetFile<T>(
+  fn: () => Promise<T>,
+  maxRetries = 3,
+  baseDelay = 1000,
+): Promise<T> {
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      lastError = error;
+
+      if (attempt === maxRetries) break;
+      if (!isRetryableGetFileError(error)) throw error;
+
+      const delayMs = baseDelay * 2 ** attempt;
       await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
   }
@@ -221,6 +286,8 @@ export class TelegramBridge implements ChannelBridge {
   private readonly allowedUsers: number[];
   /** Pending approval requests: approvalKey → resolve function */
   private pendingApprovals: Map<string, (result: ApprovalResult) => void> = new Map();
+  /** Media group buffer: media_group_id → accumulated entry */
+  private mediaGroupBuffer: Map<string, MediaGroupEntry> = new Map();
 
   constructor(private readonly botToken: string, allowedUsers: number[] = []) {
     this.allowedUsers = allowedUsers;
@@ -323,7 +390,10 @@ export class TelegramBridge implements ChannelBridge {
       }
     });
 
-    // Handle photo messages
+    // Handle photo messages — with media group (album) buffering.
+    // Telegram sends each photo in an album as a separate update sharing the
+    // same media_group_id. We collect them all within MEDIA_GROUP_FLUSH_MS
+    // and dispatch a single message containing all images.
     this.bot.on("message:photo", async (ctx) => {
       if (!this.isAllowed(ctx)) {
         await ctx.reply("Sorry, you're not authorized to use this bot.");
@@ -332,20 +402,57 @@ export class TelegramBridge implements ChannelBridge {
 
       if (!this.handler) return;
 
-      const images = await this.downloadPhoto(ctx);
-      if (!images) {
-        await ctx.reply("Sorry, I couldn't download that photo.");
+      const image = await this.downloadPhoto(ctx);
+      if (!image) {
+        // Only reply if it's not part of an album (avoid spamming for partial failures)
+        if (!ctx.message.media_group_id) {
+          await ctx.reply("Sorry, I couldn't download that photo.");
+        }
         return;
       }
 
-      const text = ctx.message.caption?.trim() || "The user sent this image.";
+      const caption = ctx.message.caption?.trim() ?? "";
+      const channelId = String(ctx.chat.id);
+      const userId = String(ctx.from?.id);
+      const mediaGroupId = ctx.message.media_group_id;
+
+      if (mediaGroupId) {
+        // Album: accumulate images and reset the flush timer
+        const existing = this.mediaGroupBuffer.get(mediaGroupId);
+        if (existing) {
+          clearTimeout(existing.timer);
+          existing.images.push(...image);
+          if (caption && !existing.caption) existing.caption = caption;
+          existing.timer = setTimeout(
+            () => this.flushMediaGroup(mediaGroupId),
+            MEDIA_GROUP_FLUSH_MS,
+          );
+        } else {
+          const entry: MediaGroupEntry = {
+            images: [...image],
+            caption,
+            channelId,
+            userId,
+            raw: ctx.message,
+            timer: setTimeout(
+              () => this.flushMediaGroup(mediaGroupId),
+              MEDIA_GROUP_FLUSH_MS,
+            ),
+          };
+          this.mediaGroupBuffer.set(mediaGroupId, entry);
+        }
+        return;
+      }
+
+      // Single photo (no album)
+      const text = caption || "The user sent this image.";
       const msg: IncomingMessage = {
-        channelId: String(ctx.chat.id),
-        userId: String(ctx.from?.id),
+        channelId,
+        userId,
         text,
         platform: "telegram",
         raw: ctx.message,
-        images,
+        images: image,
       };
       await this.handler(msg);
     });
@@ -397,21 +504,20 @@ export class TelegramBridge implements ChannelBridge {
     // Callback data format: "approval:<key>:<result>"
     this.bot.on("callback_query:data", async (ctx) => {
       const data = ctx.callbackQuery.data;
-      if (!data.startsWith("approval:")) {
+      if (!data.startsWith("a:")) {
         await ctx.answerCallbackQuery();
         return;
       }
 
-      // Parse: "approval:<key>:<result>"
-      const rest = data.slice("approval:".length);
-      const lastColon = rest.lastIndexOf(":");
-      if (lastColon === -1) {
+      // Parse: "a:<shortKey>:<result>" where result is allow|always|deny
+      const parts = data.split(":");
+      if (parts.length !== 3) {
         await ctx.answerCallbackQuery();
         return;
       }
 
-      const key = rest.slice(0, lastColon);
-      const resultStr = rest.slice(lastColon + 1) as ApprovalResult;
+      const key = parts[1];
+      const resultStr = parts[2] === "always" ? "allow_always" as ApprovalResult : parts[2] as ApprovalResult;
 
       const resolve = this.pendingApprovals.get(key);
       if (resolve) {
@@ -437,9 +543,17 @@ export class TelegramBridge implements ChannelBridge {
 
     // Initialize bot (fetches bot info) then start polling in background
     await this.bot.init();
-    // bot.start() blocks until stopped; run it in background
-    this.bot.start().catch((err) => {
-      console.error("Telegram polling error:", err);
+    // bot.start() blocks until stopped; run it in background.
+    // Explicitly declare the update types we handle so Telegram doesn't send
+    // types we haven't subscribed to (e.g. channel_post, message_reaction).
+    this.bot.start({
+      allowed_updates: ["message", "callback_query"],
+    }).catch((err) => {
+      if (isRecoverableTelegramNetworkError(err, { context: "polling" })) {
+        console.warn("Telegram polling stopped (network error):", (err as Error).message);
+      } else {
+        console.error("Telegram polling error:", err);
+      }
     });
     console.log("Telegram bridge started (polling mode)");
   }
@@ -450,6 +564,12 @@ export class TelegramBridge implements ChannelBridge {
       clearInterval(interval);
     }
     this.typingIntervals.clear();
+
+    // Cancel any pending media group flush timers
+    for (const entry of this.mediaGroupBuffer.values()) {
+      clearTimeout(entry.timer);
+    }
+    this.mediaGroupBuffer.clear();
 
     if (this.bot) {
       await this.bot.stop();
@@ -573,26 +693,30 @@ export class TelegramBridge implements ChannelBridge {
   ): Promise<ApprovalResult> {
     if (!this.bot) throw new Error("Bot not started");
 
+    // Telegram limits callback_query data to 64 bytes. Use a short hash
+    // as the callback key and map it back to the full approvalKey internally.
+    const shortKey = crypto.createHash("sha256").update(approvalKey).digest("hex").slice(0, 12);
+
     const keyboard = new InlineKeyboard()
-      .text("✓ Allow once", `approval:${approvalKey}:allow`)
-      .text("✓ Always allow", `approval:${approvalKey}:allow_always`)
+      .text("✓ Allow once", `a:${shortKey}:allow`)
+      .text("✓ Always allow", `a:${shortKey}:always`)
       .row()
-      .text("✗ Deny", `approval:${approvalKey}:deny`);
+      .text("✗ Deny", `a:${shortKey}:deny`);
 
     await withRetry(() =>
-      this.bot!.api.sendMessage(parseInt(channelId, 10), escapeHtml(prompt), {
+      this.bot!.api.sendMessage(parseInt(channelId, 10), prompt, {
         parse_mode: "HTML",
         reply_markup: keyboard,
       }),
     );
 
     return new Promise<ApprovalResult>((resolve) => {
-      this.pendingApprovals.set(approvalKey, resolve);
+      this.pendingApprovals.set(shortKey, resolve);
 
       // Auto-deny on timeout
       setTimeout(() => {
-        if (this.pendingApprovals.has(approvalKey)) {
-          this.pendingApprovals.delete(approvalKey);
+        if (this.pendingApprovals.has(shortKey)) {
+          this.pendingApprovals.delete(shortKey);
           resolve("deny");
         }
       }, timeoutMs);
@@ -600,8 +724,36 @@ export class TelegramBridge implements ChannelBridge {
   }
 
   /**
-   * Download the largest available photo from a photo message and return it
-   * as a base64-encoded image attachment. Returns null on failure.
+   * Flush a buffered media group (album) as a single message with all images.
+   */
+  private async flushMediaGroup(mediaGroupId: string): Promise<void> {
+    const entry = this.mediaGroupBuffer.get(mediaGroupId);
+    if (!entry) return;
+    this.mediaGroupBuffer.delete(mediaGroupId);
+
+    if (!this.handler || entry.images.length === 0) return;
+
+    const text = entry.caption || "The user sent this image.";
+    const msg: IncomingMessage = {
+      channelId: entry.channelId,
+      userId: entry.userId,
+      text,
+      platform: "telegram",
+      raw: entry.raw,
+      images: entry.images,
+    };
+
+    console.log(`[telegram] Flushing media group ${mediaGroupId}: ${entry.images.length} image(s)`);
+    try {
+      await this.handler(msg);
+    } catch (err) {
+      console.error("[telegram] Media group handler error:", (err as Error).message);
+    }
+  }
+
+  /**
+   * Download the largest available photo from a photo message.
+   * Returns a single-element array on success, null on failure.
    */
   private async downloadPhoto(
     ctx: Context & { message: NonNullable<Context["message"]> & { photo: NonNullable<NonNullable<Context["message"]>["photo"]> } },
@@ -610,33 +762,50 @@ export class TelegramBridge implements ChannelBridge {
 
     // Telegram sends photos as an array of sizes; last entry is largest
     const sizes = ctx.message.photo;
-    console.log(`[telegram] Photo sizes: ${sizes.map((s) => `${s.width}x${s.height} (file_size: ${s.file_size ?? "?"})`).join(", ")}`);
     const largest = sizes[sizes.length - 1];
     if (!largest) return null;
 
+    let filePath: string;
     try {
-      const file = await this.bot.api.getFile(largest.file_id);
+      const file = await retryGetFile(() => this.bot!.api.getFile(largest.file_id));
       if (!file.file_path) return null;
+      filePath = file.file_path;
+    } catch (err) {
+      if (isFileTooBigError(err)) {
+        console.warn(`[telegram] Photo too large to download (>20 MB), skipping`);
+      } else {
+        console.error("[telegram] getFile failed for photo:", (err as Error).message);
+      }
+      return null;
+    }
 
-      const url = `https://api.telegram.org/file/bot${this.botToken}/${file.file_path}`;
+    try {
+      const url = `https://api.telegram.org/file/bot${this.botToken}/${filePath}`;
       const response = await fetch(url);
-      if (!response.ok) return null;
+      if (!response.ok) {
+        console.error(`[telegram] Photo download failed: HTTP ${response.status}`);
+        return null;
+      }
 
       const buffer = await response.arrayBuffer();
       const data = Buffer.from(buffer).toString("base64");
-      // Use Content-Type from response; fall back to JPEG (Telegram default for compressed photos)
+      // Use Content-Type from response; Telegram serves JPEG for compressed photos,
+      // but PNG/WebP for images sent uncompressed.
       const mimeType = response.headers.get("content-type")?.split(";")[0].trim() || "image/jpeg";
-      console.log(`[telegram] Downloaded photo: ${buffer.byteLength} bytes (${largest.width}x${largest.height}), mime=${mimeType}, base64 length ${data.length}`);
+      console.log(
+        `[telegram] Downloaded photo: ${buffer.byteLength} bytes ` +
+        `(${largest.width}x${largest.height}), mime=${mimeType}`,
+      );
       return [{ data, mimeType }];
     } catch (err) {
-      console.error("[telegram] Failed to download photo:", (err as Error).message);
+      console.error("[telegram] Photo fetch failed:", (err as Error).message);
       return null;
     }
   }
 
   /**
-   * Download an image document and return it as a base64-encoded attachment.
-   * Returns null on failure.
+   * Download an image document (sent as a file rather than a compressed photo).
+   * Returns a single-element array on success, null on failure.
    */
   private async downloadDocument(
     ctx: Context & { message: NonNullable<Context["message"]> & { document: NonNullable<NonNullable<Context["message"]>["document"]> } },
@@ -645,19 +814,37 @@ export class TelegramBridge implements ChannelBridge {
     if (!this.bot) return null;
 
     const doc = ctx.message.document;
+    let filePath: string;
     try {
-      const file = await this.bot.api.getFile(doc.file_id);
+      const file = await retryGetFile(() => this.bot!.api.getFile(doc.file_id));
       if (!file.file_path) return null;
+      filePath = file.file_path;
+    } catch (err) {
+      if (isFileTooBigError(err)) {
+        console.warn(`[telegram] Image document too large to download (>20 MB), skipping`);
+      } else {
+        console.error("[telegram] getFile failed for document:", (err as Error).message);
+      }
+      return null;
+    }
 
-      const url = `https://api.telegram.org/file/bot${this.botToken}/${file.file_path}`;
+    try {
+      const url = `https://api.telegram.org/file/bot${this.botToken}/${filePath}`;
       const response = await fetch(url);
-      if (!response.ok) return null;
+      if (!response.ok) {
+        console.error(`[telegram] Document download failed: HTTP ${response.status}`);
+        return null;
+      }
 
       const buffer = await response.arrayBuffer();
       const data = Buffer.from(buffer).toString("base64");
-      return [{ data, mimeType }];
+      // Trust the declared MIME type for documents; fall back to response header
+      const resolvedMime =
+        mimeType || response.headers.get("content-type")?.split(";")[0].trim() || "image/jpeg";
+      console.log(`[telegram] Downloaded image document: ${buffer.byteLength} bytes, mime=${resolvedMime}`);
+      return [{ data, mimeType: resolvedMime }];
     } catch (err) {
-      console.error("[telegram] Failed to download document:", (err as Error).message);
+      console.error("[telegram] Document fetch failed:", (err as Error).message);
       return null;
     }
   }

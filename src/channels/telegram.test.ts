@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import { describe, it, expect } from "vitest";
 import { TelegramBridge, markdownToHtml, chunkMessage, markdownToTelegramChunks } from "./telegram.js";
 
@@ -219,5 +220,57 @@ describe("markdownToTelegramChunks", () => {
 
   it("returns empty array for empty input", () => {
     expect(markdownToTelegramChunks("")).toEqual([]);
+  });
+});
+
+describe("approval callback data format", () => {
+  // Telegram limits callback_query data to 64 bytes. The approval flow uses
+  // a:${12-char-hash}:${result} format to stay well under that limit.
+
+  function buildCallbackData(approvalKey: string, result: string): string {
+    const shortKey = crypto.createHash("sha256").update(approvalKey).digest("hex").slice(0, 12);
+    return `a:${shortKey}:${result}`;
+  }
+
+  it("callback data stays under 64 bytes for tool approval", () => {
+    const key = "tool:default-user:system_restart";
+    const data = buildCallbackData(key, "always");
+    expect(data.length).toBeLessThanOrEqual(64);
+  });
+
+  it("callback data stays under 64 bytes for guardrail approval with long tool call ID", () => {
+    const key = "guardrail:default-user:toolu_01A1B2C3D4E5F6G7H8I9J0K1L2M3N4O5";
+    const data = buildCallbackData(key, "always");
+    expect(data.length).toBeLessThanOrEqual(64);
+  });
+
+  it("all three results stay under 64 bytes", () => {
+    const key = "guardrail:default-user:toolu_01XXXXXXXXXXXXXXXXXXXXXXXXXXXX";
+    expect(buildCallbackData(key, "allow").length).toBeLessThanOrEqual(64);
+    expect(buildCallbackData(key, "always").length).toBeLessThanOrEqual(64);
+    expect(buildCallbackData(key, "deny").length).toBeLessThanOrEqual(64);
+  });
+
+  it("same approval key always produces the same short key", () => {
+    const key = "tool:12345:shell_exec";
+    const a = buildCallbackData(key, "allow");
+    const b = buildCallbackData(key, "allow");
+    expect(a).toBe(b);
+  });
+
+  it("different approval keys produce different short keys", () => {
+    const a = buildCallbackData("tool:12345:shell_exec", "allow");
+    const b = buildCallbackData("tool:12345:http_request", "allow");
+    expect(a).not.toBe(b);
+  });
+
+  it("callback data can be parsed back to parts", () => {
+    const key = "guardrail:default-user:toolu_abc123";
+    const data = buildCallbackData(key, "always");
+    const parts = data.split(":");
+    expect(parts).toHaveLength(3);
+    expect(parts[0]).toBe("a");
+    expect(parts[1]).toHaveLength(12);
+    expect(parts[2]).toBe("always");
   });
 });
