@@ -233,19 +233,19 @@ describe("approval callback data format", () => {
   }
 
   it("callback data stays under 64 bytes for tool approval", () => {
-    const key = "tool:default-user:system_restart";
+    const key = "tool:123456789:system_restart";
     const data = buildCallbackData(key, "always");
     expect(data.length).toBeLessThanOrEqual(64);
   });
 
   it("callback data stays under 64 bytes for guardrail approval with long tool call ID", () => {
-    const key = "guardrail:default-user:toolu_01A1B2C3D4E5F6G7H8I9J0K1L2M3N4O5";
+    const key = "guardrail:123456789:toolu_01A1B2C3D4E5F6G7H8I9J0K1L2M3N4O5";
     const data = buildCallbackData(key, "always");
     expect(data.length).toBeLessThanOrEqual(64);
   });
 
   it("all three results stay under 64 bytes", () => {
-    const key = "guardrail:default-user:toolu_01XXXXXXXXXXXXXXXXXXXXXXXXXXXX";
+    const key = "guardrail:123456789:toolu_01XXXXXXXXXXXXXXXXXXXXXXXXXXXX";
     expect(buildCallbackData(key, "allow").length).toBeLessThanOrEqual(64);
     expect(buildCallbackData(key, "always").length).toBeLessThanOrEqual(64);
     expect(buildCallbackData(key, "deny").length).toBeLessThanOrEqual(64);
@@ -265,7 +265,7 @@ describe("approval callback data format", () => {
   });
 
   it("callback data can be parsed back to parts", () => {
-    const key = "guardrail:default-user:toolu_abc123";
+    const key = "guardrail:123456789:toolu_abc123";
     const data = buildCallbackData(key, "always");
     const parts = data.split(":");
     expect(parts).toHaveLength(3);

@@ -71,7 +71,7 @@ function resolveUserId(dataDir: string): string {
   } catch {
     // Config may not exist in dev environments
   }
-  return "default-user"; // Fallback for Lars's local setup
+  return "default-user";
 }
 
 // ---------------------------------------------------------------------------
