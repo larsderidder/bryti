@@ -1,12 +1,25 @@
-# Bryti
+<p align="center">
+  <img src="assets/icon.svg" alt="" width="32" height="40">
+</p>
 
-[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
-[![Node.js 22+](https://img.shields.io/badge/node-22%2B-brightgreen.svg)](https://nodejs.org/)
-[![Built on pi](https://img.shields.io/badge/built%20on-pi%20SDK-purple.svg)](https://github.com/mariozechner/pi)
-[![Self-hosted](https://img.shields.io/badge/self--hosted-yes-orange.svg)](#getting-started)
-[![Codebase size](repo-tokens/badge.svg)](#architecture)
+<h1 align="center">Bryti</h1>
 
-Your AI colleague, in the apps you already use.
+<p align="center">
+  <strong>Your AI colleague, in the apps you already use.</strong>
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue.svg" alt="License: AGPL-3.0"></a>
+  <a href="https://nodejs.org/"><img src="https://img.shields.io/badge/node-22%2B-brightgreen.svg" alt="Node.js 22+"></a>
+  <a href="https://github.com/mariozechner/pi"><img src="https://img.shields.io/badge/built%20on-pi%20SDK-purple.svg" alt="Built on pi"></a>
+  <a href="#getting-started"><img src="https://img.shields.io/badge/self--hosted-yes-orange.svg" alt="Self-hosted"></a>
+</p>
+
+<p align="center">
+  <img src="assets/chat-example.svg" alt="Bryti conversation showing research, memory recall, and proactive follow-up" width="540">
+</p>
+
+---
 
 Bryti is a personal AI agent that lives in Telegram and WhatsApp. It remembers what you tell it, tracks what's coming up, researches things in the background, and writes its own tools when it needs new capabilities. All running on your machine, with your data staying yours.
 

@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 540 420" fill="none">
+  <!-- Background -->
+  <rect fill="#1a1714" width="540" height="420" rx="12"/>
+
+  <!-- Header bar -->
+  <rect fill="#2a2520" width="540" height="44" rx="12"/>
+  <rect fill="#2a2520" y="12" width="540" height="32"/>
+
+  <!-- Rune icon in header -->
+  <g transform="translate(20,10)">
+    <svg width="16" height="24" viewBox="0 0 40 50">
+      <rect x="8" y="0" width="5" height="50" rx="2.5" fill="#e06a50"/>
+      <polygon points="13,3 33,14 13,22" fill="#e06a50"/>
+      <polygon points="13,26 35,37 13,47" fill="#e06a50"/>
+    </svg>
+  </g>
+  <text fill="#f5ebe0" font-family="system-ui, -apple-system, sans-serif" font-size="15" font-weight="600" x="42" y="28">Bryti</text>
+
+  <!-- User bubble 1 -->
+  <rect fill="#e06a50" x="140" y="60" width="380" height="46" rx="12"/>
+  <text fill="#fff" font-family="system-ui, -apple-system, sans-serif" font-size="12.5" x="154" y="78">Look into SLIM grant options for freelancers,</text>
+  <text fill="#fff" font-family="system-ui, -apple-system, sans-serif" font-size="12.5" x="154" y="94">think deadline's this month.</text>
+
+  <!-- Bryti name + bubble 1 (memory recall + research) -->
+  <text fill="#e06a50" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-weight="600" x="20" y="128">Bryti</text>
+  <rect fill="#2a2520" x="20" y="134" width="420" height="62" rx="12"/>
+  <text fill="#e8ddd0" font-family="system-ui, -apple-system, sans-serif" font-size="12.5" x="34" y="152">Done. SLIM covers up to €5k for training, deadline</text>
+  <text fill="#e8ddd0" font-family="system-ui, -apple-system, sans-serif" font-size="12.5" x="34" y="168">Feb 28. I filtered for AI and strategy courses since</text>
+  <text fill="#e8ddd0" font-family="system-ui, -apple-system, sans-serif" font-size="12.5" x="34" y="184">you mentioned wanting to move into AI consulting.</text>
+
+  <!-- User bubble 2 -->
+  <rect fill="#e06a50" x="100" y="212" width="420" height="46" rx="12"/>
+  <text fill="#fff" font-family="system-ui, -apple-system, sans-serif" font-size="12.5" x="114" y="230">Oh nice, you remembered that. Remind me Friday</text>
+  <text fill="#fff" font-family="system-ui, -apple-system, sans-serif" font-size="12.5" x="114" y="246">unless I've already sent the application.</text>
+
+  <!-- Bryti name + bubble 2 (projection with condition) -->
+  <text fill="#e06a50" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-weight="600" x="20" y="280">Bryti</text>
+  <rect fill="#2a2520" x="20" y="286" width="380" height="46" rx="12"/>
+  <text fill="#e8ddd0" font-family="system-ui, -apple-system, sans-serif" font-size="12.5" x="34" y="304">Got it. I'll check back Friday and only nudge</text>
+  <text fill="#e8ddd0" font-family="system-ui, -apple-system, sans-serif" font-size="12.5" x="34" y="320">you if you haven't applied yet.</text>
+
+  <!-- Bryti name + bubble 3 (proactive follow-up, days later) -->
+  <text fill="#e06a50" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-weight="600" x="20" y="354">Bryti</text>
+  <rect fill="#2a2520" x="20" y="360" width="400" height="46" rx="12"/>
+  <text fill="#e8ddd0" font-family="system-ui, -apple-system, sans-serif" font-size="12.5" x="34" y="378">That SLIM deadline is in two days. Want me to</text>
+  <text fill="#e8ddd0" font-family="system-ui, -apple-system, sans-serif" font-size="12.5" x="34" y="394">pull together the application requirements?</text>
+</svg>
