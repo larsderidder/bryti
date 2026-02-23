@@ -21,6 +21,7 @@ export interface ProviderConfig {
   base_url: string;
   api: string;
   api_key: string;
+  headers?: Record<string, string>;
   models: ModelEntry[];
 }
 

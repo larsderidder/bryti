@@ -73,6 +73,7 @@ function generateModelsJson(config: Config, agentDir: string): void {
       baseUrl: provider.base_url || `https://api.${provider.name}.com`,
       api: provider.api || "openai-completions",
       apiKey: apiKey,
+      ...(provider.headers && { headers: provider.headers }),
       models: provider.models.map((m) => ({
         id: m.id,
         name: m.name || m.id,
