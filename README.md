@@ -47,18 +47,6 @@ Bryti is a personal AI agent that lives in Telegram and WhatsApp. It remembers w
 
 ### Quick start
 
-**From npm:**
-```bash
-npm install -g @bryti/agent
-
-# Configure
-cp "$(npm root -g)/@bryti/agent/config.example.yml" data/config.yml
-cp "$(npm root -g)/@bryti/agent/.env.example" .env
-# Edit data/config.yml and .env, then:
-bryti-start
-```
-
-**From source:**
 ```bash
 git clone git@github.com:larsderidder/bryti.git
 cd bryti
@@ -69,7 +57,7 @@ cp .env.example .env                       # add your Telegram bot token
 cp config.example.yml data/config.yml      # edit to taste
 
 # Run
-./run.sh
+bryti                  # or: npm start, or: ./run.sh (auto-restart on crash)
 ```
 
 The embedding model downloads on first run (~300 MB). After that, startups take a few seconds.
@@ -250,17 +238,17 @@ Environment variables are supported via `${VAR}` syntax. The `.env` file loads a
 
 ## CLI
 
-Operator tools for managing Bryti without going through chat:
+Operator tools for managing Bryti without going through chat. Safe to run while the server is running.
 
 ```bash
-npm run cli -- help                              # all commands
-npm run cli -- memory                            # inspect all memory tiers
-npm run cli -- memory projections --all          # all projections (including resolved)
-npm run cli -- memory archival --query "energy"  # search archival memory
-npm run cli -- reflect                           # run reflection pass now
-npm run cli -- timeskip "dentist" --minutes 2    # make a projection fire in 2 min
-npm run cli -- archive-fact "dentist confirmed"  # insert fact, trigger matching projections
-npm run cli -- fill-context --turns 20           # inject synthetic conversation for testing
+bryti help                              # all commands
+bryti memory                            # inspect all memory tiers
+bryti memory projections --all          # all projections (including resolved)
+bryti memory archival --query "energy"  # search archival memory
+bryti reflect                           # run reflection pass now
+bryti timeskip "dentist" --minutes 2    # make a projection fire in 2 min
+bryti archive-fact "dentist confirmed"  # insert fact, trigger matching projections
+bryti fill-context --turns 20           # inject synthetic conversation for testing
 ```
 
 ## Contributing

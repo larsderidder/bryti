@@ -939,7 +939,19 @@ async function runWithSupervisor(): Promise<void> {
   process.removeListener("SIGTERM", onSignal);
 }
 
-runWithSupervisor().catch((error) => {
-  console.error("Supervisor fatal error:", error);
-  process.exit(1);
-});
+/**
+ * Start the bryti server. Called from the CLI dispatcher or directly
+ * when index.ts is the entry point.
+ */
+export async function startServer(): Promise<void> {
+  await runWithSupervisor();
+}
+
+// When run directly (not imported by cli.ts), start immediately.
+const isDirectEntry = process.argv[1]?.endsWith("index.js");
+if (isDirectEntry) {
+  startServer().catch((error) => {
+    console.error("Supervisor fatal error:", error);
+    process.exit(1);
+  });
+}

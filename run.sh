@@ -10,7 +10,7 @@ while true; do
   npm run build
 
   exit_code=0
-  node dist/index.js || exit_code=$?
+  node dist/cli.js serve || exit_code=$?
 
   if [ "$exit_code" -eq 0 ]; then
     echo "Bryti stopped cleanly."

@@ -10,7 +10,7 @@ try { process.loadEnvFile(".env"); } catch { /* not present, fine */ }
  * directly. This is safe to do while the bot is running because SQLite WAL
  * mode allows concurrent readers alongside a live writer without blocking.
  *
- * See `npm run cli -- help` for full command listing.
+ * See `bryti help` for full command listing.
  */
 
 import fs from "node:fs";
@@ -599,12 +599,17 @@ async function cmdArchiveFact(dataDir: string, userId: string, content: string):
 
 function showHelp(): void {
   console.log(`
-bryti CLI — management commands
+bryti — AI colleague in your messaging apps
 
 Usage:
-  npm run cli -- <command> [options]
+  bryti                Start the server (Telegram/WhatsApp bridges, scheduler)
+  bryti serve          Same as above (explicit)
+  bryti <command>      Run a management command (safe while server is running)
 
 Commands:
+  serve
+    Start the bryti server.
+
   help
     Show this help text.
 
@@ -663,7 +668,14 @@ Global options:
 async function main(): Promise<void> {
   const command = positional(0);
 
-  if (!command || command === "help" || flag("--help") || flag("-h")) {
+  // No args or explicit "serve": start the server
+  if (!command || command === "serve") {
+    const { startServer } = await import("./index.js");
+    await startServer();
+    return;
+  }
+
+  if (command === "help" || flag("--help") || flag("-h")) {
     showHelp();
     return;
   }
@@ -741,7 +753,7 @@ async function main(): Promise<void> {
 
     default:
       console.error(`Unknown command: ${command}`);
-      console.error("Run 'npm run cli -- help' for usage.");
+      console.error("Run 'bryti help' for usage.");
       process.exit(1);
   }
 

@@ -11,8 +11,7 @@
   },
   "main": "dist/index.js",
   "bin": {
-    "bryti": "dist/cli.js",
-    "bryti-start": "dist/index.js"
+    "bryti": "dist/cli.js"
   },
   "files": [
     "dist/",
@@ -24,7 +23,7 @@
   "scripts": {
     "build": "tsc && cp -r defaults dist/",
     "dev": "tsc --watch",
-    "start": "node dist/index.js",
+    "start": "node dist/cli.js serve",
     "cli": "node dist/cli.js",
     "clean": "rm -rf dist",
     "test": "vitest run",
