@@ -1,6 +1,7 @@
+#!/usr/bin/env node
 /**
  * Bryti management CLI. Single entry point for all operator tasks.
- * Run via: npm run cli -- <command> [options]
+ * Run via: bryti <command> [options]
  *
  * The CLI bypasses the running application entirely and reads/writes SQLite
  * directly. This is safe to do while the bot is running because SQLite WAL

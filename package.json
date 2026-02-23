@@ -1,10 +1,21 @@
 {
   "name": "@bryti/agent",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "Your AI colleague, in the apps you already use.",
   "license": "AGPL-3.0-only",
   "type": "module",
   "private": false,
+  "main": "dist/index.js",
+  "bin": {
+    "bryti": "dist/cli.js"
+  },
+  "files": [
+    "dist/",
+    "config.example.yml",
+    "run.sh",
+    "Dockerfile",
+    "docker-compose.yml"
+  ],
   "scripts": {
     "build": "tsc && cp -r defaults dist/",
     "dev": "tsc --watch",
