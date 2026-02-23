@@ -29,7 +29,7 @@ import { createModelInfra, resolveModel } from "../model-infra.js";
 // Constants
 // ---------------------------------------------------------------------------
 
-const DEFAULT_TIMEOUT_MS = 60 * 60 * 1000; // 60 minutes
+const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 
 // ---------------------------------------------------------------------------
 // Worker system prompt

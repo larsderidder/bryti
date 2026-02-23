@@ -264,10 +264,15 @@ export class WhatsAppBridge implements ChannelBridge {
     return new Promise<ApprovalResult>((resolve) => {
       this.pendingApprovals.set(approvalKey, resolve);
 
-      setTimeout(() => {
+      setTimeout(async () => {
         if (this.pendingApprovals.has(approvalKey)) {
           this.pendingApprovals.delete(approvalKey);
           resolve("deny");
+          try {
+            await this.sendMessage(channelId, "Permission request expired (auto-denied).");
+          } catch {
+            // Best-effort notification
+          }
         }
       }, timeoutMs);
     });

@@ -12,8 +12,8 @@
 import crypto from "node:crypto";
 import { Bot, InlineKeyboard, type Context } from "grammy";
 import type { ApprovalResult, ChannelBridge, IncomingMessage, SendOpts } from "./types.js";
-import { markdownToIR, chunkMarkdownIR, type MarkdownLinkSpan } from "../markdown/ir.js";
-import { renderMarkdownWithMarkers } from "../markdown/render.js";
+import { markdownToIR, chunkMarkdownIR, type MarkdownLinkSpan } from "./markdown/ir.js";
+import { renderMarkdownWithMarkers } from "./markdown/render.js";
 import {
   isRecoverableTelegramNetworkError,
   isRetryableGetFileError,
@@ -695,11 +695,21 @@ export class TelegramBridge implements ChannelBridge {
     return new Promise<ApprovalResult>((resolve) => {
       this.pendingApprovals.set(shortKey, resolve);
 
-      // Auto-deny on timeout
-      setTimeout(() => {
+      // Auto-deny on timeout and notify the user
+      setTimeout(async () => {
         if (this.pendingApprovals.has(shortKey)) {
           this.pendingApprovals.delete(shortKey);
           resolve("deny");
+          try {
+            await withRetry(() =>
+              this.bot!.api.sendMessage(
+                parseInt(channelId, 10),
+                "⏱ Permission request expired (auto-denied).",
+              ),
+            );
+          } catch {
+            // Best-effort notification
+          }
         }
       }, timeoutMs);
     });
@@ -835,15 +845,15 @@ export class TelegramBridge implements ChannelBridge {
 
   /**
    * Check if user is allowed to use the bot.
+   * When allowed_users is empty, nobody is allowed (deny by default).
    */
   private isAllowed(ctx: Context): boolean {
-    // If no allowed users specified, allow all
-    if (this.allowedUsers.length === 0) {
-      return true;
-    }
-
     const userId = ctx.from?.id;
     if (!userId) {
+      return false;
+    }
+
+    if (this.allowedUsers.length === 0) {
       return false;
     }
 

@@ -72,7 +72,7 @@ agent:
 
 telegram:
   token: ${TELEGRAM_BOT_TOKEN}
-  allowed_users: []  # Telegram user IDs. Empty = allow all (not recommended).
+  allowed_users: []  # Telegram user IDs. Empty = deny all. Add at least one.
 
 # WhatsApp via baileys (no Meta Business API). QR code auth on first run.
 # allowed_users: phone numbers in international format without + (e.g., 31612345678)

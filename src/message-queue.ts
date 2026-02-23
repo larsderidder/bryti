@@ -11,6 +11,8 @@ import type { IncomingMessage } from "./channels/types.js";
 
 const MAX_DEPTH = 10;
 const MERGE_WINDOW_MS = 5000;
+const RATE_LIMIT_MAX = 10;
+const RATE_LIMIT_WINDOW_MS = 60_000;
 
 interface QueueEntry {
   msg: IncomingMessage;
@@ -26,6 +28,46 @@ interface ChannelQueue {
 }
 
 /**
+ * Sliding window rate limiter. Tracks timestamps of recent messages per user
+ * and rejects when the limit is exceeded.
+ */
+class RateLimiter {
+  private readonly windows = new Map<string, number[]>();
+
+  constructor(
+    private readonly maxMessages: number,
+    private readonly windowMs: number,
+  ) {}
+
+  /**
+   * Check if a message from this user should be allowed.
+   * Returns true if allowed, false if rate-limited.
+   */
+  check(userId: string): boolean {
+    const now = Date.now();
+    const cutoff = now - this.windowMs;
+    let timestamps = this.windows.get(userId);
+
+    if (!timestamps) {
+      timestamps = [];
+      this.windows.set(userId, timestamps);
+    }
+
+    // Prune old entries
+    while (timestamps.length > 0 && timestamps[0] < cutoff) {
+      timestamps.shift();
+    }
+
+    if (timestamps.length >= this.maxMessages) {
+      return false;
+    }
+
+    timestamps.push(now);
+    return true;
+  }
+}
+
+/**
  * Serialises processing per channel and merges rapid follow-up messages.
  */
 export class MessageQueue {
@@ -34,6 +76,7 @@ export class MessageQueue {
   private readonly rejectFn: RejectFn;
   private readonly maxDepth: number;
   private readonly mergeWindowMs: number;
+  private readonly rateLimiter: RateLimiter;
 
   constructor(
     processFn: ProcessFn,
@@ -45,14 +88,25 @@ export class MessageQueue {
     this.rejectFn = rejectFn;
     this.maxDepth = maxDepth;
     this.mergeWindowMs = mergeWindowMs;
+    this.rateLimiter = new RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
   }
 
   /**
    * Enqueue a message. If nothing is processing for this channel, starts
-   * draining immediately.
+   * draining immediately. Rate-limited per user (10 messages/minute).
    */
   enqueue(msg: IncomingMessage): void {
     const key = msg.channelId;
+
+    // Rate limiting: skip for internal messages (worker triggers, scheduler)
+    const rawObj = msg.raw as Record<string, unknown> | null | undefined;
+    const isInternal = rawObj?.type != null;
+    if (!isInternal && !this.rateLimiter.check(msg.userId)) {
+      console.warn(`[queue] Rate limit exceeded for user ${msg.userId}`);
+      this.rejectFn(msg).catch((err) => console.error("rejectFn error:", err));
+      return;
+    }
+
     let q = this.queues.get(key);
     if (!q) {
       q = { entries: [], processing: false };

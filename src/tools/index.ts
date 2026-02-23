@@ -47,6 +47,11 @@ export function createTools(
 
   // Skill installation: fetch and install skills from URLs or local paths
   tools.push(createSkillInstallTool(config.data_dir));
+  registerToolCapabilities("skill_install", {
+    level: "elevated",
+    capabilities: ["network", "filesystem"],
+    reason: "Installs skills from URLs or copies local directories into the skills folder.",
+  });
 
   // NOTE: web_search and fetch_url are NOT given to the main agent.
   // External content is processed by workers in isolation (security boundary).

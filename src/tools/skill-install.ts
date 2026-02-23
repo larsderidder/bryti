@@ -13,6 +13,7 @@ import path from "node:path";
 import type { AgentTool, AgentToolResult } from "@mariozechner/pi-agent-core";
 import { Type } from "@sinclair/typebox";
 import { toolError, toolSuccess } from "./result.js";
+import { isPrivateHostname } from "../util/ssrf.js";
 
 const skillInstallSchema = Type.Object({
   name: Type.String({
@@ -135,6 +136,11 @@ export function createSkillInstallTool(dataDir: string): AgentTool<typeof skillI
         return toolError(
           "Source must be an absolute local path (starting with /) or a URL (starting with http).",
         );
+      }
+
+      // SSRF protection: reject private/internal URLs
+      if (isPrivateHostname(source)) {
+        return toolError("Cannot fetch from private or internal URLs.");
       }
 
       // Try GitHub/GitLab directory URL conversion

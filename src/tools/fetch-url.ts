@@ -11,6 +11,7 @@ import type { AgentTool, AgentToolResult } from "@mariozechner/pi-agent-core";
 import type { Static } from "@sinclair/typebox";
 import { toolError, toolSuccess } from "./result.js";
 import { Type } from "@sinclair/typebox";
+import { isPrivateHostname, safeLookup } from "../util/ssrf.js";
 
 const MAX_CONTENT_LENGTH = 4000;
 
@@ -19,44 +20,6 @@ const fetchUrlSchema = Type.Object({
 });
 
 type FetchUrlInput = Static<typeof fetchUrlSchema>;
-
-/**
- * Check if a URL is private (SSRF protection).
- */
-function isPrivateUrl(url: string): boolean {
-  try {
-    const parsed = new URL(url);
-    const hostname = parsed.hostname;
-
-    // Check localhost variants
-    if (
-      hostname === "localhost" ||
-      hostname === "127.0.0.1" ||
-      hostname === "::1" ||
-      hostname.startsWith("127.")
-    ) {
-      return true;
-    }
-
-    // Check private IP ranges
-    if (hostname.startsWith("10.")) return true;
-    if (hostname.startsWith("192.168.")) return true;
-    if (hostname.startsWith("172.")) {
-      const parts = hostname.split(".");
-      if (parts.length >= 2) {
-        const second = parseInt(parts[1], 10);
-        if (second >= 16 && second <= 31) return true;
-      }
-    }
-
-    // Check metadata endpoints (cloud providers)
-    if (hostname === "169.254.169.254") return true;
-
-    return false;
-  } catch {
-    return true; // Invalid URLs are treated as private
-  }
-}
 
 /**
  * Create the fetch URL tool.
@@ -71,13 +34,9 @@ export function createFetchUrlTool(timeoutMs: number = 10000): AgentTool<typeof 
       _toolCallId: string,
       { url }: FetchUrlInput,
     ): Promise<AgentToolResult<unknown>> {
-      // SSRF protection
-      if (isPrivateUrl(url)) {
-        const text = JSON.stringify({ error: "Cannot fetch private URLs" });
-        return {
-          content: [{ type: "text", text }],
-          details: { error: "Cannot fetch private URLs" },
-        };
+      // SSRF protection: fast pre-DNS check for obvious private hostnames
+      if (isPrivateHostname(url)) {
+        return toolError("Cannot fetch private URLs");
       }
 
       try {
@@ -88,6 +47,8 @@ export function createFetchUrlTool(timeoutMs: number = 10000): AgentTool<typeof 
             Accept: "text/html,application/xhtml+xml",
           },
           maxContentLength: 2 * 1024 * 1024, // 2MB max
+          // DNS-level SSRF protection: reject if hostname resolves to a private IP
+          lookup: safeLookup as any,
         });
 
         const html = response.data as string;

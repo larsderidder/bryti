@@ -151,11 +151,13 @@ export function createMemoryStore(userId: string, dataDir: string): MemoryStore 
         return [];
       }
 
-      // Use FTS5 match with BM25 ranking
-      // Escape special FTS5 characters
-      const escapedQuery = query.replace(/['"]/g, "");
-
-      // Use parameterized query for safety
+      // Use FTS5 match with BM25 ranking.
+      // Wrapping the query in double quotes makes it a phrase query, which
+      // neutralises FTS5 operators (OR, AND, NOT, NEAR, *, etc.).
+      // Double quotes inside the phrase would break out, so we escape them
+      // by doubling ("" is the FTS5 escape for a literal double quote).
+      // Single quotes are stripped to avoid tokenizer surprises.
+      const escapedQuery = query.replace(/'/g, "").replace(/"/g, '""');
       const stmt = db.prepare(`
         SELECT f.id, f.content, f.source, f.timestamp,
                bm25(facts_fts) as score

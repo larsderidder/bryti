@@ -38,7 +38,7 @@ import {
 const ALLOWED_TOOLS = ["web_search", "fetch_url"] as const;
 type AllowedTool = (typeof ALLOWED_TOOLS)[number];
 
-const DEFAULT_TIMEOUT_MS = 60 * 60 * 1000; // 60 minutes
+const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 
 // Re-export for use in other modules
 export type { WorkerTriggerCallback } from "./spawn.js";

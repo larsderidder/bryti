@@ -571,6 +571,9 @@ async function startApp(): Promise<RunningApp> {
   const bridges: ChannelBridge[] = [];
 
   if (config.telegram.token) {
+    if (config.telegram.allowed_users.length === 0) {
+      console.warn("[telegram] WARNING: allowed_users is empty. No users will be able to interact with the bot. Add Telegram user IDs to config.");
+    }
     const telegram = new TelegramBridge(config.telegram.token, config.telegram.allowed_users);
     bridges.push(telegram);
   }
