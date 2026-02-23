@@ -6,6 +6,7 @@ import {
   readRecentHistory,
   parseReflectionOutput,
   runReflection,
+  hasFutureIntentSignals,
   type sdkComplete,
   type ReflectionOutput,
 } from "./reflection.js";
@@ -185,6 +186,145 @@ describe("parseReflectionOutput", () => {
 });
 
 // ---------------------------------------------------------------------------
+// hasFutureIntentSignals
+// ---------------------------------------------------------------------------
+
+describe("hasFutureIntentSignals", () => {
+  function turns(messages: string[]) {
+    return messages.map((content, i) => ({
+      role: (i % 2 === 0 ? "user" : "assistant") as "user" | "assistant",
+      content,
+      timestamp: new Date().toISOString(),
+    }));
+  }
+
+  // Time references
+  it("matches 'tomorrow'", () => {
+    expect(hasFutureIntentSignals(turns(["I'll be free tomorrow"]))).toBe(true);
+  });
+
+  it("matches 'tonight'", () => {
+    expect(hasFutureIntentSignals(turns(["Let's do it tonight"]))).toBe(true);
+  });
+
+  it("matches 'next week'", () => {
+    expect(hasFutureIntentSignals(turns(["Call me next week"]))).toBe(true);
+  });
+
+  it("matches 'next monday'", () => {
+    expect(hasFutureIntentSignals(turns(["Meeting next Monday"]))).toBe(true);
+  });
+
+  it("matches 'this weekend'", () => {
+    expect(hasFutureIntentSignals(turns(["Free this weekend"]))).toBe(true);
+  });
+
+  it("matches 'on friday'", () => {
+    expect(hasFutureIntentSignals(turns(["See you on Friday"]))).toBe(true);
+  });
+
+  it("matches 'at 10am'", () => {
+    expect(hasFutureIntentSignals(turns(["The meeting is at 10am"]))).toBe(true);
+  });
+
+  it("matches 'in 3 days'", () => {
+    expect(hasFutureIntentSignals(turns(["I'm leaving in 3 days"]))).toBe(true);
+  });
+
+  it("matches month + day ('March 5')", () => {
+    expect(hasFutureIntentSignals(turns(["The deadline is March 5"]))).toBe(true);
+  });
+
+  // Intent markers
+  it("matches 'remind me'", () => {
+    expect(hasFutureIntentSignals(turns(["Can you remind me about this?"]))).toBe(true);
+  });
+
+  it("matches \"don't forget\"", () => {
+    expect(hasFutureIntentSignals(turns(["Don't forget the groceries"]))).toBe(true);
+  });
+
+  it("matches 'appointment'", () => {
+    expect(hasFutureIntentSignals(turns(["I have an appointment"]))).toBe(true);
+  });
+
+  it("matches 'deadline'", () => {
+    expect(hasFutureIntentSignals(turns(["The deadline is close"]))).toBe(true);
+  });
+
+  it("matches 'meeting'", () => {
+    expect(hasFutureIntentSignals(turns(["The meeting was great"]))).toBe(true);
+  });
+
+  it("matches 'birthday'", () => {
+    expect(hasFutureIntentSignals(turns(["Her birthday is coming up"]))).toBe(true);
+  });
+
+  it("matches 'dentist'", () => {
+    expect(hasFutureIntentSignals(turns(["Going to the dentist"]))).toBe(true);
+  });
+
+  // Commitment verbs
+  it("matches \"I'll\"", () => {
+    expect(hasFutureIntentSignals(turns(["I'll send it over"]))).toBe(true);
+  });
+
+  it("matches 'I will'", () => {
+    expect(hasFutureIntentSignals(turns(["I will follow up"]))).toBe(true);
+  });
+
+  it("matches 'I need to'", () => {
+    expect(hasFutureIntentSignals(turns(["I need to call him"]))).toBe(true);
+  });
+
+  it("matches 'I have a'", () => {
+    expect(hasFutureIntentSignals(turns(["I have a thing later"]))).toBe(true);
+  });
+
+  it("matches 'we should'", () => {
+    expect(hasFutureIntentSignals(turns(["We should grab coffee"]))).toBe(true);
+  });
+
+  it("matches \"let's\"", () => {
+    expect(hasFutureIntentSignals(turns(["Let's schedule this"]))).toBe(true);
+  });
+
+  it("matches 'plan to'", () => {
+    expect(hasFutureIntentSignals(turns(["I plan to finish it today"]))).toBe(true);
+  });
+
+  it("matches 'going to'", () => {
+    expect(hasFutureIntentSignals(turns(["I'm going to the store"]))).toBe(true);
+  });
+
+  // Negative cases
+  it("returns false for pure small talk", () => {
+    expect(hasFutureIntentSignals(turns([
+      "How are you?",
+      "I'm doing well, thanks!",
+      "Nice weather today.",
+      "Yeah, really sunny.",
+    ]))).toBe(false);
+  });
+
+  it("returns false for empty transcript", () => {
+    expect(hasFutureIntentSignals([])).toBe(false);
+  });
+
+  it("is case-insensitive", () => {
+    expect(hasFutureIntentSignals(turns(["REMIND ME about this"]))).toBe(true);
+    expect(hasFutureIntentSignals(turns(["TOMORROW is the day"]))).toBe(true);
+  });
+
+  it("matches signal in assistant turn as well as user turn", () => {
+    expect(hasFutureIntentSignals(turns([
+      "What time?",
+      "The meeting is tomorrow at 3pm.",
+    ]))).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // runReflection
 // ---------------------------------------------------------------------------
 
@@ -234,6 +374,29 @@ describe("runReflection", () => {
       const result = await runReflection(config, "12345", 30, store);
       expect(result.skipped).toBe(true);
       expect(result.skipReason).toContain("LLM error");
+    } finally {
+      store.close();
+    }
+  });
+
+  it("skips when transcript has no future-intent signals", async () => {
+    const recentTs = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+    writeHistory([
+      { role: "user", content: "How are you?", timestamp: recentTs },
+      { role: "assistant", content: "Doing well, thanks!", timestamp: recentTs },
+      { role: "user", content: "Nice weather today.", timestamp: recentTs },
+    ]);
+
+    const mockComplete: typeof sdkComplete = async () => {
+      throw new Error("should not be called");
+    };
+
+    const store = createProjectionStore("12345", tmpDir);
+    try {
+      const result = await runReflection(config, "12345", 30, store, mockComplete);
+      expect(result.skipped).toBe(true);
+      expect(result.skipReason).toBe("no future-intent signals in transcript");
+      expect(result.projectionsAdded).toBe(0);
     } finally {
       store.close();
     }
@@ -299,10 +462,11 @@ describe("runReflection", () => {
     }
   });
 
-  it("handles empty project array from LLM gracefully", async () => {
+  it("handles empty project array from LLM gracefully (transcript has intent signal)", async () => {
     const recentTs = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+    // Include an intent signal so the pre-filter doesn't skip the LLM call.
     writeHistory([
-      { role: "user", content: "What's the weather?", timestamp: recentTs },
+      { role: "user", content: "What's the weather tomorrow?", timestamp: recentTs },
       { role: "assistant", content: "It's sunny!", timestamp: recentTs },
     ]);
 

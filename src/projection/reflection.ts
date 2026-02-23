@@ -169,6 +169,81 @@ function setLastReflectionTimestamp(db: Database.Database, ts: string): void {
 }
 
 // ---------------------------------------------------------------------------
+// Future-intent pre-filter
+// ---------------------------------------------------------------------------
+
+/**
+ * Keyword patterns that suggest the conversation contains future commitments,
+ * plans, reminders, or time-specific references worth sending to the LLM.
+ *
+ * Organised into three semantic buckets for easy extension:
+ *   - Time references:   explicit temporal expressions
+ *   - Intent markers:    nouns that commonly describe scheduled events
+ *   - Commitment verbs:  phrases that express intent to act in the future
+ *
+ * Each entry is a plain string matched case-insensitively as a whole-word or
+ * phrase boundary pattern. Apostrophes in contractions ("I'll", "let's") are
+ * included literally; the regex wraps each keyword with \b so "calling" does
+ * not match "call", but multi-word phrases like "next week" match anywhere in
+ * the text.
+ */
+export const FUTURE_INTENT_PATTERNS: RegExp[] = [
+  // Time references
+  /\btomorrow\b/i,
+  /\btonight\b/i,
+  /\bnext\s+(week|month|year|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i,
+  /\bthis\s+(weekend|week|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i,
+  /\bon\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i,
+  /\bby\s+friday\b/i,
+  /\bat\s+\d{1,2}(:\d{2})?\s*(am|pm)?\b/i,
+  /\bin\s+\d+\s+(day|days|week|weeks|month|months)\b/i,
+  /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{1,2}\b/i,
+  /\b\d{1,2}\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b/i,
+  // Intent markers
+  /\bremind\s+me\b/i,
+  /\bdon'?t\s+forget\b/i,
+  /\bappointment\b/i,
+  /\bdeadline\b/i,
+  /\bmeeting\b/i,
+  /\bbirthday\b/i,
+  /\bdentist\b/i,
+  /\bdoctor\b/i,
+  /\binterview\b/i,
+  /\bevent\b/i,
+  /\bschedule\b/i,
+  /\bcalendar\b/i,
+  // Commitment verbs / phrases
+  /\bI'?ll\b/i,
+  /\bI\s+will\b/i,
+  /\bI\s+need\s+to\b/i,
+  /\bI\s+have\s+(a|an|to)\b/i,
+  /\bwe\s+should\b/i,
+  /\blet'?s\b/i,
+  /\bplan\s+to\b/i,
+  /\bgoing\s+to\b/i,
+  /\bwant\s+to\b/i,
+];
+
+/**
+ * Returns true when at least one turn in the transcript matches a
+ * future-intent pattern. Only user and assistant turns are scanned; tool
+ * and system messages are ignored.
+ *
+ * False negatives are acceptable: if a commitment slips through, the next
+ * reflection pass (30 min later) will catch it.
+ */
+export function hasFutureIntentSignals(turns: HistoryEntry[]): boolean {
+  for (const turn of turns) {
+    for (const pattern of FUTURE_INTENT_PATTERNS) {
+      if (pattern.test(turn.content)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------------------
 // LLM completion via pi SDK
 // ---------------------------------------------------------------------------
 
@@ -348,7 +423,24 @@ export async function runReflection(
       }
     }
 
-    // Step 3: Load existing pending projections so the model can skip them.
+    // Step 3: Pre-filter — skip the LLM call if the transcript has no signals
+    // that suggest future commitments or plans. This avoids paying for an LLM
+    // round-trip every 30 minutes when the conversation was purely small talk.
+    // False negatives are acceptable: the next reflection pass will catch any
+    // commitments this filter misses.
+    if (!hasFutureIntentSignals(turns)) {
+      // Still update the timestamp so we don't re-scan the same turns next run.
+      metaDb = metaDb ?? new Database(dbPath);
+      setLastReflectionTimestamp(metaDb, new Date().toISOString());
+      return {
+        projectionsAdded: 0,
+        candidates: [],
+        skipped: true,
+        skipReason: "no future-intent signals in transcript",
+      };
+    }
+
+    // Step 4: Load existing pending projections so the model can skip them.
     // A 90-day window is used here (wider than the history window) to give the
     // deduplication step the best chance of catching near-duplicates.
     const upcoming = projStore.getUpcoming(90);
@@ -362,7 +454,7 @@ export async function runReflection(
 
     const messages = buildReflectionPrompt(turns, pendingText, currentDatetime);
 
-    // Step 4: Call the LLM. One prompt in, one JSON blob out — no tool calls.
+    // Step 5: Call the LLM. One prompt in, one JSON blob out — no tool calls.
     const doComplete = completeFn ?? sdkComplete;
     let raw: string;
     try {
@@ -372,10 +464,10 @@ export async function runReflection(
       return { projectionsAdded: 0, candidates: [], skipped: true, skipReason: `LLM error: ${(err as Error).message}` };
     }
 
-    // Step 5: Parse JSON from the raw LLM output.
+    // Step 6: Parse JSON from the raw LLM output.
     const output = parseReflectionOutput(raw);
 
-    // Step 6: Deduplicate against existing projections and write survivors.
+    // Step 7: Deduplicate against existing projections and write survivors.
     // Deduplication is prompt-based: the existing pending projections were
     // included in the system prompt under "Already stored", and the model is
     // instructed not to re-extract them. This is approximate — the model may
