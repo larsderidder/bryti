@@ -23,7 +23,7 @@
   ],
   "scripts": {
     "build": "tsc && cp -r defaults dist/",
-    "dev": "tsc --watch",
+    "dev": "tsx src/cli.ts serve",
     "start": "node dist/cli.js serve",
     "cli": "node dist/cli.js",
     "dev-cli": "node dist/dev-cli.js",
@@ -58,6 +58,7 @@
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22",
     "@types/qrcode-terminal": "^0.12.2",
+    "tsx": "^4.21.0",
     "typescript": "^5.7",
     "vitest": "^4.0.18"
   }
