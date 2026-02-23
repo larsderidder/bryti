@@ -178,14 +178,29 @@ interface AppState {
   /** Active channel bridges (Telegram, WhatsApp, etc.) */
   bridges: ChannelBridge[];
   scheduler: Scheduler;
-  /** Enqueue function for injecting messages (used by worker trigger callbacks). */
+  /**
+   * Enqueue function for injecting messages into the processing queue.
+   * Set after the queue is created (null during initial state assembly).
+   * Used by worker trigger callbacks to notify the agent when a worker completes.
+   */
   enqueue: ((msg: IncomingMessage) => void) | null;
   /** Trust store for runtime permission checks. */
   trustStore: TrustStore;
-  /** Last user message per userId (for guardrail context). */
+  /**
+   * Last user-initiated message text per userId.
+   * Passed to the LLM guardrail as context when evaluating elevated tool calls,
+   * so the guardrail can judge whether the tool call matches what the user asked for.
+   */
   lastUserMessages: Map<string, string>;
   /** Users whose session was recovered after corruption — notified on next message. */
   recoveredSessions: Set<string>;
+  /**
+   * Accumulated scheduler context per userId. When scheduler messages fire
+   * (projections, reminders) without a user message to attach to, the text is
+   * buffered here. On the next real user message, the buffer is prepended so
+   * the agent can weave reminders into a single coherent response.
+   */
+  pendingSchedulerContext: Map<string, string[]>;
 }
 
 interface AssistantMessageLike {
@@ -217,6 +232,20 @@ function toAssistantMessage(message: unknown): AssistantMessageLike | undefined 
     return undefined;
   }
   return message as AssistantMessageLike;
+}
+
+/** Extract text content from an assistant message (ignores tool calls, thinking). */
+function extractResponseText(msg: AssistantMessageLike | undefined): string {
+  if (!msg || !("content" in msg)) return "";
+  const content = msg.content;
+  if (Array.isArray(content)) {
+    return content
+      .filter((c: Record<string, unknown>) => c.type === "text")
+      .map((c: Record<string, unknown>) => String(c.text ?? ""))
+      .join("");
+  }
+  if (typeof content === "string") return content;
+  return "";
 }
 
 function modelNameForLog(
@@ -348,11 +377,23 @@ async function triggerRestart(
 
 /**
  * Process an incoming message through the agent.
+ *
+ * Pipeline (in order):
+ *   1. Slash command check — /clear, /memory, /log, /restart handled here, return early
+ *   2. Length check — reject messages over 10K chars before they waste context
+ *   3. Trust approval check — user may be responding to a pending "Can I use X?" prompt
+ *   4. Session load — get or create the persistent session for this user
+ *   5. Transcript repair — fix any corrupted tool-call/result pairings from the previous turn
+ *   6. System prompt refresh — pick up any core memory changes made last turn
+ *   7. Prompt — call the model with fallback chain
+ *   8. Usage tracking — log tokens, cost, latency
+ *   9. Send — deliver the response text to the channel
  */
 async function processMessage(
   state: AppState,
-  msg: IncomingMessage,
+  originalMsg: IncomingMessage,
 ): Promise<void> {
+  let msg = originalMsg;
   // Handle slash commands first
   const wasCommand = await handleSlashCommand(msg, {
     config: state.config,
@@ -423,9 +464,35 @@ async function processMessage(
 
     // Track last user message time (scheduler messages have raw.type set)
     const rawObj = msg.raw as Record<string, unknown> | null | undefined;
-    const isSchedulerMessage = rawObj?.type != null;
+    const schedulerType = rawObj?.type as string | undefined;
+    const isSchedulerMessage = schedulerType != null;
+
+    // Daily reviews are context, not urgent. Buffer them so the agent can
+    // weave them into the next user-initiated response instead of sending
+    // a separate message that feels disconnected.
+    if (schedulerType === "projection_daily_review") {
+      const pending = state.pendingSchedulerContext.get(msg.userId) ?? [];
+      pending.push(msg.text);
+      state.pendingSchedulerContext.set(msg.userId, pending);
+      console.log(`[scheduler] Buffered daily review for ${msg.userId} (${pending.length} pending)`);
+      return;
+    }
+
     if (!isSchedulerMessage) {
       userSession.lastUserMessageAt = Date.now();
+
+      // Prepend any buffered scheduler context (daily reviews, etc.) so the
+      // agent can weave them into a single coherent response instead of
+      // sending separate messages for each scheduler event.
+      const pending = state.pendingSchedulerContext.get(msg.userId);
+      if (pending && pending.length > 0) {
+        const schedulerBlock = pending.join("\n\n---\n\n");
+        msg = {
+          ...msg,
+          text: `${schedulerBlock}\n\n---\n\nUser message:\n${msg.text}`,
+        };
+        state.pendingSchedulerContext.delete(msg.userId);
+      }
     }
 
     // Repair transcript before prompting
@@ -508,18 +575,7 @@ async function processMessage(
       return;
     }
 
-    let responseText = "";
-    if (lastAssistant && "content" in lastAssistant) {
-      const content = lastAssistant.content;
-      if (Array.isArray(content)) {
-        responseText = content
-          .filter((c: Record<string, unknown>) => c.type === "text")
-          .map((c: Record<string, unknown>) => String(c.text ?? ""))
-          .join("");
-      } else if (typeof content === "string") {
-        responseText = content;
-      }
-    }
+    const responseText = extractResponseText(lastAssistant);
 
     if (responseText.trim() === SILENT_REPLY_TOKEN) {
       // Scheduled/proactive turn with nothing to surface — swallow silently
@@ -531,8 +587,28 @@ async function processMessage(
         content: responseText,
       });
       await getBridge(state, msg.platform).sendMessage(msg.channelId, responseText);
+    } else if (!isSchedulerMessage) {
+      // Model made tool calls but produced no text in response to a user
+      // message. Re-prompt so the user gets a real reply, not silence.
+      console.log(`[agent] No text response from ${msg.userId} after user message, re-prompting`);
+      await promptWithFallback(
+        session,
+        "You just completed tool calls but didn't reply to the user. Respond now with a brief confirmation of what you did.",
+        state.config,
+        userSession.modelRegistry,
+        msg.userId,
+      );
+      const followUpMsg = toAssistantMessage(
+        session.messages.filter((m) => m.role === "assistant").pop(),
+      );
+      const followUpText = extractResponseText(followUpMsg);
+      if (followUpText.trim() && followUpText.trim() !== SILENT_REPLY_TOKEN) {
+        await state.historyManager.append({ role: "assistant", content: followUpText });
+        await getBridge(state, msg.platform).sendMessage(msg.channelId, followUpText);
+      }
     } else {
-      await getBridge(state, msg.platform).sendMessage(msg.channelId, "Done (no text response).");
+      // Scheduler/system turn with no text output — normal, suppress silently.
+      console.log(`[agent] No text response from ${msg.userId} (scheduler turn), suppressing`);
     }
   } catch (error) {
     const err = error as Error;
@@ -605,6 +681,7 @@ async function startApp(): Promise<RunningApp> {
     trustStore,
     lastUserMessages: new Map(),
     recoveredSessions: new Set(),
+    pendingSchedulerContext: new Map(),
   };
 
   const queue = new MessageQueue(
