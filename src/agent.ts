@@ -59,6 +59,10 @@ export interface UserSession {
 /**
  * Short human-readable summary of tool arguments for the audit log.
  * Gives the /log command enough context without storing raw LLM args.
+ *
+ * This output is for human audit trail consumption only (/log command).
+ * It is never fed back to the model — it exists solely so operators can
+ * read what the agent did without wading through raw JSON blobs.
  */
 function buildArgsSummary(toolName: string, args: unknown): string {
   if (!args || typeof args !== "object") {
@@ -137,7 +141,9 @@ export async function loadUserSession(
 ): Promise<UserSession> {
   const { authStorage, modelRegistry, agentDir } = createModelInfra(config);
 
-  // Resolve model
+  // --- 1. Model resolution ---
+  // Resolve the configured model string to a registry entry. Throws if the
+  // model is unknown so we fail fast before touching the session file.
   const model = resolveModel(config.agent.model, modelRegistry);
   if (!model) {
     throw new Error(
@@ -157,14 +163,17 @@ export async function loadUserSession(
   }));
   const extensionToolNames = new Set<string>();
 
+  // --- 2. Resource loader setup with system prompt override closure ---
+  // The override closure captures core memory and the projection store so it
+  // can read both at call time. session.reload() triggers the closure, which
+  // means every prompt sees up-to-date memory and projections without restarting.
+  //
+  // Bryti has its own skills directory in the data dir, separate from the global
+  // pi CLI skills. Skills are curated for bryti independently of the CLI.
+
   // Projection store for this user. Opened once per session, closed on dispose.
   const projectionStore = createProjectionStore(userId, config.data_dir);
 
-  // Resource loader with system prompt (no history injection).
-  // The override closure reads core memory and projections at call time so that
-  // session.reload() picks up any changes made by the agent during the conversation.
-  // Bryti has its own skills directory in the data dir, separate from
-  // the global pi CLI skills. Curate skills for bryti independently.
   const brytiSkillsDir = path.join(config.data_dir, "skills");
   const additionalSkillPaths = fs.existsSync(brytiSkillsDir) ? [brytiSkillsDir] : [];
 
@@ -174,8 +183,10 @@ export async function loadUserSession(
     additionalSkillPaths,
     settingsManager: SettingsManager.create(config.data_dir, agentDir),
     systemPromptOverride: () => {
-      // Auto-expire stale projections before injecting so the agent never
-      // sees items whose time has clearly passed (24+ hours ago).
+      // Expire projections older than 24 hours before injecting them into the
+      // system prompt. Stale projections must be cleared first so the agent
+      // never reasons about items that have clearly passed — seeing expired
+      // events would cause it to act on outdated information.
       projectionStore.autoExpire(24);
       const upcoming = projectionStore.getUpcoming(7);
       const projectionText = formatProjectionsForPrompt(upcoming);
@@ -192,6 +203,7 @@ export async function loadUserSession(
 
   const settingsManager = SettingsManager.create(config.data_dir, agentDir);
 
+  // --- 3. Session creation + extension loading ---
   const { session, extensionsResult } = await createAgentSession({
     cwd: config.data_dir,
     agentDir,
@@ -231,6 +243,9 @@ export async function loadUserSession(
       console.error(`[extensions] Failed to load ${err.path}: ${err.error}`);
     }
   }
+  // --- 4. Tool registration ---
+  // Rebuild promptTools from the fully resolved tool list (custom tools +
+  // extension tools) so the system prompt lists every tool the model can call.
   promptTools.splice(
     0,
     promptTools.length,
@@ -241,8 +256,9 @@ export async function loadUserSession(
   );
   await session.reload();
 
-  // Transcript repair on load: fix any tool-call/result pairing issues that
-  // could have been written into the session file from a previous run.
+  // --- 5. Transcript repair on load ---
+  // Fix any tool-call/result pairing issues that could have been written into
+  // the session file from a previous run (partial writes, races, crashes).
   const currentMessages = session.messages;
   if (currentMessages.length > 0) {
     const report = repairToolUseResultPairing(currentMessages);
@@ -257,7 +273,10 @@ export async function loadUserSession(
     }
   }
 
-  // Ensure the logs directory exists and prepare the tool call log path.
+  // --- 6. Event subscription setup ---
+  // Subscribe to session events for compaction telemetry and the tool-call
+  // audit log. The unsubscribe handle is returned via dispose() so callers
+  // can clean up without touching the session file.
   const logsDir = path.join(config.data_dir, "logs");
   fs.mkdirSync(logsDir, { recursive: true });
   const toolCallLogPath = path.join(logsDir, "tool-calls.jsonl");
@@ -350,9 +369,19 @@ interface FallbackResult {
 }
 
 /**
- * Detect whether pi gave up on a prompt. Two failure signals: prompt()
- * throws (network failure after retries) or the last assistant message has
- * stopReason "error" (model failure). Both mean "try the next model."
+ * Detect whether pi gave up on a prompt.
+ *
+ * Two failure modes exist:
+ *
+ *   1. Thrown error — the SDK exhausted its retry budget and threw. This
+ *      covers network failures, timeouts, and provider outages.
+ *
+ *   2. Last assistant message has stopReason "error" — the model returned a
+ *      response the SDK classified as a hard failure (for example a
+ *      content-filter block or an internal model error). No exception is
+ *      thrown in this case; the bad message is simply appended to the transcript.
+ *
+ * Both cases mean "try the next model" in the fallback chain.
  */
 function didPromptFail(
   session: AgentSession,
@@ -456,6 +485,11 @@ export async function promptWithFallback(
 /**
  * Reload the system prompt so it picks up any core memory or projection
  * changes the agent made during the previous turn.
+ *
+ * TODO: session.reload() reloads the full resource set, which includes any
+ * skill files on disk. If skill loading becomes slow (many/large skill files),
+ * consider caching the parsed skill content and only re-reading core memory
+ * and projections on each turn.
  */
 export async function refreshSystemPrompt(session: AgentSession): Promise<void> {
   await session.reload();

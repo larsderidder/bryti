@@ -1,20 +1,31 @@
 /**
  * Local embeddings via node-llama-cpp.
  *
- * Uses a small GGUF embedding model downloaded on first use; no external
- * API key required. The model and context are loaded once and reused across
- * calls. Model files live in <dataDir>/.models/.
+ * Singleton pattern: one Llama instance, one model, one embedding context,
+ * shared across all calls for the lifetime of the process. The model weighs
+ * 300MB+, so loading it per-call or per-request is not viable. Instead,
+ * getEmbeddingContext() initialises everything on first call and caches the
+ * result; every subsequent call returns the cached context immediately.
+ *
+ * Model files live in <dataDir>/.models/.
  */
 
 import { getLlama, LlamaLogLevel, resolveModelFile } from "node-llama-cpp";
 import type { Llama, LlamaEmbeddingContext, LlamaModel } from "node-llama-cpp";
 
+// Hugging Face URI in node-llama-cpp's "hf:<owner>/<repo>/<file>" format.
+// On first use, node-llama-cpp resolves this automatically: it locates (or
+// downloads) the file and caches it in the modelsDir supplied at init time.
 const EMBEDDING_MODEL_URI =
   "hf:ggml-org/embeddinggemma-300M-GGUF/embeddinggemma-300M-Q8_0.gguf";
 
 let llamaInstance: Llama | null = null;
 let llamaModel: LlamaModel | null = null;
 let embeddingContext: LlamaEmbeddingContext | null = null;
+// In-flight initialisation guard. Without this, concurrent calls to
+// getEmbeddingContext() before the first load completes would each kick off a
+// separate model load. Storing the Promise here means every concurrent caller
+// awaits the same in-progress load instead of starting a new one.
 let initPromise: Promise<LlamaEmbeddingContext> | null = null;
 
 /**
@@ -33,8 +44,11 @@ async function getEmbeddingContext(modelsDir?: string): Promise<LlamaEmbeddingCo
   initPromise = (async () => {
     const llama = await getLlama({
       gpu: "auto",
-      // Suppress noisy tokenizer metadata warnings from the embedding model GGUF
       logger(level, message) {
+        // 'special_eos_id is not in special_eog_ids' is a benign metadata quirk
+        // in the embedding model's GGUF file: the end-of-sequence token id is
+        // not listed in the end-of-generation set. It has no effect on embedding
+        // quality and is safe to ignore.
         if (level === LlamaLogLevel.warn && message.includes("special_eos_id is not in special_eog_ids")) {
           return;
         }
@@ -105,8 +119,12 @@ export async function embedBatch(texts: string[], modelsDir?: string): Promise<n
 }
 
 /**
- * Pre-load the embedding model. Call this at startup to avoid latency on the
- * first memory operation.
+ * Pre-load the embedding model at startup.
+ *
+ * Calling this eagerly means a missing or corrupt model file surfaces as a
+ * startup error rather than failing silently on the first user message that
+ * triggers a memory operation. Also amortises the cold-start download/load
+ * time before any user is waiting.
  *
  * @param modelsDir Directory to store/load the model
  */
@@ -115,8 +133,12 @@ export async function warmupEmbeddings(modelsDir?: string): Promise<void> {
 }
 
 /**
- * Release the embedding context, model, and llama instance. Call during
- * shutdown so node-llama-cpp's native threads exit and Node doesn't hang.
+ * Release the embedding context, model, and Llama instance.
+ *
+ * Call this on graceful shutdown. node-llama-cpp allocates native (non-GC)
+ * resources for model weights and inference threads; skipping dispose leaves
+ * those resources live until the OS reclaims them, and can prevent the Node
+ * process from exiting cleanly.
  */
 export async function disposeEmbeddings(): Promise<void> {
   if (embeddingContext) {

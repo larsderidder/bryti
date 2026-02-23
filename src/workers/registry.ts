@@ -20,9 +20,17 @@ export interface WorkerEntry {
   error: string | null;
   /** Model used for this worker. */
   model: string;
-  /** Abort the running session (set when session is started). */
+  /**
+   * Abort the running session. Set asynchronously after session creation in
+   * spawnWorkerSession — it is null in the brief window between registry.register()
+   * and the session coming up. Always check for null before calling.
+   */
   abort: (() => Promise<void>) | null;
-  /** Timeout handle for forced termination. */
+  /**
+   * Handle for the forced-termination timer set in spawnWorkerSession.
+   * Null when the worker has already finished (timer was cleared) or has not
+   * yet started. Stored here so worker_interrupt can cancel it.
+   */
   timeoutHandle: ReturnType<typeof setTimeout> | null;
 }
 
@@ -36,7 +44,11 @@ export interface WorkerRegistry {
   /** Update mutable fields of a worker entry. */
   update(workerId: string, updates: Partial<Pick<WorkerEntry, "status" | "completedAt" | "error" | "abort" | "timeoutHandle">>): void;
 
-  /** Count workers with status "running". */
+  /**
+   * Count workers with status "running".
+   * Used by worker_dispatch in tools.ts to enforce the max_concurrent limit
+   * before spawning a new session.
+   */
   runningCount(): number;
 
   /** Remove a worker entry from the registry. */

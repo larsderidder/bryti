@@ -1,3 +1,22 @@
+/**
+ * Application logging: structured JSONL file logger and console interceptor.
+ *
+ * Two things live here:
+ *
+ * 1. createAppLogger — writes structured JSONL entries to daily log files
+ *    under data/logs/. Each file is named YYYY-MM-DD.jsonl and contains one
+ *    JSON object per line with timestamp, level, message, and optional args.
+ *    Log rotation is automatic (new file per calendar day). Old files are
+ *    never cleaned up automatically.
+ *    TODO: add a cleanup pass that deletes log files older than N days.
+ *
+ * 2. installConsoleFileLogging — replaces console.log/info/warn/error/debug
+ *    with interceptors that (a) write a formatted, timestamped line to the
+ *    appropriate stdio stream, and (b) mirror the entry to the JSONL file
+ *    logger. After installation, all console.* output goes to both the
+ *    terminal and the daily log file simultaneously.
+ */
+
 import fs from "node:fs";
 import path from "node:path";
 import util from "node:util";
@@ -19,6 +38,8 @@ export interface AppLogger {
   error(message: string, ...args: unknown[]): void;
 }
 
+// Guard flag: prevents installConsoleFileLogging from double-wrapping the
+// console methods if called more than once (e.g., in tests or after a reload).
 let consoleFileLoggingInstalled = false;
 
 function toDateString(date: Date): string {
@@ -89,8 +110,11 @@ const LEVEL_PREFIX: Record<LogLevel, string> = {
 };
 
 /**
- * Format a log line for stdio. Color only when writing to a TTY so piped
- * output stays plain text.
+ * Format a log line for stdio.
+ *
+ * ANSI color codes are only emitted when the target stream is a TTY. When
+ * stdout/stderr is piped (e.g., to a file or another process), isTTY is
+ * false and the output stays plain text without escape sequences.
  */
 function formatLine(level: LogLevel, message: string, isTty: boolean): string {
   const now = new Date();

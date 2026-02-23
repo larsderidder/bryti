@@ -26,6 +26,11 @@ export function getUserTimezone(config: Config): string {
 /**
  * Format a Date as a local datetime string in the given IANA timezone,
  * using the SQLite-compatible "YYYY-MM-DD HH:MM" format.
+ *
+ * The 'sv-SE' (Swedish) locale is used as a deliberate trick: Swedish date
+ * formatting produces "YYYY-MM-DD HH:MM:SS" natively, which is the closest
+ * built-in locale to SQLite's datetime format. Slicing to 16 characters drops
+ * the seconds component.
  */
 export function formatLocal(date: Date, timezone: string): string {
   return date
@@ -42,10 +47,13 @@ export function formatUtc(date: Date): string {
 }
 
 /**
- * Build the current-time string for the system prompt.
+ * Build the current-time string injected into the system prompt.
  *
- * When timezone differs from UTC, shows local time with timezone label plus
- * the UTC equivalent. When UTC, shows only UTC.
+ * When the configured timezone differs from UTC, the line shows both local
+ * time (with timezone label) and the UTC equivalent. Showing both lets the
+ * model reason about deadlines and scheduling in UTC while the user naturally
+ * thinks in local time. When the timezone is UTC, only one timestamp is shown
+ * to avoid redundancy.
  */
 export function currentTimePromptLine(timezone: string): string {
   const now = new Date();
@@ -84,16 +92,28 @@ export function toUtc(naive: string, timezone: string): string {
   // Naive local time: interpret in the given timezone and convert to UTC.
   //
   // Strategy (Temporal-free, works in Node 18+):
-  // 1. Pretend the local time is UTC to get a Date object we can feed to
-  //    toLocaleString.
-  // 2. Ask toLocaleString what time that UTC moment is in the target timezone.
-  //    The difference between step-1's UTC and step-2's result is the UTC
-  //    offset of the timezone at that moment (handles DST correctly).
-  // 3. Subtract that offset from the naive-as-UTC date to get the real UTC.
   //
-  // This is a fixed-point approximation that is exact when the offset doesn't
-  // change during the 1-second window we're looking at — true for all
-  // real-world timezones.
+  // Step 1 — seed: parse the naive string as if it were UTC. This gives us a
+  //   Date object with the same digits but the wrong epoch. We only need it
+  //   to ask toLocaleString for the timezone offset at roughly this moment.
+  //
+  // Step 2 — probe: call toLocaleString("sv-SE", { timeZone }) on the step-1
+  //   Date. This returns what the target timezone thinks that UTC instant is,
+  //   which differs from the naive input by exactly the UTC offset at that
+  //   instant (DST included). The difference (localRepr - asUtc) is the
+  //   offset in milliseconds.
+  //
+  // Step 3 — correct: subtract the offset from the step-1 epoch to get the
+  //   real UTC epoch for the original naive local time.
+  //
+  // This is a fixed-point approximation: it is exact as long as the UTC
+  // offset does not change between the naive time and itself minus the offset.
+  // In practice that would require a DST transition to land within seconds of
+  // the input, and even then the error is at most one offset-difference
+  // (typically 1 hour), which is negligible for our use case.
+  //
+  // TODO: when Node gains Temporal support, replace this with:
+  //   Temporal.ZonedDateTime.from(naive + '[' + timezone + ']').toInstant().toString()
 
   const withSecs = /\d{2}:\d{2}$/.test(normalized)
     ? normalized + ":00"

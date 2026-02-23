@@ -10,6 +10,13 @@
  * SQLite. Existing pending projections are included in the prompt so the
  * model won't duplicate them. A per-user timestamp tracks the last run
  * to skip unchanged transcripts.
+ *
+ * Why completeSimple() instead of a full agent loop?
+ * The reflection pass has no side effects and requires no tool calls. It only
+ * needs one prompt in and one JSON blob out. Using a full agent loop would add
+ * latency, cost, and the risk of unintended tool invocations. completeSimple()
+ * is cheaper, faster, and keeps the pass strictly read-only from the model's
+ * perspective.
  */
 
 import fs from "node:fs";
@@ -40,6 +47,12 @@ export interface ArchiveCandidate {
 
 export interface ReflectionOutput {
   project: ProjectionCandidate[];
+  /**
+   * TODO: archive candidates are extracted from the LLM output but are not
+   * currently written anywhere. This field is a placeholder for a future
+   * feature that would auto-insert noteworthy facts into archival memory
+   * during the reflection pass.
+   */
   archive: ArchiveCandidate[];
 }
 
@@ -66,7 +79,14 @@ interface HistoryEntry {
 
 /**
  * Read user+assistant messages from the JSONL audit log for the last
- * windowMinutes. Returns chronological order, capped at maxMessages.
+ * `windowMinutes`. Returns entries in chronological order, capped at
+ * `maxMessages`.
+ *
+ * Reads from the JSONL audit log written by src/compaction/history.ts, NOT
+ * from the pi SDK session file. The audit log is the only way to get
+ * structured turn-by-turn history outside of a live session context: the pi
+ * session file is append-only and interleaved with tool scaffolding, whereas
+ * the audit log contains clean role/content/timestamp records per message.
  */
 export function readRecentHistory(
   historyDir: string,
@@ -121,6 +141,15 @@ export function readRecentHistory(
 
 /**
  * Read/write the last reflection timestamp from a metadata table in memory.db.
+ *
+ * The timestamp is used to skip reflection when there are no new messages
+ * since the last run: if the newest audit-log entry is not newer than the
+ * stored timestamp, the pass exits early without calling the LLM. This keeps
+ * cron overhead negligible for idle users.
+ *
+ * The timestamp is stored in the same SQLite database as archival memory
+ * (memory.db), so it survives process restarts. A plain text file was
+ * considered but SQLite gives atomic writes for free.
  */
 function getLastReflectionTimestamp(db: Database.Database): string | null {
   db.exec(`
@@ -250,6 +279,11 @@ function buildReflectionPrompt(
 
 /**
  * Parse the LLM output, tolerating markdown code fences and minor formatting.
+ *
+ * Even with `temperature: 0` and an explicit "output JSON only" instruction,
+ * models occasionally wrap their response in a ```json ... ``` code fence.
+ * The stripping step removes those fences before calling JSON.parse(), so
+ * both bare JSON and fenced JSON are accepted.
  */
 export function parseReflectionOutput(raw: string): ReflectionOutput {
   const stripped = raw
@@ -284,6 +318,7 @@ export async function runReflection(
   store?: ProjectionStore,
   completeFn?: typeof sdkComplete,
 ): Promise<ReflectionResult> {
+  // Step 1: Read history from the JSONL audit log.
   const historyDir = path.join(config.data_dir, "history");
   const turns = readRecentHistory(historyDir, windowMinutes);
 
@@ -296,11 +331,13 @@ export async function runReflection(
   let metaDb: Database.Database | null = null;
 
   try {
+    // Step 2: Check for new messages. Skip the LLM call entirely if there is
+    // nothing to process: no turns in the window, or no turns newer than the
+    // last reflection timestamp.
     if (turns.length === 0) {
       return { projectionsAdded: 0, candidates: [], skipped: true, skipReason: "no recent messages" };
     }
 
-    // Gate: skip if no new messages since last reflection
     metaDb = new Database(dbPath);
     const lastReflection = getLastReflectionTimestamp(metaDb);
     if (lastReflection) {
@@ -311,8 +348,10 @@ export async function runReflection(
       }
     }
 
-    // Build prompt
-    const upcoming = projStore.getUpcoming(90); // Wider window for dedup
+    // Step 3: Load existing pending projections so the model can skip them.
+    // A 90-day window is used here (wider than the history window) to give the
+    // deduplication step the best chance of catching near-duplicates.
+    const upcoming = projStore.getUpcoming(90);
     const pendingText = formatProjectionsForPrompt(upcoming, 30);
     const tz = getUserTimezone(config);
     const now = new Date();
@@ -323,7 +362,7 @@ export async function runReflection(
 
     const messages = buildReflectionPrompt(turns, pendingText, currentDatetime);
 
-    // Call LLM
+    // Step 4: Call the LLM. One prompt in, one JSON blob out — no tool calls.
     const doComplete = completeFn ?? sdkComplete;
     let raw: string;
     try {
@@ -333,10 +372,16 @@ export async function runReflection(
       return { projectionsAdded: 0, candidates: [], skipped: true, skipReason: `LLM error: ${(err as Error).message}` };
     }
 
-    // Parse output
+    // Step 5: Parse JSON from the raw LLM output.
     const output = parseReflectionOutput(raw);
 
-    // Apply projections
+    // Step 6: Deduplicate against existing projections and write survivors.
+    // Deduplication is prompt-based: the existing pending projections were
+    // included in the system prompt under "Already stored", and the model is
+    // instructed not to re-extract them. This is approximate — the model may
+    // still emit a candidate whose summary is a paraphrase of an existing one.
+    // A secondary code-level check (substring match on summaries) would reduce
+    // false duplicates but is not currently implemented.
     const tz2 = getUserTimezone(config);
     let projectionsAdded = 0;
     for (const candidate of output.project) {

@@ -42,8 +42,13 @@ function escapeHtml(text: string): string {
     .replace(/>/g, "&gt;");
 }
 
+// TOOL_DESCRIPTIONS is shown to the user inside approval prompts so they see
+// plain English rather than internal tool names. It is NOT passed to the LLM
+// guardrail; the guardrail receives the tool's own `.description` property
+// from the tool definition instead.
 /**
- * Human-readable labels for elevated tools, shown instead of raw tool names.
+ * Human-readable labels for elevated tools, shown instead of raw tool names
+ * in user-facing approval prompts.
  */
 const TOOL_DESCRIPTIONS: Record<string, string> = {
   system_restart: "Restart to pick up changes",

@@ -57,6 +57,10 @@ import { startProactiveCompaction } from "./compaction/proactive.js";
 // channel they're on, so the "Back online" message goes to the right place.
 // ---------------------------------------------------------------------------
 
+/**
+ * Exit code that signals an intentional restart to the run.sh supervisor loop.
+ * The loop checks for this code and restarts immediately without delay.
+ */
 export const RESTART_EXIT_CODE = 42;
 
 interface RestartMarker {
@@ -284,6 +288,11 @@ async function getOrLoadSession(state: AppState, msg: IncomingMessage): Promise<
     // Worker completion triggered projections. Inject an immediate message
     // so the agent reads the results and notifies the user without waiting
     // for the 5-minute scheduler tick.
+    //
+    // The message text is deliberately explicit: the agent has no idea what the
+    // worker found (it ran in isolation), and the user hasn't seen anything yet.
+    // Without these instructions, the agent tends to assume the user is already
+    // aware of the results and skips straight to next steps.
     if (!state.enqueue) return;
     const channelId = String(state.config.telegram.allowed_users[0] ?? userId);
     const summaries = triggered.map((p) => `- ${p.summary} (id: ${p.id})`).join("\n");
@@ -628,6 +637,9 @@ async function processMessage(
  * Start one app instance.
  */
 async function startApp(): Promise<RunningApp> {
+  // ---------------------------------------------------------------------------
+  // Infra setup: config, logging, embedding model
+  // ---------------------------------------------------------------------------
   const { config, rolledBack, rollbackReason } = loadConfigWithRollback();
   applyIntegrationEnvVars(config);
   ensureDataDirs(config);
@@ -649,7 +661,9 @@ async function startApp(): Promise<RunningApp> {
   const usageTracker = createUsageTracker(config.data_dir);
   const trustStore = createTrustStore(config.data_dir, config.trust.approved_tools);
 
-  // Start channel bridges
+  // ---------------------------------------------------------------------------
+  // Bridge setup: Telegram, WhatsApp
+  // ---------------------------------------------------------------------------
   const bridges: ChannelBridge[] = [];
 
   if (config.telegram.token) {
@@ -669,6 +683,9 @@ async function startApp(): Promise<RunningApp> {
     throw new Error("No channel bridges configured. Enable Telegram and/or WhatsApp.");
   }
 
+  // ---------------------------------------------------------------------------
+  // State assembly
+  // ---------------------------------------------------------------------------
   const state: AppState = {
     config,
     coreMemory,
@@ -696,6 +713,10 @@ async function startApp(): Promise<RunningApp> {
     },
   );
 
+  // ---------------------------------------------------------------------------
+  // Queue / scheduler wiring
+  // ---------------------------------------------------------------------------
+
   // Wire up the enqueue function so worker trigger callbacks can inject messages
   state.enqueue = (msg) => queue.enqueue(msg);
 
@@ -717,6 +738,10 @@ async function startApp(): Promise<RunningApp> {
 
   // Start proactive compaction (idle + nightly)
   const compactionJobs = startProactiveCompaction(config, () => state.sessions);
+
+  // ---------------------------------------------------------------------------
+  // Startup notifications: crash recovery, restart marker, config rollback
+  // ---------------------------------------------------------------------------
 
   // Recover any pending messages from a previous crash
   await recoverPendingCheckpoints(config, async (checkpoint, userId) => {
@@ -783,6 +808,17 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * Top-level supervisor loop. Starts the app, catches fatal errors, and
+ * restarts automatically after a delay.
+ *
+ * State machine: the `resolver` is a promise resolve function that is set
+ * when we're waiting for either a SIGINT/SIGTERM (shutdown) or an uncaught
+ * exception (restart). When one fires, it resolves the promise with the
+ * appropriate outcome string, the app is stopped, and the loop continues
+ * or breaks accordingly. The indirection via `resolver` lets signal handlers
+ * and error handlers share a single control path.
+ */
 async function runWithSupervisor(): Promise<void> {
   const restartDelayMs = Number(process.env.BRYTI_RESTART_DELAY_MS ?? 2000);
   let shutdownRequested = false;

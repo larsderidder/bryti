@@ -77,7 +77,9 @@ export interface ProjectionStore {
 
   /**
    * Get pending projections due in the next window_minutes minutes that have
-   * resolution='exact'. Used by the 5-minute scheduler check.
+   * resolution='exact'. Used by the 5-minute scheduler check. window_minutes
+   * must be larger than the scheduler tick to avoid missing events that fall
+   * between ticks.
    */
   getExactDue(window_minutes: number): Projection[];
 
@@ -88,8 +90,10 @@ export interface ProjectionStore {
   resolve(id: string, status: ProjectionStatus): boolean;
 
   /**
-   * Rearm a recurring projection: reset it to pending with a new resolved_when.
-   * Used by the scheduler when a recurring projection fires.
+   * Rearm a recurring projection: reset it to pending with a new resolved_when
+   * and clear resolved_at so it looks fresh for the next cycle. Only called
+   * after a recurring projection fires; non-recurring projections should be
+   * resolved instead.
    * Returns false if the id does not exist.
    */
   rearm(id: string, nextResolvedWhen: string): boolean;
@@ -109,8 +113,11 @@ export interface ProjectionStore {
   ): Promise<Projection[]>;
 
   /**
-   * Auto-expire projections whose resolved_when has passed by more than
-   * threshold_hours hours. Returns the number of rows updated.
+   * Mark pending projections as 'passed' when their resolved_when is more than
+   * threshold_hours hours in the past and they are still pending. Exact-resolution
+   * projections always expire after 1 hour; other resolutions use threshold_hours.
+   * Someday projections are never expired by time.
+   * Returns the number of rows updated.
    */
   autoExpire(threshold_hours?: number): number;
 
@@ -209,6 +216,32 @@ function rowToDependency(row: ProjectionDependencyRow): ProjectionDependency {
 /**
  * Open (or create) the per-user projection store. Shares memory.db with
  * archival memory.
+ *
+ * Schema overview
+ * ---------------
+ * projections
+ *   Primary record. Holds the summary, timing fields (raw_when, resolved_when,
+ *   resolution), recurrence cron, trigger_on_fact keyword, and status.
+ *
+ * projection_links
+ *   Many-to-many cross-reference between projections (e.g., "this task belongs
+ *   to that project"). Links are stored as a JSON array on the projections row
+ *   (linked_ids) and optionally in this table for reverse lookups.
+ *
+ * projection_dependencies
+ *   DAG edges. An observer projection waits for its subject projection(s) to
+ *   reach a condition before it becomes active. Conditions are either a status
+ *   keyword ("done", "cancelled", "passed") or an LLM-evaluated expression.
+ *
+ * Lifecycle state machine
+ * -----------------------
+ *   pending  →  done       (agent or user explicitly resolves it)
+ *   pending  →  cancelled  (agent or user cancels it)
+ *   pending  →  passed     (autoExpire: the time window elapsed without action)
+ *
+ * Recurring projections return to pending after each firing (see rearm()).
+ * Trigger-based projections become active (resolution='exact') when a matching
+ * fact arrives via checkTriggers(), then fire on the next scheduler tick.
  */
 export function createProjectionStore(userId: string, dataDir: string): ProjectionStore {
   const userDir = path.join(dataDir, "users", userId);
@@ -481,6 +514,11 @@ export function createProjectionStore(userId: string, dataDir: string): Projecti
   }): string => {
     const id = crypto.randomUUID();
     const now = new Date().toISOString();
+
+    // resolved_when is the normalised ISO datetime derived from raw_when (the
+    // caller is responsible for resolving natural-language expressions like
+    // "next Monday" before calling add()). For trigger_on_fact projections no
+    // resolved_when is needed upfront — checkTriggers() sets it at fire time.
     stmtInsert.run(
       id,
       params.summary,
@@ -494,6 +532,8 @@ export function createProjectionStore(userId: string, dataDir: string): Projecti
       now,
     );
 
+    // Each entry in depends_on creates a DAG edge: this new projection (observer)
+    // will not activate until the referenced subject projection reaches its condition.
     for (const dep of params.depends_on ?? []) {
       validateAndInsertDependency(id, dep.subject_id, dep.condition, dep.condition_type);
     }
@@ -516,11 +556,21 @@ export function createProjectionStore(userId: string, dataDir: string): Projecti
     },
 
     getUpcoming(horizon_days) {
+      // SQL note: the ORDER BY uses a CASE expression to push rows with no
+      // resolved_when (someday / trigger-only items) to the end; time-bound
+      // projections are sorted ascending by resolved_when. Trigger-based
+      // projections also land here when they have no resolved_when yet; the
+      // caller can identify them by the non-null trigger_on_fact column.
       const rows = stmtUpcoming.all(String(horizon_days)) as ProjectionRow[];
       return rows.map(rowToProjection);
     },
 
     getExactDue(window_minutes) {
+      // Filters to resolution='exact' only: day/week/month projections are surfaced
+      // through getUpcoming, not here. window_minutes must be larger than the
+      // scheduler tick (5 min) so that projections due between ticks are never
+      // skipped. The lower bound ('-10 minutes') prevents re-firing events that
+      // already fired but whose resolved_at hasn't been written yet.
       const rows = stmtExactDue.all(String(window_minutes)) as ProjectionRow[];
       return rows.map(rowToProjection);
     },
@@ -531,6 +581,10 @@ export function createProjectionStore(userId: string, dataDir: string): Projecti
     },
 
     rearm(id, nextResolvedWhen) {
+      // Only called for recurring projections after they fire. Resets status to
+      // 'pending' and advances resolved_when to the next occurrence so the
+      // scheduler will pick it up again. resolved_at is cleared so the projection
+      // looks fresh for the next cycle.
       const result = stmtRearm.run(nextResolvedWhen, id) as { changes: number };
       return result.changes > 0;
     },
@@ -549,11 +603,17 @@ export function createProjectionStore(userId: string, dataDir: string): Projecti
         const trigger = row.trigger_on_fact!.toLowerCase().trim();
         if (!trigger) continue;
 
-        // Fast path: keyword match (all keywords present in fact content).
+        // Fast path (keyword matching): split trigger into tokens and require
+        // every token to appear in the fact text. This is O(n*m) but fast for
+        // short triggers. If all keywords are present the projection fires
+        // immediately, without involving the embedding model.
         const keywords = trigger.split(/\W+/).filter(Boolean);
         const allPresent = keywords.every((kw) => factLower.includes(kw));
 
         if (allPresent) {
+          // Activate immediately: set resolved_when to now and resolution to
+          // 'exact' so the scheduler will fire this projection on the next tick.
+          // trigger_on_fact is cleared so it won't re-match future facts.
           const result = stmtActivateTrigger.run(row.id) as { changes: number };
           if (result.changes > 0) {
             const updated = { ...row, resolved_when: new Date().toISOString().slice(0, 16).replace("T", " "), resolution: "exact", trigger_on_fact: null };
@@ -571,7 +631,12 @@ export function createProjectionStore(userId: string, dataDir: string): Projecti
         }
       }
 
-      // Slow path: embedding similarity for keyword misses.
+      // Slow path (semantic matching): embed both the fact and the trigger phrase,
+      // then compute cosine similarity. Projections that score above
+      // similarityThreshold are activated the same way as keyword matches.
+      // The projection is resolved immediately on trigger (rather than queued)
+      // because by the time checkTriggers() runs the activating fact already
+      // exists — there is no point delaying the notification.
       if (embeddingFallback.length > 0 && embed) {
         const factVec = await embed(factContent);
         for (const row of embeddingFallback) {
@@ -590,6 +655,15 @@ export function createProjectionStore(userId: string, dataDir: string): Projecti
       return activated;
     },
 
+    /**
+     * Marks pending projections as 'passed' when their resolved_when timestamp
+     * is more than threshold_hours hours in the past and they are still pending.
+     * Exact-resolution projections use a fixed 1-hour window (they either fired
+     * via the scheduler or were missed); all other resolutions use the caller-
+     * supplied threshold. Someday projections are never expired by time.
+     *
+     * Returns the number of rows updated.
+     */
     autoExpire(threshold_hours = 24) {
       const result = stmtExpire.run(String(-threshold_hours)) as { changes: number };
       return result.changes;
@@ -599,6 +673,24 @@ export function createProjectionStore(userId: string, dataDir: string): Projecti
       return validateAndInsertDependency(observerId, subjectId, condition, conditionType);
     },
 
+    /**
+     * Evaluates the dependency DAG and activates any observer projections whose
+     * conditions are all satisfied.
+     *
+     * Evaluation is performed in a fixed-point loop (up to 10 iterations):
+     * activating an observer may satisfy a condition for another observer further
+     * up the chain, so the loop re-runs until no new activations occur.
+     *
+     * Condition types:
+     *   'status_change' — satisfied when subject.status equals the condition
+     *     string (e.g., "done"). Evaluated entirely in SQL-land via a JOIN.
+     *   'llm' — not yet implemented; always returns false here. Future
+     *     implementation would call completeSimple() to evaluate the condition
+     *     expression against the current state of both projections and the
+     *     agent's archival memory.
+     *
+     * Returns the total number of observer projections activated.
+     */
     evaluateDependencies() {
       let activatedTotal = 0;
       // Iterate until stable so multiple newly-satisfied observers can activate in one pass.
@@ -619,7 +711,10 @@ export function createProjectionStore(userId: string, dataDir: string): Projecti
             if (dep.condition_type === "status_change") {
               return dep.subject_status === dep.condition;
             }
-            // LLM-backed conditions are stored, but evaluated by higher-level logic.
+            // TODO: 'llm' condition type is not yet implemented. A future
+            // implementation would call completeSimple() with the condition
+            // string and the subject projection's current state to produce a
+            // boolean verdict, rather than relying on a fixed status keyword.
             return false;
           });
           if (!allMet) continue;

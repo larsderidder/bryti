@@ -9,6 +9,10 @@
  * on LLM output.
  */
 
+// ---------------------------------------------------------------------------
+// Imports
+// ---------------------------------------------------------------------------
+
 import crypto from "node:crypto";
 import { Bot, InlineKeyboard, type Context } from "grammy";
 import type { ApprovalResult, ChannelBridge, IncomingMessage, SendOpts } from "./types.js";
@@ -20,11 +24,19 @@ import {
   isFileTooBigError,
 } from "./telegram-network-errors.js";
 
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
 /**
  * Telegram message handler function.
  */
 type MessageHandler = (msg: IncomingMessage) => Promise<void>;
 
+
+// ---------------------------------------------------------------------------
+// HTML escape helpers
+// ---------------------------------------------------------------------------
 
 /**
  * Escape the three HTML special characters that Telegram HTML mode requires.
@@ -50,6 +62,16 @@ function buildTelegramLink(link: MarkdownLinkSpan, _text: string) {
     close: "</a>",
   };
 }
+
+// ---------------------------------------------------------------------------
+// Markdown conversion pipeline
+//
+// The pipeline is two-step: markdown → IR (intermediate representation) → HTML.
+// The IR is a structured token list that tracks span boundaries precisely.
+// This matters for chunking: splitting after IR parsing means we can find safe
+// break points between tokens rather than inside them. Cutting a raw markdown
+// string mid-fence or mid-span would produce broken HTML on the far side.
+// ---------------------------------------------------------------------------
 
 /** Telegram's maximum message length in characters. */
 const MAX_MESSAGE_LENGTH = 4096;
@@ -94,6 +116,10 @@ export function markdownToTelegramChunks(text: string, maxLength = MAX_MESSAGE_L
   const irChunks = chunkMarkdownIR(ir, maxLength);
   return irChunks.map((chunk) => renderMarkdownWithMarkers(chunk, TELEGRAM_RENDER_OPTIONS));
 }
+
+// ---------------------------------------------------------------------------
+// Message chunking
+// ---------------------------------------------------------------------------
 
 /** Maximum retry attempts for send/edit operations. */
 const MAX_SEND_RETRIES = 3;
@@ -173,9 +199,22 @@ export function chunkMessage(text: string, maxLength = MAX_MESSAGE_LENGTH): stri
   return chunks;
 }
 
+// ---------------------------------------------------------------------------
+// Retry helpers
+//
+// Retry lives here rather than in the caller because the decision of what is
+// retryable is Telegram-specific: 429 rate-limits carry a retry_after field,
+// 5xx errors warrant exponential backoff, and network failures (ECONNRESET,
+// fetch errors, etc.) need to be classified by a Telegram-aware heuristic.
+// Pushing this into the bridge keeps all callers simple and ensures consistent
+// behavior across sendMessage, editMessage, and sendApprovalRequest.
+// ---------------------------------------------------------------------------
+
 /**
  * Retry a Telegram API call with exponential backoff.
- * Retries on 429 (using retry_after), 5xx, and recoverable network errors.
+ * Retries on 429 rate limits (honours retry_after when present), 5xx server
+ * errors, and recoverable network errors. Permanent API errors are re-thrown
+ * immediately without consuming retry budget.
  */
 async function withRetry<T>(
   fn: () => Promise<T>,
@@ -214,6 +253,9 @@ async function withRetry<T>(
       }
 
       // Recoverable network errors (ECONNRESET, timeouts, fetch failures, etc.)
+      // TODO: the classifier is heuristic (string matching on error codes/messages);
+      // a proper connection state machine tracking polling vs. send contexts would
+      // give cleaner semantics and fewer false positives.
       if (isRecoverableTelegramNetworkError(error, { context: "send" })) {
         await new Promise((resolve) => setTimeout(resolve, baseDelay * 2 ** attempt));
         continue;
@@ -255,6 +297,10 @@ async function retryGetFile<T>(
   throw lastError;
 }
 
+// ---------------------------------------------------------------------------
+// TelegramBridge
+// ---------------------------------------------------------------------------
+
 /**
  * Telegram bridge implementation.
  */
@@ -275,6 +321,16 @@ export class TelegramBridge implements ChannelBridge {
     this.allowedUsers = allowedUsers;
   }
 
+  // -------------------------------------------------------------------------
+  // Polling lifecycle
+  //
+  // bot.start() is grammy's long-poll loop. It blocks until bot.stop() is
+  // called, so we fire it in the background and attach a .catch() to handle
+  // errors. Recoverable network errors (dropped connections, DNS hiccups) are
+  // logged as warnings rather than crashing the process; long-polling is
+  // inherently fragile over unreliable connections and grammy will restart the
+  // loop automatically. Only unexpected errors are promoted to console.error.
+  // -------------------------------------------------------------------------
   async start(): Promise<void> {
     this.bot = new Bot(this.botToken);
 
@@ -560,6 +616,9 @@ export class TelegramBridge implements ChannelBridge {
     console.log("Telegram bridge stopped");
   }
 
+  // -------------------------------------------------------------------------
+  // Message sending with retry
+  // -------------------------------------------------------------------------
   async sendMessage(channelId: string, text: string, opts?: SendOpts): Promise<string> {
     if (!this.bot) {
       throw new Error("Bot not started");
@@ -667,6 +726,23 @@ export class TelegramBridge implements ChannelBridge {
     this.handler = handler;
   }
 
+  // -------------------------------------------------------------------------
+  // Approval request handling
+  //
+  // Approval requests are sent as messages with an InlineKeyboard. Each button
+  // carries callback data in the format "a:<shortKey>:<result>", where:
+  //   - "a:" is a fixed prefix that distinguishes approval callbacks from any
+  //     other inline keyboard callbacks the bot may receive in the future.
+  //   - shortKey is a 12-character hex prefix of SHA-256(approvalKey). Telegram
+  //     limits callback_data to 64 bytes; the full approvalKey (a UUID) would
+  //     fit but this keeps room for the prefix and result suffix.
+  //   - result is "allow", "always", or "deny".
+  //
+  // When a button is pressed the callback_query handler looks up shortKey in
+  // pendingApprovals, resolves the Promise with the matching ApprovalResult,
+  // removes the entry, and edits the message to remove the buttons (so the
+  // user can't press them twice).
+  // -------------------------------------------------------------------------
   async sendApprovalRequest(
     channelId: string,
     prompt: string,
@@ -714,6 +790,24 @@ export class TelegramBridge implements ChannelBridge {
       }, timeoutMs);
     });
   }
+
+  // -------------------------------------------------------------------------
+  // Image downloading
+  //
+  // Telegram distinguishes two image types:
+  //   - Photos: sent through Telegram's compression pipeline, always JPEG,
+  //     delivered as an array of pre-scaled sizes (largest last).
+  //   - Documents: sent as raw files with the original MIME type preserved.
+  //     Used when the sender ticks "send as file" or when the client detects
+  //     the image would degrade too much from compression.
+  //
+  // Both paths call getFile() to obtain a temporary file_path, then fetch the
+  // binary over HTTPS from api.telegram.org/file/bot<token>/<file_path>.
+  // Telegram's limit is 20 MB per file; getFile() throws with a specific error
+  // message for oversized files. isFileTooBigError() catches this before we
+  // waste a download attempt. Above the limit Telegram silently truncates the
+  // stored file, so the check is load-bearing, not just a nice-to-have.
+  // -------------------------------------------------------------------------
 
   /**
    * Flush a buffered media group (album) as a single message with all images.

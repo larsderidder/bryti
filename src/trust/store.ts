@@ -18,6 +18,16 @@ import path from "node:path";
 
 /**
  * Capability levels, ordered from least to most privileged.
+ *
+ * - `safe`: local data the agent owns outright (core memory, SQLite, session
+ *   files). No user approval needed.
+ * - `guarded`: external content that arrives through the worker isolation
+ *   boundary. The worker runs in a separate session with scoped tools, so
+ *   untrusted content never reaches the main agent directly. No explicit
+ *   approval needed, but the boundary itself is the protection.
+ * - `elevated`: direct external access without isolation — network requests,
+ *   shell execution, unreviewed extension code. Requires explicit user approval
+ *   before the tool may run.
  */
 export type CapabilityLevel = "safe" | "guarded" | "elevated";
 
@@ -224,20 +234,45 @@ export function checkPermission(
 // Pending approval tracking
 // ---------------------------------------------------------------------------
 
+// File-backed approvals (trust-approvals.json) persist across restarts because
+// they represent deliberate, considered user decisions: "always allow this tool".
+// Pending approvals, by contrast, are transient per-session state: the agent
+// asked for permission in this conversation, the user hasn't replied yet. There
+// is no value in carrying that half-finished handshake across a restart, and
+// doing so could surface stale permission prompts after an unrelated restart.
+// The in-process Map is therefore intentional and correct for pending state.
 /** Tools waiting for user approval. Set by the agent when a tool is blocked. */
 const pendingApprovals = new Map<string, string>();
 
 /**
- * Mark a tool as pending approval. The next affirmative user message
- * will grant the approval.
+ * Mark a tool as pending approval for `userId`.
+ *
+ * This is a text-based approval handshake for channels that don't support
+ * inline buttons: the agent tells the user what it wants to do, sets a
+ * pending entry here, and the next message from that user is tested against
+ * an affirmative word list by checkPendingApproval().
+ *
+ * The key lives only in the in-process `pendingApprovals` Map. It is
+ * intentionally not persisted to disk: if the process restarts between the
+ * agent's request and the user's reply, the pending state is lost and the
+ * user simply needs to ask again. This avoids stale approval prompts
+ * surviving across restarts.
  */
 export function setPendingApproval(userId: string, toolName: string): void {
   pendingApprovals.set(userId, toolName);
 }
 
 /**
- * Check if there's a pending approval for this user and the user's
- * message is affirmative. Returns the tool name if approved, null otherwise.
+ * Check whether the user's message completes a pending approval handshake.
+ *
+ * Returns the tool name that was approved if `userMessage` is an affirmative
+ * word and there is a pending entry for `userId`; returns null if the message
+ * is negative (clears the pending state), or if it is neither (leaves the
+ * pending state intact so the conversation can continue).
+ *
+ * The affirmative and negative word lists are intentionally short to avoid
+ * false positives: only unambiguous single-word replies are treated as
+ * approval signals.
  */
 export function checkPendingApproval(userId: string, userMessage: string): string | null {
   const toolName = pendingApprovals.get(userId);
@@ -266,7 +301,13 @@ export function checkPendingApproval(userId: string, userMessage: string): strin
 }
 
 /**
- * Check if "always" was explicitly requested.
+ * Check whether the user's message is an "always approve" grant rather than
+ * a one-time "yes".
+ *
+ * Only exact matches of "always" or "always allow" qualify. Phrases like
+ * "yes always" or "sure always" do NOT match here; they fall through to the
+ * normal affirmative check in checkPendingApproval() and result in a one-time
+ * approval. This keeps the always-grant intentional and explicit.
  */
 export function isAlwaysApproval(userMessage: string): boolean {
   const lower = userMessage.toLowerCase().trim();

@@ -1,12 +1,22 @@
 /**
- * Scheduler.
+ * Scheduler: three job types, all driving the agent via synthetic messages.
  *
- * Two kinds of jobs: config-driven (operator cron entries) and projection-driven
- * (automatic daily review, exact-time checks, reflection). Both inject synthetic
- * messages into the agent loop routed to the primary user's channel.
+ * 1. Config-driven jobs (startConfigJobs): cron entries from config.yml. The
+ *    operator defines the schedule and the message text. Fire unconditionally
+ *    regardless of active-hours config.
  *
- * The agent uses projections for everything about the future; there is no
- * separate agent-managed schedule concept.
+ * 2. Projection daily review (startProjectionJobs — daily): fires at 08:00 UTC
+ *    every day. Sends the agent a broad "what's coming up?" prompt listing all
+ *    projections due in the next 7 days. The agent decides what (if anything)
+ *    to surface to the user.
+ *
+ * 3. Projection exact-time check (startProjectionJobs — every 5 min): precise
+ *    trigger for projections with a specific datetime. Checks for anything due
+ *    within the next 15 minutes. Skips silently outside active hours.
+ *
+ * All three types construct a synthetic IncomingMessage and pass it to the
+ * onMessage callback, which feeds it into the main agent loop exactly as if
+ * a real user had sent it.
  */
 
 import { Cron } from "croner";
@@ -23,6 +33,11 @@ import { isActiveNow } from "./active-hours.js";
  * Given a cron expression, calculate the next fire time after `after` and
  * return it as a UTC datetime string suitable for SQLite ("YYYY-MM-DD HH:MM").
  * Returns null if the expression is invalid or produces no next occurrence.
+ *
+ * Implementation note: croner does not expose a pure "next occurrence"
+ * function without constructing a live job. This creates a temporary Cron
+ * instance, reads the next run time, then immediately stops it to avoid
+ * leaking a running interval.
  */
 function nextCronOccurrence(cronExpr: string, after: Date): string | null {
   try {
@@ -79,7 +94,10 @@ export function createScheduler(
           async () => {
             console.log(`[scheduler] Config job triggered: ${cronJob.schedule}`);
             const channelId = defaultChannelId();
-            const msg: IncomingMessage = {
+            // raw.type identifies this as a scheduler message. processMessage() in
+        // index.ts checks for this field to skip crash-recovery checkpoints
+        // that only make sense for real user messages.
+        const msg: IncomingMessage = {
               channelId,
               userId: "cron",
               text: cronJob.message,
@@ -103,10 +121,20 @@ export function createScheduler(
 
   /**
    * Two projection jobs for the primary user:
-   * - Daily review at 8am UTC: surfaces today's and this week's projections,
-   *   auto-expiring stale ones first.
-   * - Exact-time check every 5 min: fires when an 'exact' projection is due
-   *   within the next 15 minutes.
+   *
+   * - Daily review at 8am UTC: a broad "what's coming up?" pass. The agent
+   *   receives all projections due in the next 7 days and decides what to
+   *   surface. Outside active hours the job silently skips — the review is
+   *   informational, not time-critical.
+   *
+   * - Exact-time check every 5 min: a precise trigger for projections that
+   *   have a specific datetime (resolution='exact'). Only fires when something
+   *   is actually due; skips silently outside active hours.
+   *
+   * The daily review is intentionally broad and agent-mediated; the exact-time
+   * check is a direct trigger for a concrete commitment. Both are distinct from
+   * config-driven jobs, which fire unconditionally and carry operator-authored
+   * message text.
    */
   function startProjectionJobs(): void {
     const primaryUserId = String(config.telegram.allowed_users[0] ?? "");
@@ -121,6 +149,10 @@ export function createScheduler(
     const dailyJob = new Cron(
       "0 8 * * *",
       async () => {
+        // Projection jobs respect active hours; config-driven jobs do not.
+        // This asymmetry is intentional: config jobs are operator-controlled
+        // and may need to fire at any time (e.g., system maintenance notices),
+        // while projection jobs are conversational and should not wake the user.
         if (!isActiveNow(config.active_hours)) {
           console.log("[projections] Daily review skipped (outside active hours)");
           return;
@@ -142,6 +174,8 @@ export function createScheduler(
             return;
           }
           const formatted = formatProjectionsForPrompt(upcoming, 20);
+          // raw.type marks this as a scheduler message so processMessage() can
+          // distinguish it from a real user message and skip crash checkpoints.
           const msg: IncomingMessage = {
             channelId,
             userId: primaryUserId,
@@ -209,6 +243,8 @@ export function createScheduler(
             }
           }
 
+          // raw.type marks this as a scheduler message so processMessage() can
+          // distinguish it from a real user message and skip crash checkpoints.
           const msg: IncomingMessage = {
             channelId,
             userId: primaryUserId,

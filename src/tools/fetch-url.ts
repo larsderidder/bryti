@@ -34,7 +34,12 @@ export function createFetchUrlTool(timeoutMs: number = 10000): AgentTool<typeof 
       _toolCallId: string,
       { url }: FetchUrlInput,
     ): Promise<AgentToolResult<unknown>> {
-      // SSRF protection: fast pre-DNS check for obvious private hostnames
+      // SSRF protection: reject requests that target private infrastructure.
+      // Without this, a worker instructed to "fetch http://169.254.169.254/
+      // latest/meta-data/" would read cloud instance metadata (AWS/GCP/Azure
+      // IMDSv1 is unauthenticated). isPrivateHostname() catches obvious cases
+      // by hostname pattern; safeLookup() below catches cases where a public
+      // hostname resolves to a private IP (DNS rebinding / split-horizon DNS).
       if (isPrivateHostname(url)) {
         return toolError("Cannot fetch private URLs");
       }
@@ -53,7 +58,9 @@ export function createFetchUrlTool(timeoutMs: number = 10000): AgentTool<typeof 
 
         const html = response.data as string;
 
-        // Parse HTML and extract content
+        // Readability strips navigation menus, sidebars, ads, cookie banners,
+        // and other boilerplate, leaving only the main article text. This
+        // produces much cleaner context than raw innerHTML stripping.
         const { document } = parseHTML(html);
         const reader = new Readability(document as unknown as Document);
         const article = reader.parse();
@@ -69,7 +76,9 @@ export function createFetchUrlTool(timeoutMs: number = 10000): AgentTool<typeof 
         let content = article.textContent || "";
         const title = article.title || "";
 
-        // Truncate if too long
+        // Hard cap at 4000 chars: a deliberate context-window budget decision.
+        // Workers typically fetch several URLs per task; letting one page consume
+        // the entire context would crowd out the worker's reasoning and results.
         if (content.length > MAX_CONTENT_LENGTH) {
           content = content.substring(0, MAX_CONTENT_LENGTH) + "\n\n[Content truncated...]";
         }

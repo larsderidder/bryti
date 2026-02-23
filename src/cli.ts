@@ -2,6 +2,10 @@
  * Bryti management CLI. Single entry point for all operator tasks.
  * Run via: npm run cli -- <command> [options]
  *
+ * The CLI bypasses the running application entirely and reads/writes SQLite
+ * directly. This is safe to do while the bot is running because SQLite WAL
+ * mode allows concurrent readers alongside a live writer without blocking.
+ *
  * See `npm run cli -- help` for full command listing.
  */
 
@@ -273,7 +277,10 @@ function cmdTimeskip(dataDir: string, userId: string, summaryOrId: string, minut
 
   const db = new Database(dbPath);
 
-  // Detect UUID vs summary substring
+  // Users may reference projections by summary substring (human-friendly) or
+  // by full UUID (copy-pasted from 'timeskip --list'). The regex distinguishes
+  // them: UUIDs match the standard 8-4-4-4-12 hex pattern, everything else is
+  // treated as a summary substring.
   const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(summaryOrId);
   const row = isUuid
     ? db.prepare("SELECT * FROM projections WHERE id = ?").get(summaryOrId) as Record<string, string> | undefined
@@ -305,6 +312,9 @@ function cmdTimeskip(dataDir: string, userId: string, summaryOrId: string, minut
 // Command: import-openclaw
 // ---------------------------------------------------------------------------
 
+// One-time migration tool for importing Lars's OpenClaw memory files into
+// bryti's archival memory. Specific to Lars's local setup (/home/lars/clawd).
+// Not a general-purpose import command.
 function cmdImportOpenclaw(dataDir: string, userId: string, dryRun: boolean): void {
   const clawdDir = "/home/lars/clawd";
 
@@ -405,6 +415,14 @@ function cmdImportOpenclaw(dataDir: string, userId: string, dryRun: boolean): vo
   console.log("\nDone. Restart bryti for core memory changes to take effect.");
 }
 
+/**
+ * Split a markdown document into granular facts by ## headings.
+ *
+ * Each ## section is stored as a separate archival fact so that semantic
+ * search can retrieve the relevant section rather than returning the entire
+ * document. The date prefix (derived from the filename) is prepended to each
+ * section so temporal context is preserved after the split.
+ */
 function splitIntoSections(content: string, filename: string): string[] {
   const date = path.basename(filename, ".md");
   const parts = content.split(/^## /m);
@@ -446,6 +464,11 @@ interface SyntheticConversation {
  * Inject synthetic conversations into history for compaction testing.
  * Back-dates entries so they look like real history. Prioritises
  * context-window-pressure subcategory conversations.
+ *
+ * This is a testing/development tool only. It writes synthetic entries with
+ * _synthetic: true markers but those entries are otherwise indistinguishable
+ * from real history as far as the compaction and reflection passes are
+ * concerned. Do not run in production.
  */
 function cmdFillContext(
   dataDir: string,
@@ -526,7 +549,10 @@ async function cmdArchiveFact(dataDir: string, userId: string, content: string):
   console.log(`Archiving fact for user ${userId}...`);
   console.log(`Content: "${content}"\n`);
 
-  // Lazy-import heavy modules only when this command is used.
+  // Lazy-import the embedding model and memory store. The embedding model is
+  // 300MB+ and takes several seconds to load. Importing at the top of the file
+  // would add that startup cost to every CLI command, including fast read-only
+  // ones like 'memory' and 'reflect'. Deferring to here keeps the CLI snappy.
   const { embed } = await import("./memory/embeddings.js");
   const { createMemoryStore } = await import("./memory/store.js");
   const { createProjectionStore } = await import("./projection/index.js");

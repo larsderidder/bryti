@@ -1,3 +1,12 @@
+/**
+ * Per-message token usage tracking.
+ *
+ * Records input tokens, output tokens, model, cost in USD, and latency for
+ * every agent response. Entries are appended to daily JSONL files under
+ * data/usage/. Used for cost monitoring and operator visibility into model
+ * spending over time.
+ */
+
 import fs from "node:fs";
 import path from "node:path";
 import type { Config, ModelEntry } from "./config.js";
@@ -38,6 +47,8 @@ function toDateString(date: Date): string {
   return date.toISOString().split("T")[0];
 }
 
+// Round to 6 decimal places ($0.000001 precision). This prevents floating-point
+// drift when accumulating many small cost values in running totals.
 function roundUsd(value: number): number {
   return Math.round(value * 1_000_000) / 1_000_000;
 }
@@ -48,14 +59,26 @@ export function calculateCostUsd(
   cost?: ModelEntry["cost"],
 ): number {
   if (!cost) return 0;
+  // cost.input / cost.output are prices per million tokens; divide by 1,000,000
+  // to get the per-token rate before multiplying by the actual token count.
   const input = (inputTokens * cost.input) / 1_000_000;
   const output = (outputTokens * cost.output) / 1_000_000;
   return roundUsd(input + output);
 }
 
 /**
- * Look up a model's cost config. Tries provider hint + bare id first, then
- * parses "provider/model" prefix, then searches all providers for bare id.
+ * Look up a model's cost config using a three-step cascade.
+ *
+ * The model string returned by the SDK may differ from the config format in
+ * two ways: (1) it may carry an embedded "provider/model" prefix, or (2) the
+ * provider context may only be known separately. The cascade handles both:
+ *
+ * Step 1 — explicit provider + bare model id: use the provider hint (if any)
+ *   and strip any embedded prefix from the model string.
+ * Step 2 — embedded provider prefix: parse "provider/model" from the model
+ *   string itself and look up that pair.
+ * Step 3 — bare id across all providers: fall back to searching every
+ *   configured provider for a model whose id matches the full model string.
  */
 export function resolveModelCost(
   config: Config,

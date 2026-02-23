@@ -40,11 +40,17 @@ export function createArchivalMemoryTools(
       { content }: ArchivalMemoryInsertInput,
     ): Promise<AgentToolResult<unknown>> {
       try {
+        // Embed at write time, not at search time. Inserts are infrequent (one
+        // per deliberate memory operation); searches happen on every user query.
+        // Paying the embedding cost up front keeps search latency predictable.
         const embedding = await embed(content);
         store.addFact(content, "archival", embedding);
 
-        // Check whether the new fact activates any waiting trigger-based projections.
-        // Pass embed for cosine similarity fallback when keyword matching fails.
+        // This is what makes "remind me when X happens" commitments work.
+        // Any projection created with a trigger_on_fact condition sits in a
+        // 'pending' state until an archival insert mentions matching content.
+        // checkTriggers() does keyword matching first, then cosine similarity
+        // as a fallback, and marks matched projections as 'triggered'.
         const triggered = projectionStore ? await projectionStore.checkTriggers(content, embed) : [];
 
         if (triggered.length > 0) {

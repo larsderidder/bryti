@@ -37,10 +37,20 @@ export interface MemoryStore {
 
 
 
+/**
+ * Serialize an embedding vector to a raw binary buffer.
+ * Stored as Float32Array bytes (4 bytes per dimension) rather than JSON,
+ * which avoids the significant parse/stringify overhead for ~300-dim vectors
+ * and halves the storage footprint compared to text representation.
+ */
 function serializeEmbedding(embedding: number[]): Buffer {
   return Buffer.from(new Float32Array(embedding).buffer);
 }
 
+/**
+ * Deserialize a raw binary buffer back to a number array.
+ * Inverse of serializeEmbedding: reads raw Float32 bytes from the blob column.
+ */
 function deserializeEmbedding(buffer: Buffer): number[] {
   const array = new Float32Array(buffer.buffer, buffer.byteOffset, buffer.byteLength / 4);
   return Array.from(array);
@@ -53,6 +63,13 @@ function deserializeEmbedding(buffer: Buffer): number[] {
  * @param dataDir Base data directory
  */
 export function createMemoryStore(userId: string, dataDir: string): MemoryStore {
+  // Schema overview:
+  //   facts          — main table; one row per stored fact (id, content, source, timestamp, hash)
+  //   facts_fts      — FTS5 virtual table shadowing facts.content for BM25 keyword search
+  //   fact_embeddings — binary blob table keyed by the same id as facts
+  //
+  // Three triggers (facts_ai, facts_ad, facts_au) keep facts_fts in sync with
+  // facts automatically on insert, delete, and update.
   const userDir = path.join(dataDir, "users", userId);
   fs.mkdirSync(userDir, { recursive: true });
 
@@ -127,6 +144,17 @@ export function createMemoryStore(userId: string, dataDir: string): MemoryStore 
   `);
 
   return {
+    /**
+     * Add a fact to the store and return its generated UUID.
+     *
+     * @param content  The fact text to store and index.
+     * @param source   Provenance label (e.g. "reflection", "user").
+     * @param embedding Pre-computed embedding vector for this content.
+     *
+     * The `hash` field is a truncated SHA-256 of the content. It is used to
+     * deduplicate facts during bulk imports, not as an integrity check — the
+     * store does not verify it on read.
+     */
     addFact(content: string, source: string, embedding: number[]): string {
       const id = crypto.randomUUID();
       const timestamp = Date.now();
@@ -146,6 +174,13 @@ export function createMemoryStore(userId: string, dataDir: string): MemoryStore 
       deleteFact.run(id);
     },
 
+    /**
+     * Search facts by keyword using SQLite FTS5.
+     *
+     * Scoring uses FTS5's built-in BM25 implementation (via the `bm25()`
+     * function), which ranks results by term frequency and inverse document
+     * frequency. Returns at most `limit` results ordered by relevance.
+     */
     searchKeyword(query: string, limit: number): ScoredResult[] {
       if (!query.trim()) {
         return [];
@@ -158,6 +193,7 @@ export function createMemoryStore(userId: string, dataDir: string): MemoryStore 
       // by doubling ("" is the FTS5 escape for a literal double quote).
       // Single quotes are stripped to avoid tokenizer surprises.
       const escapedQuery = query.replace(/'/g, "").replace(/"/g, '""');
+
       const stmt = db.prepare(`
         SELECT f.id, f.content, f.source, f.timestamp,
                bm25(facts_fts) as score
@@ -185,6 +221,17 @@ export function createMemoryStore(userId: string, dataDir: string): MemoryStore 
       }));
     },
 
+    /**
+     * Search facts by vector similarity.
+     *
+     * This is a full table scan: all embeddings are loaded from SQLite into
+     * memory, cosine similarity is computed for each one, and the top `limit`
+     * results are returned. This is acceptable up to roughly 100K facts.
+     * Beyond that, an approximate nearest-neighbour index would be needed
+     * (hnswlib-node or the sqlite-vec extension are natural fits here).
+     *
+     * TODO: add ANN index when fact count regularly exceeds ~100K per user.
+     */
     searchVector(embedding: number[], limit: number): ScoredResult[] {
       const rows = selectEmbeddings.all() as Array<{
         id: string;

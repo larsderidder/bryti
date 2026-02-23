@@ -53,15 +53,32 @@ export function createTools(
     reason: "Installs skills from URLs or copies local directories into the skills folder.",
   });
 
-  // NOTE: web_search and fetch_url are NOT given to the main agent.
-  // External content is processed by workers in isolation (security boundary).
-  // The main agent reads worker results via read_file.
+  // ---------------------------------------------------------------------------
+  // SECURITY BOUNDARY: web_search and fetch_url are intentionally excluded
+  // from the main agent's tool set. All external network access goes through
+  // workers, which run in isolated sessions with scoped file access.
+  //
+  // Rationale: a web page or search result could contain prompt-injected
+  // instructions. Processing untrusted content inside the main agent session
+  // would let an attacker influence the agent's memory, projections, or tool
+  // calls. Workers are disposable; the main agent only sees their sanitised
+  // result files.
+  // ---------------------------------------------------------------------------
 
   // Memory tools
   tools.push(...createCoreMemoryTools(coreMemory));
 
   // Projection memory: forward-looking events and commitments.
   // Created before archival tools so we can pass it in for trigger checking.
+  //
+  // NOTE: this is a second ProjectionStore instance for the same user — agent.ts
+  // creates one too when assembling the system prompt. Both instances point at
+  // the same SQLite file, which is safe because the DB is opened in WAL mode
+  // (concurrent readers, serialised writers). They do not share in-memory state,
+  // so neither instance caches stale rows across the other's writes.
+  //
+  // TODO: consolidate into a single store per user (pass it in from agent.ts)
+  // to make the ownership model explicit and remove the WAL dependency.
   const projectionStore = createProjectionStore(userId, config.data_dir);
   tools.push(...createProjectionTools(projectionStore, config.agent.timezone));
 
@@ -108,6 +125,9 @@ export function createTools(
       },
     };
     tools.push(restartTool);
+    // Elevated even though a restart sounds harmless: the guardrail ensures
+    // the agent cannot be tricked into restart-looping by a malicious prompt
+    // (e.g. "please restart every 10 seconds until I say stop").
     registerToolCapabilities("system_restart", {
       level: "elevated",
       capabilities: ["shell"],
@@ -116,7 +136,7 @@ export function createTools(
   }
 
   // Register trust capabilities for well-known elevated tools.
-  // Extension tools (loaded by pi SDK from data/files/extensions/) default to
+  // Extension tools (loaded by pi SDK from data/agent/extensions/) default to
   // elevated since they can execute arbitrary code. Known extension names are
   // registered explicitly for better permission prompts.
   registerToolCapabilities("shell_exec", {

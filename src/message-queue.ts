@@ -1,21 +1,37 @@
 /**
  * Per-channel FIFO message queue with merge and backpressure.
  *
- * Messages are processed one at a time per channel. New messages queue up to
- * MAX_DEPTH; beyond that the caller gets a rejection callback. Messages
- * arriving within MERGE_WINDOW_MS of each other are merged into a single
- * prompt, handling the "user sends three quick messages" pattern.
+ * Two core guarantees:
+ *
+ * 1. Per-channel serialization: only one message is processed at a time per
+ *    channel. Subsequent messages queue up behind it rather than racing into
+ *    the agent loop in parallel.
+ *
+ * 2. Burst merging: rapid-fire messages that arrive within MERGE_WINDOW_MS of
+ *    each other are joined into a single prompt before being dispatched. This
+ *    handles the common "user sends three quick messages" pattern without the
+ *    agent seeing three separate incomplete thoughts.
+ *
+ * New messages queue up to MAX_DEPTH; beyond that the caller gets a rejection
+ * callback (backpressure signal, not silent drop).
  */
 
 import type { IncomingMessage } from "./channels/types.js";
 
 const MAX_DEPTH = 10;
+// 2-3 seconds is the sweet spot: fast enough that the user experiences a
+// single response (not noticeable delay), long enough to catch split messages
+// that arrive in separate network frames. The current 5s value is conservative
+// and can be tuned down if latency matters more.
 const MERGE_WINDOW_MS = 5000;
 const RATE_LIMIT_MAX = 10;
 const RATE_LIMIT_WINDOW_MS = 60_000;
 
 interface QueueEntry {
   msg: IncomingMessage;
+  /** Wall-clock arrival time (Date.now()). Used for merge window calculation,
+   *  not as a processing-start marker — the message may sit in the queue for
+   *  some time before draining begins. */
   arrivedAt: number;
 }
 
@@ -114,7 +130,10 @@ export class MessageQueue {
     }
 
     if (q.entries.length >= this.maxDepth) {
-      // Queue full: reject without queuing
+      // Queue full: invoke the rejection callback immediately and return without
+      // enqueuing. This is a backpressure signal to the caller — the message is
+      // not silently dropped, but it is not queued either. The caller decides
+      // how to respond (e.g., send "I'm busy" to the user).
       this.rejectFn(msg).catch((err) => console.error("rejectFn error:", err));
       return;
     }
@@ -152,7 +171,10 @@ export class MessageQueue {
    * Take a batch of entries that should be merged together.
    *
    * The first entry is always included. Additional entries are included if they
-   * arrived within mergeWindowMs of the first entry in the batch.
+   * arrived within mergeWindowMs of the FIRST entry in the batch. This is a
+   * fixed window anchored to the first message, not a sliding window — an
+   * entry that arrives 1ms after the previous one is still excluded if it
+   * falls outside the window from the first entry.
    */
   private takeMergeBatch(q: ChannelQueue): QueueEntry[] {
     const batch: QueueEntry[] = [];
@@ -173,7 +195,12 @@ export class MessageQueue {
 
   /**
    * Merge multiple queue entries into a single IncomingMessage by joining
-   * their text with newlines. Metadata is taken from the first entry.
+   * their text with newlines. Metadata (userId, channelId, platform, etc.) is
+   * taken from the first entry.
+   *
+   * Note: images (and other non-text attachments) from subsequent burst
+   * entries are currently dropped — only their text is merged.
+   * TODO: carry images from all burst entries into the merged message.
    */
   private mergeEntries(entries: QueueEntry[]): IncomingMessage {
     if (entries.length === 1) {
@@ -187,12 +214,18 @@ export class MessageQueue {
     };
   }
 
-  /** Number of queued (not-yet-processing) messages for a channel. */
+  /**
+   * Number of queued (not-yet-processing) messages for a channel.
+   * Exposed for monitoring dashboards and unit tests.
+   */
   queueDepth(channelId: string): number {
     return this.queues.get(channelId)?.entries.length ?? 0;
   }
 
-  /** Whether a channel is currently processing a message. */
+  /**
+   * Whether the channel is currently mid-process (drain loop running).
+   * Exposed for monitoring dashboards and unit tests.
+   */
   isProcessing(channelId: string): boolean {
     return this.queues.get(channelId)?.processing ?? false;
   }

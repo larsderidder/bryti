@@ -35,6 +35,15 @@ const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 // Worker system prompt
 // ---------------------------------------------------------------------------
 
+/**
+ * Build the system prompt for a worker session.
+ *
+ * The steering.md polling instruction embedded here (check every 3 tool calls)
+ * is the only communication channel from the main agent to a worker that is
+ * already running. worker_steer writes the file; the worker reads it on its
+ * own schedule. There is no push mechanism — the interval of 3 tool calls is
+ * a trade-off between responsiveness and unnecessary read_file overhead.
+ */
 function buildWorkerSystemPrompt(task: string, workerDir: string): string {
   return [
     `You are a research worker. Your task is described below.`,
@@ -82,6 +91,15 @@ export interface WorkerStatusFile {
   result_path: string;
 }
 
+/**
+ * Write (or overwrite) the status.json file in the worker directory.
+ *
+ * This is the primary way the main agent reads worker status via worker_check.
+ * worker_check first consults the in-memory registry; if the worker is no
+ * longer there (e.g. after a restart or 24-hour cleanup) it falls back to
+ * reading this file from disk. Writing is best-effort: failures are swallowed
+ * so they never abort a completion or timeout handler.
+ */
 export function writeStatusFile(workerDir: string, data: WorkerStatusFile): void {
   try {
     fs.writeFileSync(
@@ -154,7 +172,9 @@ export async function spawnWorkerSession(opts: {
     throw new Error(`Worker model not found: ${modelString}`);
   }
 
-  // Build scoped tools: only the requested ones + scoped file tools (always)
+  // ---- Tool selection -------------------------------------------------------
+  // Only the tools explicitly requested by the dispatcher are included. The
+  // scoped file tools (write_file, read_file) are always added regardless.
   const workerTools: AgentTool<any>[] = [];
 
   if (toolNames.includes("web_search") && config.tools.web_search.enabled) {
@@ -170,10 +190,11 @@ export async function spawnWorkerSession(opts: {
     workerTools.push(createFetchUrlTool(config.tools.fetch_url.timeout_ms));
   }
 
-  // Scoped file tools: worker can only write to its own directory (flat, no subdirs)
+  // Scoped file tools are always present — they are the worker's only way to
+  // persist findings. The worker cannot access files outside workerDir.
   workerTools.push(...createWorkerScopedTools(workerDir));
 
-  // Minimal resource loader — just the system prompt, no extensions
+  // ---- Session creation -----------------------------------------------------
   const systemPrompt = buildWorkerSystemPrompt(task, workerDir);
   const loader = new DefaultResourceLoader({
     cwd: config.data_dir,
@@ -200,7 +221,7 @@ export async function spawnWorkerSession(opts: {
     settingsManager,
   });
 
-  // Register the abort function now that we have the session
+  // ---- Timeout setup --------------------------------------------------------
   registry.update(workerId, {
     abort: () => session.abort(),
   });
@@ -246,7 +267,9 @@ export async function spawnWorkerSession(opts: {
   // Store handle so we can cancel it if the worker finishes first
   registry.update(workerId, { timeoutHandle });
 
-  // Run the task — non-blocking (we don't await this at the call site)
+  // ---- Task execution and completion callback --------------------------------
+  // session.prompt() runs the worker to completion. Everything below the await
+  // is the completion callback — it runs once the model has stopped generating.
   const taskPrompt =
     `Please complete the task described in the system prompt. ` +
     `Write your findings to result.md when done.`;
@@ -272,6 +295,8 @@ export async function spawnWorkerSession(opts: {
       timeoutHandle: null,
     });
     const entry = registry.get(workerId);
+    // Step 1: Write status.json so worker_check can read the result from disk
+    // even after the registry entry has been cleaned up.
     writeStatusFile(workerDir, {
       worker_id: workerId,
       status: "complete",
@@ -286,13 +311,16 @@ export async function spawnWorkerSession(opts: {
 
     const factContent = `Worker ${workerId} complete, results at ${resultPath}`;
     try {
+      // Step 2: Archive the completion fact. This is what the main agent's
+      // projection matched against trigger_on_fact (e.g. "worker w-xxx complete").
       const embedding = await embed(factContent, modelsDir);
       memoryStore.addFact(factContent, "worker", embedding);
       console.log(`[worker] ${workerId} completion fact archived`);
 
-      // Check if this fact triggers any projections (e.g., "worker w-xxx complete").
-      // If so, invoke the callback to notify the main agent immediately instead
-      // of waiting for the 5-minute scheduler tick.
+      // Step 3: Check the fact against active projections and invoke the
+      // onTrigger callback if any match. The callback injects a scheduler
+      // message immediately rather than waiting for the 5-minute cron tick,
+      // so the main agent wakes up as soon as the worker finishes.
       if (onTrigger && opts.projectionStore) {
         try {
           const triggered = await opts.projectionStore.checkTriggers(

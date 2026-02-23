@@ -136,8 +136,23 @@ function getModelInfra(config: Config): ModelInfra {
 
 /**
  * Evaluate a tool call through the LLM guardrail.
- * Uses the primary model for reliability; the prompt is tiny (~300 tokens in,
- * ~20 out). Defaults to ASK on any failure.
+ *
+ * The prompt is deliberately narrow: it only receives the tool name,
+ * arguments, the tool's own description, and the last user message. The full
+ * conversation transcript is never included. This limits the prompt injection
+ * surface — a malicious message earlier in the conversation cannot reach the
+ * guardrail and influence the safety verdict.
+ *
+ * Fail-safe default: any LLM failure (network error, parse error, no model
+ * available) falls back to ASK rather than ALLOW. The guardrail must never
+ * fail open. An operator who wants fewer interruptions should tune the
+ * GUARDRAIL_SYSTEM_PROMPT guidelines, not weaken the error path.
+ *
+ * TODO: the guardrail currently uses the same primary model as the main agent.
+ * A smaller, faster model (Claude Haiku, GPT-4o-mini) would be more
+ * appropriate here: the classification task is simple, latency matters, and
+ * cost adds up on every elevated tool call. Consider adding a
+ * `guardrail_model` config key analogous to `reflection_model`.
  */
 export async function evaluateToolCall(
   config: Config,

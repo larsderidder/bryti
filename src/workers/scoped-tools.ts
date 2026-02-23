@@ -35,6 +35,16 @@ type ReadResultInput = Static<typeof readResultSchema>;
 
 /**
  * Validate filename: no path separators, no traversal, no hidden files.
+ *
+ * Reserved filenames that workers must not overwrite:
+ *   - status.json  : written by spawn.ts to record worker status; read by
+ *                    worker_check to report progress back to the main agent.
+ *   - task.md      : the initial task brief written by worker_dispatch; treated
+ *                    as read-only so the worker always has access to its original
+ *                    instructions even if steering changes direction.
+ *   - steering.md  : the communication channel from the main agent to a running
+ *                    worker; written exclusively by worker_steer so the worker
+ *                    can safely poll it without racing against its own writes.
  */
 function isValidFilename(filename: string): boolean {
   if (!filename || filename.length > 255) return false;
@@ -45,8 +55,15 @@ function isValidFilename(filename: string): boolean {
 }
 
 /**
- * Create scoped tools for a worker session. Write files into workerDir
- * (flat, no subdirs) and read them back. That's it.
+ * Create scoped file tools (write_file, read_file) for a worker session.
+ *
+ * Isolation guarantees:
+ *   - Workers can only write to their own workerDir (flat layout, no subdirectories).
+ *   - Workers can only read files that live in the same workerDir, which means
+ *     only files they wrote themselves plus task.md and steering.md. There is no
+ *     cross-worker access and no parent-directory traversal.
+ *   - Reserved filenames (status.json, task.md, steering.md) are blocked from
+ *     writes so the runtime's control files cannot be corrupted.
  */
 export function createWorkerScopedTools(workerDir: string): AgentTool<any>[] {
   const writeTool: AgentTool<typeof writeResultSchema> = {

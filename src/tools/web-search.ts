@@ -1,9 +1,17 @@
 /**
  * Web search tools for workers.
  *
- * Two backends:
- * - Brave Search: paid API, free tier 2000 queries/month, no self-hosting needed.
- * - SearXNG: self-hosted metasearch, aggregates Google/Bing/DDG/Brave/etc.
+ * Two backends exist because they serve different deployment needs:
+ *
+ *   Brave Search — hosted SaaS, single API key, 2000 free queries/month.
+ *                  Good default: no infrastructure to run.
+ *
+ *   SearXNG     — self-hosted metasearch engine that aggregates Google, Bing,
+ *                 DuckDuckGo, Brave, and many others in one query. More sources,
+ *                 no per-query cost, but requires a running SearXNG instance.
+ *                 Preferred when the user controls their own instance (privacy,
+ *                 higher volume, or aggregated coverage matters more than setup
+ *                 cost).
  *
  * Workers only; the main agent has no access to these tools (security boundary).
  *
@@ -59,6 +67,13 @@ const webSearchSchema = Type.Object({
 
 type WebSearchInput = Static<typeof webSearchSchema>;
 
+// Why the raw Node http/https module instead of axios or fetch?
+// Self-hosted SearXNG instances often use self-signed TLS certificates. The
+// native fetch() API and axios do not expose `rejectUnauthorized` in a way
+// that is easy to toggle per-request without global side-effects. The raw
+// http/https module accepts a per-request `rejectUnauthorized: false` option,
+// making it straightforward to support internal SearXNG instances without
+// disabling TLS verification globally.
 function fetchJson(url: string, timeoutMs: number): Promise<SearxngResponse> {
   return new Promise((resolve, reject) => {
     const protocol = url.startsWith("https") ? https : http;
