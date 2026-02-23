@@ -336,6 +336,10 @@ ${integrations}
   beforeEach(() => {
     tempDir = fs.mkdtempSync("/tmp/bryti-integrations-test-");
     process.env.BRYTI_DATA_DIR = tempDir;
+    // Clear env vars that may leak from the real environment
+    delete process.env.HEDGEDOC_URL;
+    delete process.env.HEDGEDOC_PUBLIC_URL;
+    delete process.env.MY_SERVICE_URL;
   });
 
   afterEach(() => {
