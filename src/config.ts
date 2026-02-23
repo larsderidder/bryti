@@ -30,6 +30,7 @@ export interface ModelEntry {
   api?: string;
   context_window?: number;
   max_tokens?: number;
+  input?: ("text" | "image")[];
   cost?: { input: number; output: number };
   compat?: Record<string, unknown>;
 }

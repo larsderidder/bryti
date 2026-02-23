@@ -78,6 +78,7 @@ function generateModelsJson(config: Config, agentDir: string): void {
         name: m.name || m.id,
         contextWindow: m.context_window || 200000,
         maxTokens: m.max_tokens || 32000,
+        input: m.input ?? ["text", "image"],
         ...(m.api && { api: m.api }),
         ...(m.cost && { cost: m.cost }),
         ...(m.compat && { compat: m.compat }),
