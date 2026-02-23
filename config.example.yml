@@ -5,10 +5,9 @@
 agent:
   name: "Bryti"
 
-  # System prompt. Memory contents, tool listings, extensions, and projections
-  # are injected automatically; this is the behavioral core. Personal details
-  # about you are best shared in conversation; the agent stores them in core
-  # memory and keeps them across sessions.
+  # Behavioral core. Memory, tool listings, extensions, and projections are
+  # injected automatically. Personal details are best shared in conversation;
+  # the agent stores them in core memory across sessions.
   system_prompt: |
     You are Bryti, a personal AI assistant. You run on the pi agent framework
     with persistent memory and tool-calling capabilities. You are concise,
@@ -50,8 +49,6 @@ agent:
       web research.
 
   # Primary model. Format: provider/model-id
-  # Option 1: Anthropic OAuth (Claude Pro/Max subscription, no API key needed)
-  # Requires pi CLI login first: `pi login anthropic`
   model: "anthropic/claude-sonnet-4-6"
 
   # Tried in order when primary model fails
@@ -59,11 +56,10 @@ agent:
     - "opencode/minimax-m2.5-free"
     - "opencode/kimi-k2.5-free"
 
-  # IANA timezone for projection scheduling and display
+  # IANA timezone
   timezone: "Europe/Amsterdam"
 
-  # Model for the background reflection pass (defaults to primary model).
-  # Set a cheaper model here to save tokens on background work.
+  # Model for the background reflection pass (defaults to primary model)
   # reflection_model: "opencode/minimax-m2.5-free"
 
 # ---------------------------------------------------------------------------
@@ -72,28 +68,24 @@ agent:
 
 telegram:
   token: ${TELEGRAM_BOT_TOKEN}
-  allowed_users: []  # Telegram user IDs. Empty = deny all. Add at least one.
+  allowed_users: []  # Telegram user IDs
 
-# WhatsApp via baileys (no Meta Business API). QR code auth on first run.
-# allowed_users: phone numbers in international format without + (e.g., 31612345678)
-whatsapp:
-  enabled: false
-  allowed_users: []
+# WhatsApp via baileys (QR code auth on first run)
+# whatsapp:
+#   enabled: true
+#   allowed_users: []  # international format without + (e.g., 31612345678)
 
 # ---------------------------------------------------------------------------
 # Model providers
+#
+# context_window and max_tokens are optional (defaults: 200K / 32K).
+# Only list the models you actually use. See README for more provider examples.
 # ---------------------------------------------------------------------------
 
 models:
   providers:
-    # context_window and max_tokens are optional on every model.
-    # Defaults: 200K context, 32K output. Only set them when a model differs.
-    # Only list the models you actually use in agent.model / fallback_models.
-
-    # Anthropic OAuth: uses your Claude Pro or Max subscription.
-    # No api_key needed; bryti reads the OAuth token from ~/.pi/agent/auth.json.
-    # One-time setup: install pi (`npm i -g @mariozechner/pi-coding-agent`)
-    # and run `pi login anthropic`. Opens a browser, token is stored locally.
+    # Anthropic OAuth (Claude Pro/Max subscription, no API key).
+    # One-time: install pi CLI and run `pi login anthropic`.
     - name: anthropic
       base_url: ""
       api: anthropic-messages
@@ -103,162 +95,66 @@ models:
           context_window: 200000
           max_tokens: 64000
 
-    # Free open models via opencode.ai (no subscription, no API key)
+    # Free models via opencode.ai (no key needed)
     - name: opencode
       base_url: https://opencode.ai/zen/v1
-      api: openai-responses
+      api: openai-completions
       api_key: "public"
+      headers:
+        x-opencode-client: "cli"
+        x-opencode-project: "global"
+        x-opencode-session: "pi-session"
+        x-opencode-request: "pi-request"
       models:
         - id: "minimax-m2.5-free"
           name: "MiniMax M2.5 (Free)"
-          api: openai-completions
           context_window: 200000
           max_tokens: 32000
           compat:
             maxTokensField: max_tokens
         - id: "kimi-k2.5-free"
           name: "Kimi K2.5 (Free)"
-          api: openai-completions
           context_window: 128000
           max_tokens: 32000
           compat:
             maxTokensField: max_tokens
-
-    # --- More providers (uncomment and add your keys) ---
-
-    # Anthropic API key (alternative to OAuth above)
-    # - name: anthropic
-    #   api: anthropic-messages
-    #   api_key: ${ANTHROPIC_API_KEY}
-    #   models:
-    #     - id: "claude-sonnet-4-6"
-    #       context_window: 200000
-    #       max_tokens: 64000
-
-    # OpenRouter: access 200+ models with one API key
-    # - name: openrouter
-    #   base_url: https://openrouter.ai/api/v1
-    #   api_key: ${OPENROUTER_API_KEY}
-    #   models:
-    #     - id: "anthropic/claude-sonnet-4-6"
-    #       context_window: 200000
-    #       max_tokens: 64000
-
-    # Google Gemini
-    # - name: google
-    #   base_url: https://generativelanguage.googleapis.com/v1beta/openai
-    #   api_key: ${GOOGLE_API_KEY}
-    #   models:
-    #     - id: "gemini-2.5-flash"
-    #       context_window: 1048576
-    #       max_tokens: 65536
-
-    # Ollama (local or remote)
-    # - name: ollama
-    #   base_url: http://localhost:11434/v1
-    #   api_key: "ollama"
-    #   models:
-    #     - id: "qwen3:32b"
-
-    # Together AI
-    # - name: together
-    #   base_url: https://api.together.xyz/v1
-    #   api_key: ${TOGETHER_API_KEY}
-    #   models:
-    #     - id: "Qwen/Qwen3-235B-A22B"
 
 # ---------------------------------------------------------------------------
 # Tools
 # ---------------------------------------------------------------------------
 
 tools:
-  # Web search for workers. Set brave_api_key OR searxng_url (not both).
-  # If both are set, Brave takes priority.
-  # If neither is set, web search is disabled for workers.
+  # Web search for workers. Set brave_api_key OR searxng_url.
   web_search:
-    # Option A: Brave Search API. Free tier: 2000 queries/month, no self-hosting.
-    #           Get a key at https://api.search.brave.com/
-    # brave_api_key: "${BRAVE_API_KEY}"
-
-    # Option B: SearXNG. Self-hosted or public instance, no API key needed.
+    # brave_api_key: "${BRAVE_API_KEY}"  # https://api.search.brave.com/
     searxng_url: "https://searx.be"
-
-  # fetch_url:
-  #   timeout_ms: 10000    # default: 10s
-
-  # files:
-  #   base_dir: ./data/files  # default
 
   workers:
     max_concurrent: 3
-    # Default model for background workers. Falls back to the first
-    # fallback_model, then the primary agent model.
-    # model: "opencode/minimax-m2.5-free"
-
-    # Named worker types. The agent selects a type when dispatching to get
-    # preset defaults for model, tools, and timeout. Explicit parameters on
-    # the dispatch call still override type defaults.
-    # The agent can also define new types by editing this file and restarting.
-    # types:
-    #   research:
-    #     description: "Web research and content gathering"
-    #     model: "opencode/minimax-m2.5-free"
-    #     tools: [web_search, fetch_url]
-    #     timeout_seconds: 3600
-    #   analysis:
-    #     description: "Deep analysis using a stronger model"
-    #     model: "anthropic/claude-sonnet-4-6"
-    #     tools: [fetch_url]
-    #     timeout_seconds: 1800
+    # model: "opencode/minimax-m2.5-free"  # default model for workers
 
 # ---------------------------------------------------------------------------
-# Integrations (optional)
+# Integrations (optional, values become env vars for extensions)
 #
-# Values here are injected into process.env at startup so extensions can
-# read them without separate .env entries.
-#
-# Convention: integrations.<name>.<key> becomes the env var NAME_KEY (uppercased).
+# integrations.<name>.<key> → env var NAME_KEY (uppercased)
 # Example: integrations.hedgedoc.url → HEDGEDOC_URL
-#
-# Secrets (API keys, tokens) should still use ${VAR} substitution so they
-# stay in .env and out of config.yml.
 # ---------------------------------------------------------------------------
 
 # integrations:
 #   hedgedoc:
-#     url: "http://hedgedoc:3000"           # internal Docker network URL
-#     public_url: "https://docs.example.com" # user-facing URL for shared links
-#
-#   # Any future integration follows the same pattern:
-#   # my_service:
-#   #   url: "https://api.example.com"
-#   #   api_key: "${MY_SERVICE_API_KEY}"    # secret stays in .env
+#     url: "http://hedgedoc:3000"
+#     public_url: "https://docs.example.com"
 
 # ---------------------------------------------------------------------------
-# Scheduled prompts (optional)
+# Optional sections (uncomment to customize)
 # ---------------------------------------------------------------------------
 
-cron: []
-  # - schedule: "0 8 * * *"
-  #   message: "Good morning! Brief me on anything I need to know today."
-  # - schedule: "0 18 * * 1-5"
-  #   message: "Summarize what we discussed today and update memory with action items."
+# cron:
+#   - schedule: "0 8 * * *"
+#     message: "Good morning! Brief me on anything I need to know today."
 
-# ---------------------------------------------------------------------------
-# Trust levels (runtime permissions for elevated tools)
-# ---------------------------------------------------------------------------
-
-# Extension tools (shell_exec, http_request, etc.) require approval before
-# first use. Pre-approve tools here to skip the permission prompt.
 # trust:
-#   approved_tools:
-#     - shell_exec
-#     - http_request
-#     - weather_weert
-
-# ---------------------------------------------------------------------------
-# Active hours (optional; limits when the scheduler can send messages)
-# ---------------------------------------------------------------------------
+#   approved_tools: [shell_exec, http_request]
 
 # active_hours:
 #   start: "08:00"

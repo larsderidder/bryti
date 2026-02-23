@@ -50,6 +50,8 @@ export interface UserSession {
   sessionDir: string;
   /** Timestamp of last user-initiated message (not scheduler). */
   lastUserMessageAt: number;
+  /** Extension files that failed to load on startup. Empty if all loaded. */
+  extensionErrors: Array<{ path: string; error: string }>;
   /** Clean up event listeners. Does NOT delete the session file. */
   dispose(): void;
 }
@@ -326,6 +328,10 @@ export async function loadUserSession(
     userId,
     sessionDir: sessDir,
     lastUserMessageAt: Date.now(),
+    extensionErrors: extensionsResult.errors.map((e) => ({
+      path: e.path,
+      error: String(e.error),
+    })),
     dispose() {
       unsubscribe();
       session.dispose();

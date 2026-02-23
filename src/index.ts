@@ -507,6 +507,19 @@ async function processMessage(
         state.pendingRestartContext.delete(msg.userId);
       }
 
+      // Surface extension load errors so the agent can fix broken extensions.
+      // Consumed on first message so the agent sees each error only once.
+      if (userSession.extensionErrors.length > 0) {
+        const errorLines = userSession.extensionErrors
+          .map((e) => `- ${e.path}: ${e.error}`)
+          .join("\n");
+        msg = {
+          ...msg,
+          text: `[System: the following extensions failed to load. You wrote these extensions, so diagnose and fix them.\n${errorLines}]\n\n${msg.text}`,
+        };
+        userSession.extensionErrors = [];
+      }
+
       // Prepend any buffered scheduler context (daily reviews, etc.) so the
       // agent can weave them into a single coherent response instead of
       // sending separate messages for each scheduler event.
