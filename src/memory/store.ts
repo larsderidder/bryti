@@ -19,8 +19,9 @@ export interface ScoredResult {
 }
 
 export interface MemoryStore {
-  /** Add a fact to the store. Returns the fact ID. */
-  addFact(content: string, source: string, embedding: number[]): string;
+  /** Add a fact to the store. Returns the fact ID. Embedding is optional;
+   *  when null, the fact is stored without a vector (keyword search only). */
+  addFact(content: string, source: string, embedding: number[] | null): string;
 
   /** Remove a fact by ID. */
   removeFact(id: string): void;
@@ -155,16 +156,18 @@ export function createMemoryStore(userId: string, dataDir: string): MemoryStore 
      * deduplicate facts during bulk imports, not as an integrity check — the
      * store does not verify it on read.
      */
-    addFact(content: string, source: string, embedding: number[]): string {
+    addFact(content: string, source: string, embedding: number[] | null): string {
       const id = crypto.randomUUID();
       const timestamp = Date.now();
       const hash = crypto.createHash("sha256").update(content).digest("hex").slice(0, 16);
 
-      // Insert into facts table
       insertFact.run(id, content, source, timestamp, hash);
 
-      // Insert embedding as binary blob
-      insertEmbedding.run(id, serializeEmbedding(embedding));
+      // Store embedding when available. Without it the fact is still
+      // searchable via FTS5 keyword search; only vector similarity is lost.
+      if (embedding !== null) {
+        insertEmbedding.run(id, serializeEmbedding(embedding));
+      }
 
       return id;
     },

@@ -8,6 +8,10 @@
  * result; every subsequent call returns the cached context immediately.
  *
  * Model files live in <dataDir>/.models/.
+ *
+ * When node-llama-cpp is not installed, embed() returns null and all callers
+ * degrade to keyword-only search. This keeps bryti functional without native
+ * build tools.
  */
 
 // node-llama-cpp is an optional dependency. Dynamically imported on first use
@@ -29,13 +33,28 @@ let embeddingContext: LlamaEmbeddingContext | null = null;
 // getEmbeddingContext() before the first load completes would each kick off a
 // separate model load. Storing the Promise here means every concurrent caller
 // awaits the same in-progress load instead of starting a new one.
-let initPromise: Promise<LlamaEmbeddingContext> | null = null;
+let initPromise: Promise<LlamaEmbeddingContext | null> | null = null;
+
+/** Whether node-llama-cpp is available. Set once during first init attempt. */
+let llmAvailable: boolean | null = null;
+
+/**
+ * Whether embeddings are available (node-llama-cpp loaded successfully).
+ * Returns null before the first init attempt.
+ */
+export function embeddingsAvailable(): boolean | null {
+  return llmAvailable;
+}
 
 /**
  * Initialize and return the embedding context, loading the model on first call.
- * Subsequent calls return the cached context.
+ * Returns null if node-llama-cpp is not installed.
  */
-async function getEmbeddingContext(modelsDir?: string): Promise<LlamaEmbeddingContext> {
+async function getEmbeddingContext(modelsDir?: string): Promise<LlamaEmbeddingContext | null> {
+  if (llmAvailable === false) {
+    return null;
+  }
+
   if (embeddingContext !== null) {
     return embeddingContext;
   }
@@ -49,10 +68,13 @@ async function getEmbeddingContext(modelsDir?: string): Promise<LlamaEmbeddingCo
     try {
       nodeLlamaCpp = await import("node-llama-cpp");
     } catch {
-      throw new Error(
-        "node-llama-cpp is not installed. Install it with: npm install node-llama-cpp\n" +
-        "Embeddings (archival memory search) will be unavailable without it.",
+      llmAvailable = false;
+      console.warn(
+        "[embeddings] node-llama-cpp not installed. " +
+        "Archival memory will use keyword search only (no vector similarity). " +
+        "Install it with: npm install node-llama-cpp",
       );
+      return null;
     }
     const { getLlama, LlamaLogLevel, resolveModelFile } = nodeLlamaCpp;
 
@@ -84,6 +106,7 @@ async function getEmbeddingContext(modelsDir?: string): Promise<LlamaEmbeddingCo
     const ctx = await model.createEmbeddingContext();
 
     embeddingContext = ctx;
+    llmAvailable = true;
     return ctx;
   })();
 
@@ -92,16 +115,18 @@ async function getEmbeddingContext(modelsDir?: string): Promise<LlamaEmbeddingCo
 
 /**
  * Generate an embedding for a single text.
- *
- * @param text Input text (must be non-empty)
- * @param modelsDir Directory to store/load the model (defaults to node-llama-cpp global dir)
+ * Returns null if node-llama-cpp is not installed.
  */
-export async function embed(text: string, modelsDir?: string): Promise<number[]> {
+export async function embed(text: string, modelsDir?: string): Promise<number[] | null> {
   if (!text.trim()) {
     throw new Error("Embedding input is empty");
   }
 
   const ctx = await getEmbeddingContext(modelsDir);
+  if (ctx === null) {
+    return null;
+  }
+
   const result = await ctx.getEmbeddingFor(text);
   return Array.from(result.vector);
 }
@@ -109,8 +134,9 @@ export async function embed(text: string, modelsDir?: string): Promise<number[]>
 /**
  * Generate embeddings for multiple texts. Sequential; the model is fast
  * enough on CPU that batching provides no meaningful advantage.
+ * Returns null entries for each text if node-llama-cpp is not installed.
  */
-export async function embedBatch(texts: string[], modelsDir?: string): Promise<number[][]> {
+export async function embedBatch(texts: string[], modelsDir?: string): Promise<(number[] | null)[]> {
   if (texts.length === 0) {
     return [];
   }
@@ -121,7 +147,7 @@ export async function embedBatch(texts: string[], modelsDir?: string): Promise<n
     }
   }
 
-  const results: number[][] = [];
+  const results: (number[] | null)[] = [];
   for (const text of texts) {
     results.push(await embed(text, modelsDir));
   }
@@ -131,10 +157,8 @@ export async function embedBatch(texts: string[], modelsDir?: string): Promise<n
 /**
  * Pre-load the embedding model at startup.
  *
- * Calling this eagerly means a missing or corrupt model file surfaces as a
- * startup error rather than failing silently on the first user message that
- * triggers a memory operation. Also amortises the cold-start download/load
- * time before any user is waiting.
+ * Best-effort: if node-llama-cpp is not installed, logs a warning and
+ * continues. Bryti still works with keyword-only search.
  *
  * @param modelsDir Directory to store/load the model
  */

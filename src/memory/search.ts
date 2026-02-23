@@ -58,24 +58,25 @@ const DEFAULT_OPTIONS: Required<HybridSearchOptions> = {
  */
 export function createHybridSearch(
   store: MemoryStore,
-  embed: (text: string) => Promise<number[]>,
+  embed: (text: string) => Promise<number[] | null>,
   options: HybridSearchOptions = {},
 ): (query: string) => Promise<SearchResult[]> {
   const opts = { ...DEFAULT_OPTIONS, ...options };
 
   return async function hybridSearch(query: string): Promise<SearchResult[]> {
-    // Handle empty query
     if (!query.trim()) {
       return [];
     }
 
-    // Get embedding for query
+    // embed() returns null when node-llama-cpp is not installed.
+    // In that case we fall back to keyword-only search.
     const queryEmbedding = await embed(query);
 
-    // Run both searches in parallel
     const [keywordResults, vectorResults] = await Promise.all([
-      store.searchKeyword(query, opts.limit * 2), // Get more to account for dedup
-      store.searchVector(queryEmbedding, opts.limit * 2),
+      store.searchKeyword(query, opts.limit * 2),
+      queryEmbedding
+        ? store.searchVector(queryEmbedding, opts.limit * 2)
+        : Promise.resolve([]),
     ]);
 
     // Handle empty results

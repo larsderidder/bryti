@@ -33,8 +33,9 @@ describe("embeddings", () => {
 
   it("returns embedding vector", async () => {
     const result = await embed("hello world");
+    expect(result).not.toBeNull();
     expect(Array.isArray(result)).toBe(true);
-    expect(result.length).toBeGreaterThan(0);
+    expect(result!.length).toBeGreaterThan(0);
   });
 
   it("throws on empty input", async () => {

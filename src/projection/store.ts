@@ -108,7 +108,7 @@ export interface ProjectionStore {
    */
   checkTriggers(
     factContent: string,
-    embed?: (text: string) => Promise<number[]>,
+    embed?: (text: string) => Promise<number[] | null>,
     similarityThreshold?: number,
   ): Promise<Projection[]>;
 
@@ -639,8 +639,13 @@ export function createProjectionStore(userId: string, dataDir: string): Projecti
       // exists — there is no point delaying the notification.
       if (embeddingFallback.length > 0 && embed) {
         const factVec = await embed(factContent);
+        if (factVec === null) {
+          // Embeddings unavailable; skip semantic matching entirely.
+          return activated;
+        }
         for (const row of embeddingFallback) {
           const triggerVec = await embed(row.trigger_on_fact!);
+          if (triggerVec === null) continue;
           const sim = cosineSimilarity(factVec, triggerVec);
           if (sim >= similarityThreshold) {
             const result = stmtActivateTrigger.run(row.id) as { changes: number };

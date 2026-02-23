@@ -24,7 +24,7 @@ type ArchivalMemorySearchInput = Static<typeof archivalMemorySearchSchema>;
 
 export function createArchivalMemoryTools(
   store: MemoryStore,
-  embed: (text: string) => Promise<number[]>,
+  embed: (text: string) => Promise<number[] | null>,
   projectionStore?: ProjectionStore,
 ): AgentTool<any>[] {
   const hybridSearch = createHybridSearch(store, embed);
