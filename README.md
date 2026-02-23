@@ -23,7 +23,7 @@
 
 Bryti is a personal AI agent that lives in Telegram and WhatsApp. It remembers what you tell it, tracks what's coming up, researches things in the background, and writes its own tools when it needs new capabilities. All running on your machine, with your data staying yours.
 
-Named after the Old Norse *bryti*: the estate steward who handled the day-to-day so you could focus on what matters.
+> *Named after the Old Norse **bryti**: the estate steward who handled the day-to-day so you could focus on what matters.*
 
 ## What makes it different
 
