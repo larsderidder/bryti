@@ -47,6 +47,18 @@ Bryti is a personal AI agent that lives in Telegram and WhatsApp. It remembers w
 
 ### Quick start
 
+**From npm:**
+```bash
+npm install -g @bryti/agent
+
+# Configure
+cp "$(npm root -g)/@bryti/agent/config.example.yml" data/config.yml
+cp "$(npm root -g)/@bryti/agent/.env.example" .env
+# Edit data/config.yml and .env, then:
+bryti-start
+```
+
+**From source:**
 ```bash
 git clone git@github.com:larsderidder/bryti.git
 cd bryti

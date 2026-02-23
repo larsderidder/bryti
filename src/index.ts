@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 /**
  * Bryti entry point.
  *
@@ -11,6 +12,9 @@
  * transcript repair, prompt the model with fallback, persist the
  * response to the JSONL audit log.
  */
+
+// Load .env if present (needed when running as an installed npm binary)
+try { process.loadEnvFile(".env"); } catch { /* not present, fine */ }
 
 import fs from "node:fs";
 import path from "node:path";

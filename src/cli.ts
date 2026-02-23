@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+// Load .env if present (needed when running as an installed npm binary)
+try { process.loadEnvFile(".env"); } catch { /* not present, fine */ }
+
 /**
  * Bryti management CLI. Single entry point for all operator tasks.
  * Run via: bryti <command> [options]
