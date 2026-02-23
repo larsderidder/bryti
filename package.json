@@ -15,6 +15,7 @@
   },
   "files": [
     "dist/",
+    "!dist/dev-cli.*",
     "config.example.yml",
     "run.sh",
     "Dockerfile",
@@ -25,6 +26,7 @@
     "dev": "tsc --watch",
     "start": "node dist/cli.js serve",
     "cli": "node dist/cli.js",
+    "dev-cli": "node dist/dev-cli.js",
     "clean": "rm -rf dist",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -45,10 +47,12 @@
     "grammy": "^1.35.0",
     "linkedom": "^0.18.12",
     "markdown-it": "^14.1.1",
-    "node-llama-cpp": "^3.15.1",
     "qrcode-terminal": "^0.12.0",
     "sqlite-vec": "^0.1.7-alpha.2",
     "yaml": "^2.7.0"
+  },
+  "optionalDependencies": {
+    "node-llama-cpp": "^3.15.1"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",

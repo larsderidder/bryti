@@ -246,9 +246,8 @@ bryti memory                            # inspect all memory tiers
 bryti memory projections --all          # all projections (including resolved)
 bryti memory archival --query "energy"  # search archival memory
 bryti reflect                           # run reflection pass now
-bryti timeskip "dentist" --minutes 2    # make a projection fire in 2 min
 bryti archive-fact "dentist confirmed"  # insert fact, trigger matching projections
-bryti fill-context --turns 20           # inject synthetic conversation for testing
+bryti version                           # show version
 ```
 
 ## Contributing

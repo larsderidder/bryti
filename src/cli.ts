@@ -3,22 +3,29 @@
 try { process.loadEnvFile(".env"); } catch { /* not present, fine */ }
 
 /**
- * Bryti management CLI. Single entry point for all operator tasks.
- * Run via: bryti <command> [options]
+ * Bryti CLI. Starts the server or runs management commands.
  *
- * The CLI bypasses the running application entirely and reads/writes SQLite
- * directly. This is safe to do while the bot is running because SQLite WAL
- * mode allows concurrent readers alongside a live writer without blocking.
+ * `bryti` (no args) or `bryti serve` starts the server.
+ * `bryti <command>` runs a management command. Management commands bypass
+ * the running application and read/write SQLite directly (safe to run
+ * while the server is running, thanks to WAL mode).
  *
  * See `bryti help` for full command listing.
  */
 
 import fs from "node:fs";
 import path from "node:path";
-import crypto from "node:crypto";
 import Database from "better-sqlite3";
 import { loadConfig } from "./config.js";
 import { runReflection } from "./projection/index.js";
+
+// ---------------------------------------------------------------------------
+// Version
+// ---------------------------------------------------------------------------
+
+const VERSION = JSON.parse(
+  fs.readFileSync(new URL("../package.json", import.meta.url), "utf-8"),
+).version as string;
 
 // ---------------------------------------------------------------------------
 // Arg parsing helpers
@@ -36,7 +43,6 @@ function opt(name: string, fallback?: string): string | undefined {
 }
 
 function positional(afterFlags: number): string | undefined {
-  // Return the Nth non-flag argument
   const nonFlags = argv.filter((a) => !a.startsWith("--"));
   return nonFlags[afterFlags];
 }
@@ -52,13 +58,12 @@ function resolveDataDir(): string {
 function resolveUserId(dataDir: string): string {
   if (opt("--user-id")) return opt("--user-id")!;
   if (process.env.BRYTI_USER_ID) return process.env.BRYTI_USER_ID;
-  // Try to read from config
   try {
     const config = loadConfig(path.join(dataDir, "config.yml"));
     const first = config.telegram.allowed_users[0];
     if (first) return String(first);
   } catch {
-    // Config may not exist in dev environments
+    // Config may not exist yet
   }
   return "default-user";
 }
@@ -219,7 +224,6 @@ async function cmdReflect(dataDir: string, userId: string, windowMinutes: number
     process.exit(1);
   }
 
-  // Override data_dir in case --data-dir was passed
   config.data_dir = dataDir;
 
   const result = await runReflection(config, userId, windowMinutes);
@@ -237,315 +241,6 @@ async function cmdReflect(dataDir: string, userId: string, windowMinutes: number
 }
 
 // ---------------------------------------------------------------------------
-// Command: timeskip
-// ---------------------------------------------------------------------------
-
-function cmdTimeskipList(dataDir: string, userId: string): void {
-  const dbPath = path.join(dataDir, "users", userId, "memory.db");
-  if (!fs.existsSync(dbPath)) {
-    console.error(`No memory.db found at ${dbPath}`);
-    process.exit(1);
-  }
-
-  const db = new Database(dbPath, { readonly: true });
-  const rows = db.prepare(
-    `SELECT id, summary, resolved_when, resolution, status
-     FROM projections ORDER BY
-       CASE status WHEN 'pending' THEN 0 ELSE 1 END,
-       resolved_when ASC`,
-  ).all() as Array<Record<string, string>>;
-  db.close();
-
-  if (rows.length === 0) {
-    console.log("No projections found.");
-    return;
-  }
-
-  const statusIcon: Record<string, string> = { pending: "⏳", done: "✅", cancelled: "❌", passed: "🔕" };
-  console.log("Projections:\n");
-  for (const row of rows) {
-    const icon = statusIcon[row.status] ?? "?";
-    console.log(`${icon} [${row.resolution}] ${row.summary}`);
-    console.log(`   id:   ${row.id}`);
-    console.log(`   when: ${row.resolved_when ?? "(someday)"}`);
-    console.log("");
-  }
-}
-
-function cmdTimeskip(dataDir: string, userId: string, summaryOrId: string, minutes: number): void {
-  const dbPath = path.join(dataDir, "users", userId, "memory.db");
-  if (!fs.existsSync(dbPath)) {
-    console.error(`No memory.db found at ${dbPath}`);
-    process.exit(1);
-  }
-
-  const db = new Database(dbPath);
-
-  // Users may reference projections by summary substring (human-friendly) or
-  // by full UUID (copy-pasted from 'timeskip --list'). The regex distinguishes
-  // them: UUIDs match the standard 8-4-4-4-12 hex pattern, everything else is
-  // treated as a summary substring.
-  const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(summaryOrId);
-  const row = isUuid
-    ? db.prepare("SELECT * FROM projections WHERE id = ?").get(summaryOrId) as Record<string, string> | undefined
-    : db.prepare("SELECT * FROM projections WHERE summary LIKE ? AND status = 'pending' LIMIT 1")
-        .get(`%${summaryOrId}%`) as Record<string, string> | undefined;
-
-  if (!row) {
-    console.error(`No pending projection found matching: ${summaryOrId}`);
-    db.close();
-    process.exit(1);
-  }
-
-  const newTime = new Date(Date.now() + minutes * 60 * 1000);
-  const newTimeStr = newTime.toISOString().slice(0, 16).replace("T", " ");
-
-  db.prepare(
-    "UPDATE projections SET resolved_when = ?, resolution = 'exact' WHERE id = ?",
-  ).run(newTimeStr, row.id);
-  db.close();
-
-  console.log(`Timeskipped projection:`);
-  console.log(`  Summary: ${row.summary}`);
-  console.log(`  Old when: ${row.resolved_when ?? "(none)"}`);
-  console.log(`  New when: ${newTimeStr} UTC (fires in ~${minutes} min)`);
-  console.log(`\nThe scheduler will pick it up on the next 5-minute tick.`);
-}
-
-// ---------------------------------------------------------------------------
-// Command: import-openclaw
-// ---------------------------------------------------------------------------
-
-// One-time migration tool for importing Lars's OpenClaw memory files into
-// bryti's archival memory. Specific to Lars's local setup (/home/lars/clawd).
-// Not a general-purpose import command.
-function cmdImportOpenclaw(dataDir: string, userId: string, dryRun: boolean): void {
-  const clawdDir = "/home/lars/clawd";
-
-  console.log(`Importing OpenClaw memory into bryti`);
-  console.log(`  User ID:  ${userId}`);
-  console.log(`  Data dir: ${dataDir}`);
-  console.log(`  Dry run:  ${dryRun}`);
-  console.log("");
-
-  // Core memory
-  const userMd = path.join(clawdDir, "USER.md");
-  if (!fs.existsSync(userMd)) {
-    console.log("[core] USER.md not found, skipping");
-  } else {
-    const corePath = path.join(dataDir, "core-memory.md");
-    const existing = fs.existsSync(corePath) ? fs.readFileSync(corePath, "utf-8") : "";
-    if (existing.includes("## About Lars")) {
-      console.log("[core] Already contains Lars profile, skipping");
-    } else {
-      const userContent = fs.readFileSync(userMd, "utf-8");
-      const sectionText = "\n\n## About Lars\n" + userContent.replace(/^# USER\.md.*\n/, "").trim();
-      if (dryRun) {
-        console.log("[core] DRY RUN — would append to core-memory.md:");
-        console.log(sectionText.slice(0, 300) + "...");
-      } else {
-        fs.appendFileSync(corePath, sectionText, "utf-8");
-        console.log(`[core] Appended USER.md to core-memory.md (${sectionText.length} chars)`);
-      }
-    }
-  }
-
-  // Archival memory
-  const memoryDir = path.join(clawdDir, "memory");
-  if (!fs.existsSync(memoryDir)) {
-    console.log("[archival] memory/ directory not found, skipping");
-    console.log("\nDone.");
-    return;
-  }
-
-  const files = fs.readdirSync(memoryDir).filter((f) => f.endsWith(".md")).sort();
-  console.log(`[archival] Found ${files.length} memory files`);
-
-  if (dryRun) {
-    for (const file of files) {
-      const content = fs.readFileSync(path.join(memoryDir, file), "utf-8");
-      const sections = splitIntoSections(content, file);
-      console.log(`[archival] DRY RUN — ${file}: ${sections.length} section(s)`);
-    }
-    console.log("\nDone (dry run).");
-    return;
-  }
-
-  const userDir = path.join(dataDir, "users", userId);
-  fs.mkdirSync(userDir, { recursive: true });
-
-  const db = new Database(path.join(userDir, "memory.db"));
-  db.pragma("journal_mode = WAL");
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS facts (
-      id TEXT PRIMARY KEY, content TEXT NOT NULL, source TEXT NOT NULL,
-      timestamp INTEGER NOT NULL, hash TEXT NOT NULL
-    );
-    CREATE VIRTUAL TABLE IF NOT EXISTS facts_fts USING fts5(content, content='facts', content_rowid='rowid');
-    CREATE TRIGGER IF NOT EXISTS facts_ai AFTER INSERT ON facts BEGIN
-      INSERT INTO facts_fts(rowid, content) VALUES (NEW.rowid, NEW.content);
-    END;
-  `);
-
-  const insertStmt = db.prepare(
-    "INSERT OR IGNORE INTO facts (id, content, source, timestamp, hash) VALUES (?, ?, ?, ?, ?)",
-  );
-  const existsStmt = db.prepare("SELECT hash FROM facts WHERE hash = ?");
-
-  let inserted = 0;
-  let skipped = 0;
-
-  for (const file of files) {
-    const filePath = path.join(memoryDir, file);
-    const content = fs.readFileSync(filePath, "utf-8");
-    const sections = splitIntoSections(content, file);
-    const timestamp = fs.statSync(filePath).mtimeMs;
-
-    for (const sec of sections) {
-      const hash = crypto.createHash("sha256").update(sec).digest("hex").slice(0, 16);
-      if (existsStmt.get(hash)) {
-        skipped++;
-        continue;
-      }
-      insertStmt.run(crypto.randomUUID(), sec, `openclaw:memory/${file}`, timestamp, hash);
-      inserted++;
-    }
-
-    console.log(`[archival] ${file}: ${sections.length} section(s)`);
-  }
-
-  db.close();
-  console.log(`[archival] Done: ${inserted} inserted, ${skipped} skipped`);
-  console.log("\nDone. Restart bryti for core memory changes to take effect.");
-}
-
-/**
- * Split a markdown document into granular facts by ## headings.
- *
- * Each ## section is stored as a separate archival fact so that semantic
- * search can retrieve the relevant section rather than returning the entire
- * document. The date prefix (derived from the filename) is prepended to each
- * section so temporal context is preserved after the split.
- */
-function splitIntoSections(content: string, filename: string): string[] {
-  const date = path.basename(filename, ".md");
-  const parts = content.split(/^## /m);
-  const sections: string[] = [];
-  for (const part of parts) {
-    const trimmed = part.trim();
-    if (!trimmed || trimmed.length < 50) continue;
-    sections.push(`[${date}] ## ${trimmed}`);
-  }
-  if (sections.length === 0 && content.trim().length > 50) {
-    sections.push(`[${date}] ${content.trim()}`);
-  }
-  return sections;
-}
-
-// ---------------------------------------------------------------------------
-// Command: fill-context
-// ---------------------------------------------------------------------------
-
-const DEFAULT_DATASET = path.join(
-  "/home/lars/xithing/contextpatterns-content/synthetic-agent-conversations",
-  "dataset/memory-context.jsonl",
-);
-
-interface SyntheticTurn {
-  role: "user" | "assistant";
-  content: string;
-  tool_calls?: unknown[];
-}
-
-interface SyntheticConversation {
-  id: string;
-  subcategory: string;
-  description: string;
-  turns: SyntheticTurn[];
-}
-
-/**
- * Inject synthetic conversations into history for compaction testing.
- * Back-dates entries so they look like real history. Prioritises
- * context-window-pressure subcategory conversations.
- *
- * This is a testing/development tool only. It writes synthetic entries with
- * _synthetic: true markers but those entries are otherwise indistinguishable
- * from real history as far as the compaction and reflection passes are
- * concerned. Do not run in production.
- */
-function cmdFillContext(
-  dataDir: string,
-  count: number,
-  datasetPath: string,
-  dryRun: boolean,
-): void {
-  if (!fs.existsSync(datasetPath)) {
-    console.error(`Dataset not found: ${datasetPath}`);
-    process.exit(1);
-  }
-
-  const lines = fs.readFileSync(datasetPath, "utf-8").split("\n").filter(Boolean);
-  const all: SyntheticConversation[] = lines.map((l) => JSON.parse(l));
-
-  // Prefer context-window-pressure, then fall back to all
-  const pressure = all.filter((c) => c.subcategory === "context-window-pressure");
-  const pool = pressure.length >= count ? pressure : all;
-  const selected = pool.slice(0, count);
-
-  // Count total turns we'll inject
-  const totalTurns = selected.reduce((n, c) => n + c.turns.filter((t) => t.role === "user" || t.role === "assistant").length, 0);
-  console.log(`Injecting ${selected.length} conversation(s), ${totalTurns} turns total`);
-  if (dryRun) console.log("(dry run — nothing will be written)\n");
-
-  // Back-date entries starting from 2 hours ago, spreading turns across time
-  const now = Date.now();
-  const startMs = now - 2 * 60 * 60 * 1000;
-  const stepMs = Math.floor((2 * 60 * 60 * 1000) / Math.max(totalTurns, 1));
-
-  const historyDir = path.join(dataDir, "history");
-  if (!dryRun) fs.mkdirSync(historyDir, { recursive: true });
-
-  let turnIdx = 0;
-  const byDay = new Map<string, string[]>();
-
-  for (const conv of selected) {
-    console.log(`  [${conv.id}] ${conv.description}`);
-
-    for (const turn of conv.turns) {
-      if (turn.role !== "user" && turn.role !== "assistant") continue;
-
-      const ts = new Date(startMs + turnIdx * stepMs);
-      const day = ts.toISOString().slice(0, 10);
-      const entry = JSON.stringify({
-        role: turn.role,
-        content: turn.content,
-        timestamp: ts.toISOString(),
-        _synthetic: true,
-      });
-
-      if (!byDay.has(day)) byDay.set(day, []);
-      byDay.get(day)!.push(entry);
-      turnIdx++;
-    }
-  }
-
-  if (!dryRun) {
-    for (const [day, entries] of byDay) {
-      const filePath = path.join(historyDir, `${day}.jsonl`);
-      fs.appendFileSync(filePath, entries.join("\n") + "\n", "utf-8");
-      console.log(`  Written ${entries.length} entries to history/${day}.jsonl`);
-    }
-    console.log(`\nDone. Restart bryti to pick up the new history in context.`);
-  } else {
-    for (const [day, entries] of byDay) {
-      console.log(`  Would write ${entries.length} entries to history/${day}.jsonl`);
-    }
-    console.log("\nDone (dry run).");
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Command: archive-fact
 // ---------------------------------------------------------------------------
 
@@ -553,10 +248,6 @@ async function cmdArchiveFact(dataDir: string, userId: string, content: string):
   console.log(`Archiving fact for user ${userId}...`);
   console.log(`Content: "${content}"\n`);
 
-  // Lazy-import the embedding model and memory store. The embedding model is
-  // 300MB+ and takes several seconds to load. Importing at the top of the file
-  // would add that startup cost to every CLI command, including fast read-only
-  // ones like 'memory' and 'reflect'. Deferring to here keeps the CLI snappy.
   const { embed } = await import("./memory/embeddings.js");
   const { createMemoryStore } = await import("./memory/store.js");
   const { createProjectionStore } = await import("./projection/index.js");
@@ -566,12 +257,10 @@ async function cmdArchiveFact(dataDir: string, userId: string, content: string):
   const projStore = createProjectionStore(userId, dataDir);
 
   try {
-    // Embed and store the fact.
     const embedding = await embed(content, modelsDir);
     memoryStore.addFact(content, "cli", embedding);
     console.log("Fact archived.");
 
-    // Check triggers (keyword + embedding fallback).
     const triggered = await projStore.checkTriggers(
       content,
       (text) => embed(text, modelsDir),
@@ -599,7 +288,7 @@ async function cmdArchiveFact(dataDir: string, userId: string, content: string):
 
 function showHelp(): void {
   console.log(`
-bryti — AI colleague in your messaging apps
+bryti ${VERSION} — AI colleague in your messaging apps
 
 Usage:
   bryti                Start the server (Telegram/WhatsApp bridges, scheduler)
@@ -610,50 +299,26 @@ Commands:
   serve
     Start the bryti server.
 
-  help
-    Show this help text.
-
-  memory
-    Inspect all memory tiers (core + projections + archival).
-
-  memory core
-    Show the core memory file.
+  memory [core|projections|archival|all]
+    Inspect memory tiers. No subcommand shows all tiers.
 
   memory projections [--all]
-    Show pending projections. Pass --all to include resolved ones.
+    Show pending projections. --all includes resolved ones.
 
   memory archival [--query <text>] [--limit <n>]
-    Show recent archival facts, or search by keyword.
-    Default limit: 20.
+    Show recent archival facts, or search by keyword. Default limit: 20.
 
   reflect [--window <minutes>]
-    Run the reflection pass on demand. Scans recent conversation history
-    for future references the agent may have missed.
-    Default window: 30 minutes.
-
-  timeskip <summary|id> [--minutes <n>]
-    Move a projection's resolved_when to now + N minutes so the
-    exact-time scheduler fires it on the next 5-minute tick.
-    Matches by summary substring or exact UUID.
-    Default: 2 minutes.
-
-  timeskip --list
-    List all projections with their IDs and times.
-
-  import-openclaw [--dry-run]
-    Import /home/lars/clawd/USER.md into core memory and
-    /home/lars/clawd/memory/*.md into archival memory.
-
-  fill-context [--count <n>] [--dataset <path>] [--dry-run]
-    Inject synthetic conversations into history to fill the context window.
-    Used to test compaction and archival memory retrieval under context pressure.
-    Prioritises context-window-pressure conversations from the dataset.
-    Default count: 10. Default dataset: synthetic-agent-conversations/dataset/memory-context.jsonl
+    Run the reflection pass on demand. Default window: 30 minutes.
 
   archive-fact "<content>"
-    Insert a fact into archival memory and check if any trigger-based
-    projections fire. Uses keyword matching + embedding similarity fallback.
-    Useful for testing trigger_on_fact without going through the agent.
+    Insert a fact into archival memory and check trigger-based projections.
+
+  version
+    Show version number.
+
+  help
+    Show this help text.
 
 Global options:
   --user-id <id>     User ID (default: first entry in telegram.allowed_users)
@@ -666,16 +331,32 @@ Global options:
 // ---------------------------------------------------------------------------
 
 async function main(): Promise<void> {
+  // Flags that work without a command
+  if (flag("--version") || flag("-v")) {
+    console.log(VERSION);
+    return;
+  }
+
+  if (flag("--help") || flag("-h")) {
+    showHelp();
+    return;
+  }
+
   const command = positional(0);
 
-  // No args or explicit "serve": start the server
+  // No args or "serve": start the server
   if (!command || command === "serve") {
     const { startServer } = await import("./index.js");
     await startServer();
     return;
   }
 
-  if (command === "help" || flag("--help") || flag("-h")) {
+  if (command === "version") {
+    console.log(VERSION);
+    return;
+  }
+
+  if (command === "help") {
     showHelp();
     return;
   }
@@ -711,33 +392,6 @@ async function main(): Promise<void> {
     case "reflect": {
       const window = Number(opt("--window", "30"));
       await cmdReflect(dataDir, userId, window);
-      break;
-    }
-
-    case "timeskip": {
-      if (flag("--list")) {
-        cmdTimeskipList(dataDir, userId);
-        break;
-      }
-      const summaryOrId = positional(1);
-      if (!summaryOrId) {
-        console.error("Usage: timeskip <summary|id> [--minutes <n>] | timeskip --list");
-        process.exit(1);
-      }
-      const minutes = Number(opt("--minutes", "2"));
-      cmdTimeskip(dataDir, userId, summaryOrId, minutes);
-      break;
-    }
-
-    case "import-openclaw": {
-      cmdImportOpenclaw(dataDir, userId, flag("--dry-run"));
-      break;
-    }
-
-    case "fill-context": {
-      const count = Number(opt("--count", "10"));
-      const dataset = opt("--dataset", DEFAULT_DATASET)!;
-      cmdFillContext(dataDir, count, dataset, flag("--dry-run"));
       break;
     }
 

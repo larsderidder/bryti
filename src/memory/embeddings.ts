@@ -10,8 +10,11 @@
  * Model files live in <dataDir>/.models/.
  */
 
-import { getLlama, LlamaLogLevel, resolveModelFile } from "node-llama-cpp";
-import type { Llama, LlamaEmbeddingContext, LlamaModel } from "node-llama-cpp";
+// node-llama-cpp is an optional dependency. Dynamically imported on first use
+// so bryti can start without it (embeddings will be unavailable).
+type Llama = any;
+type LlamaEmbeddingContext = any;
+type LlamaModel = any;
 
 // Hugging Face URI in node-llama-cpp's "hf:<owner>/<repo>/<file>" format.
 // On first use, node-llama-cpp resolves this automatically: it locates (or
@@ -42,13 +45,20 @@ async function getEmbeddingContext(modelsDir?: string): Promise<LlamaEmbeddingCo
   }
 
   initPromise = (async () => {
+    let nodeLlamaCpp: typeof import("node-llama-cpp");
+    try {
+      nodeLlamaCpp = await import("node-llama-cpp");
+    } catch {
+      throw new Error(
+        "node-llama-cpp is not installed. Install it with: npm install node-llama-cpp\n" +
+        "Embeddings (archival memory search) will be unavailable without it.",
+      );
+    }
+    const { getLlama, LlamaLogLevel, resolveModelFile } = nodeLlamaCpp;
+
     const llama = await getLlama({
       gpu: "auto",
       logger(level, message) {
-        // 'special_eos_id is not in special_eog_ids' is a benign metadata quirk
-        // in the embedding model's GGUF file: the end-of-sequence token id is
-        // not listed in the end-of-generation set. It has no effect on embedding
-        // quality and is safe to ignore.
         if (level === LlamaLogLevel.warn && message.includes("special_eos_id is not in special_eog_ids")) {
           return;
         }

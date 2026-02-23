@@ -18,6 +18,7 @@ vi.mock("node-llama-cpp", () => {
 
   return {
     getLlama: vi.fn().mockResolvedValue(mockLlama),
+    LlamaLogLevel: { warn: 3, error: 4, fatal: 5 },
     resolveModelFile: vi.fn().mockResolvedValue("/fake/path/model.gguf"),
   };
 });
