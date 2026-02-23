@@ -1,3 +1,11 @@
+/**
+ * Platform-agnostic markdown renderer.
+ *
+ * Callers supply `styleMarkers` (open/close strings per style) and `escapeText`
+ * (platform-specific entity escaping). Telegram and WhatsApp each plug in their
+ * own implementations. This is the only place in the pipeline that emits
+ * platform-specific syntax.
+ */
 import type { MarkdownIR, MarkdownLinkSpan, MarkdownStyle, MarkdownStyleSpan } from "./ir.js";
 
 export type RenderStyleMarker = {
@@ -20,6 +28,10 @@ export type RenderOptions = {
   buildLink?: (link: MarkdownLinkSpan, text: string) => RenderLink | null;
 };
 
+// When two spans start at the same position the one with higher rank (lower
+// index in STYLE_ORDER) is opened first so the outer span wraps the inner.
+// This prevents inverted nesting where, for example, a code span would end up
+// wrapped inside a bold span instead of the other way around.
 const STYLE_ORDER: MarkdownStyle[] = [
   "code_block",
   "code",
@@ -29,10 +41,22 @@ const STYLE_ORDER: MarkdownStyle[] = [
   "spoiler",
 ];
 
+// Inverse lookup: style → index in STYLE_ORDER (lower = higher priority / outer).
 const STYLE_RANK = new Map<MarkdownStyle, number>(
   STYLE_ORDER.map((style, index) => [style, index]),
 );
 
+/**
+ * Sort style spans for deterministic processing.
+ *
+ * Primary key: start position ascending (process spans left to right).
+ * Secondary key: end position descending (longest span first, so the outer
+ *   tag is opened before the inner one).
+ * Tertiary key: STYLE_RANK ascending (higher-priority style is outer when
+ *   two spans have identical start and end positions).
+ *
+ * Together these three keys ensure nesting is always correct.
+ */
 function sortStyleSpans(spans: MarkdownStyleSpan[]): MarkdownStyleSpan[] {
   return [...spans].toSorted((a, b) => {
     if (a.start !== b.start) {
@@ -45,6 +69,14 @@ function sortStyleSpans(spans: MarkdownStyleSpan[]): MarkdownStyleSpan[] {
   });
 }
 
+/**
+ * Render a `MarkdownIR` to a string using the supplied platform markers.
+ *
+ * Invariant: each style span and link is opened and closed exactly once, even
+ * when spans overlap. Overlapping spans are handled by the sweep-line loop
+ * below: every span is always closed at its recorded end position regardless
+ * of what other spans are active at that point.
+ */
 export function renderMarkdownWithMarkers(ir: MarkdownIR, options: RenderOptions): string {
   const text = ir.text ?? "";
   if (!text) {
@@ -102,8 +134,16 @@ export function renderMarkdownWithMarkers(ir: MarkdownIR, options: RenderOptions
     }
   }
 
+  // Collect all unique character positions where a span starts or ends, then
+  // sort them. The main loop walks these boundaries left to right — this is a
+  // sweep-line algorithm over character positions.
   const points = [...boundaries].toSorted((a, b) => a - b);
-  // Unified stack for both styles and links, tracking close string and end position
+
+  // Active-span stack: entries are pushed when a span opens and popped (in
+  // reverse / LIFO order) when the span's end position is reached. Because
+  // spans may overlap, spans that are still logically open when another span
+  // needs to close must be temporarily closed and then reopened around the
+  // text slice — the stack makes this order explicit.
   const stack: { close: string; end: number }[] = [];
   type OpeningItem =
     | { end: number; open: string; close: string; kind: "link"; index: number }

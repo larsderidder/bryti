@@ -1,6 +1,36 @@
+/**
+ * Intermediate Representation (IR) for markdown rendering.
+ *
+ * Why a custom IR instead of regex?
+ *
+ * Regex-based rendering has two fundamental problems:
+ *   1. It can't chunk safely. Splitting a string at a character limit with regex
+ *      will routinely cut inside a bold span, an inline-code span, or a link
+ *      label, producing malformed output.
+ *   2. It can't handle overlapping or nested spans. LLM output frequently
+ *      contains quirks like unclosed markers, nested bold-italic, or partial
+ *      code fences that confuse any single-pass regex strategy.
+ *
+ * The IR solves this by separating concerns:
+ *   - Parsing (markdown-it) produces a token stream with well-defined open/close
+ *     pairs, which is walked once to build a flat text string plus span metadata.
+ *   - Rendering (telegram.ts, etc.) reads the IR and emits platform-specific
+ *     markup, with full knowledge of every active style at every character.
+ *   - Chunking (chunkMarkdownIR) operates on the IR, so it can guarantee that
+ *     chunk boundaries never land inside a style span.
+ */
 import MarkdownIt from "markdown-it";
 
-/** How to render markdown tables in Telegram output. */
+/**
+ * How to render markdown tables in Telegram output.
+ *
+ * - `off`: tables are disabled; the raw markdown is passed through as-is.
+ * - `bullets`: each row is converted to a bullet-list entry with "Header: value"
+ *   pairs. First column is used as a section label when there are multiple
+ *   columns. This is the most readable option for most tables.
+ * - `code`: the table is typeset as a fixed-width ASCII grid and wrapped in a
+ *   code block. Preserves structure but loses all inline formatting.
+ */
 export type MarkdownTableMode = "off" | "bullets" | "code";
 
 /**
@@ -43,6 +73,19 @@ type LinkState = {
   labelStart: number;
 };
 
+/**
+ * Mutable rendering environment threaded through the token walk.
+ *
+ * `listStack` models nested lists. Each entry represents one open list:
+ *   - `type` distinguishes bullet from ordered.
+ *   - `index` is the 1-based counter for ordered lists, incremented each time
+ *     a list_item_open token is encountered at this nesting level.
+ *
+ * When a list_item_open fires, the stack top determines the prefix ("• " or
+ * "1. ") and the indent depth is derived from stack length.  When a list
+ * closes its corresponding entry is popped, so deeply nested lists naturally
+ * inherit the outer indentation.
+ */
 type RenderEnv = {
   listStack: ListState[];
 };
@@ -69,6 +112,21 @@ export type MarkdownLinkSpan = {
   href: string;
 };
 
+/**
+ * The canonical IR produced by markdownToIR.
+ *
+ * - `text`: the plain-text content with all markdown syntax stripped. This is
+ *   the string that gets chunked and sent to the platform.
+ * - `styles`: character-range spans (start inclusive, end exclusive) that carry
+ *   bold/italic/code/etc. annotations over substrings of `text`. Multiple spans
+ *   can overlap, which is legal (e.g. bold-italic).
+ * - `links`: separate from `styles` because links carry an `href` payload in
+ *   addition to the character range. Keeping them in their own list avoids
+ *   polluting the style union type with optional metadata fields.
+ *
+ * All three fields are required to fully reconstruct formatted output; losing
+ * any one of them produces incorrect rendering.
+ */
 export type MarkdownIR = {
   text: string;
   styles: MarkdownStyleSpan[];
@@ -113,6 +171,12 @@ type RenderState = RenderTarget & {
 };
 
 export type MarkdownParseOptions = {
+  /**
+   * Post-process plain-text URLs that are not already inside a markdown link.
+   * When true, bare `https://...` strings in prose are wrapped in a link span
+   * so renderers can emit them as tappable links. Powered by markdown-it's
+   * built-in linkify pass. Default: true.
+   */
   linkify?: boolean;
   enableSpoilers?: boolean;
   headingStyle?: "none" | "bold";
@@ -280,6 +344,18 @@ function renderInlineCode(state: RenderState, content: string) {
   target.styles.push({ start, end: start + content.length, style: "code" });
 }
 
+/**
+ * Code blocks differ from inline code in two important ways:
+ *
+ * 1. Style isolation: a fenced code block resets the active styling context.
+ *    Unlike inline code (which just adds a `code` span on top of whatever is
+ *    open), code blocks record their span directly on the target without going
+ *    through the openStyle/closeStyle stack, so surrounding bold/italic cannot
+ *    "leak" into the block.
+ * 2. No splitting: code blocks must never be split across message chunks. The
+ *    chunking logic in chunkMarkdownIR respects span boundaries, so a
+ *    `code_block` span always lands in a single chunk intact.
+ */
 function renderCodeBlock(state: RenderState, content: string) {
   let code = content ?? "";
   if (!code.endsWith("\n")) {
@@ -388,6 +464,18 @@ function appendCell(state: RenderState, cell: TableCell) {
   }
 }
 
+/**
+ * Telegram has no native table support, so tables are converted to bullet
+ * lists. The strategy depends on column count:
+ *
+ * - Multi-column: each row becomes a section. The first column value is
+ *   bolded as a section label, and the remaining columns are rendered as
+ *   "• Header: value" lines beneath it.
+ * - Single-column (or no headers): each cell is its own bullet entry.
+ *
+ * Style and link spans from individual cells are preserved and re-offset into
+ * the flat output coordinate space via appendCell().
+ */
 function renderTableAsBullets(state: RenderState) {
   if (!state.table) {
     return;
@@ -877,6 +965,21 @@ export function markdownToIRWithMeta(
   };
 }
 
+/**
+ * Split an IR into chunks whose `text` length does not exceed `limit`.
+ *
+ * Chunking strategy (applied in priority order):
+ *   1. Paragraph boundary (`\n\n`): preferred split point; keeps semantic units
+ *      together and produces the most natural message breaks.
+ *   2. Line break (`\n`): used when no paragraph boundary falls in the latter
+ *      70% of the window.
+ *   3. Word boundary (space): last resort for very long lines with no newlines.
+ *   4. Hard cut at `limit`: only when no whitespace is available at all.
+ *
+ * Key invariant: a chunk boundary is never placed inside a style span. The
+ * sliceStyleSpans / sliceLinkSpans helpers remap span coordinates to each
+ * chunk's local origin, so every output IR is self-consistent.
+ */
 export function chunkMarkdownIR(ir: MarkdownIR, limit: number): MarkdownIR[] {
   if (!ir.text) {
     return [];
