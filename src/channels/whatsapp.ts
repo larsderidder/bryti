@@ -137,8 +137,8 @@ export class WhatsAppBridge implements ChannelBridge {
         // Extract phone number from JID (strip @s.whatsapp.net)
         const phoneNumber = jid.replace("@s.whatsapp.net", "");
 
-        // Check allowed users (if configured)
-        if (this.allowedUsers.length > 0 && !this.allowedUsers.includes(phoneNumber)) {
+        // Check allowed users (empty list = deny all, same as Telegram)
+        if (this.allowedUsers.length === 0 || !this.allowedUsers.includes(phoneNumber)) {
           console.log(`[whatsapp] Ignoring message from non-allowed user: ${phoneNumber}`);
           continue;
         }

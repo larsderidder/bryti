@@ -501,7 +501,10 @@ async function processMessage(
     if (lastAssistant?.stopReason === "error") {
       const errorMsg = String(lastAssistant.errorMessage ?? "Unknown model error");
       console.error("Model error:", errorMsg);
-      await getBridge(state, msg.platform).sendMessage(msg.channelId, `Model error: ${errorMsg}`);
+      await getBridge(state, msg.platform).sendMessage(
+        msg.channelId,
+        "Something went wrong while generating a response. Please try again.",
+      );
       return;
     }
 
@@ -534,7 +537,10 @@ async function processMessage(
   } catch (error) {
     const err = error as Error;
     console.error("Error processing message:", err);
-    await getBridge(state, msg.platform).sendMessage(msg.channelId, `Error: ${err.message}`);
+    await getBridge(state, msg.platform).sendMessage(
+      msg.channelId,
+      "Something went wrong processing your message. Please try again.",
+    );
   } finally {
     // Always clean up the crash-recovery checkpoint, regardless of outcome.
     // force: true makes this a no-op for scheduler messages (no file was written).
