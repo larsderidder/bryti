@@ -52,6 +52,10 @@ import {
   recoverPendingCheckpoints,
 } from "./crash-recovery.js";
 import { startProactiveCompaction } from "./compaction/proactive.js";
+import { checkForUpdate } from "./update-check.js";
+import { createRequire } from "node:module";
+const _require = createRequire(import.meta.url);
+const { version: BRYTI_VERSION } = _require("../package.json") as { version: string };
 
 // ---------------------------------------------------------------------------
 // Restart protocol
@@ -684,11 +688,19 @@ async function startApp(): Promise<RunningApp> {
   console.log(`Providers: ${config.models.providers.map((p) => p.name).join(", ")}`);
   console.log(`Config cron jobs: ${config.cron.length}`);
 
-  // Pre-load embedding model
+  // Fire-and-forget: never blocks startup.
+  void checkForUpdate(BRYTI_VERSION, config.data_dir);
+
+  // Pre-load embedding model (best-effort: keyword search still works without it)
   const modelsDir = path.join(config.data_dir, ".models");
   console.log("Loading embedding model (downloading on first run)...");
   await warmupEmbeddings(modelsDir);
-  console.log("Embedding model ready.");
+  const { embeddingsAvailable } = await import("./memory/embeddings.js");
+  if (embeddingsAvailable()) {
+    console.log("Embedding model ready.");
+  } else {
+    console.log("Embeddings unavailable. Archival memory will use keyword search only.");
+  }
 
   const coreMemory = createCoreMemory(config.data_dir);
   const historyManager = createHistoryManager(config.data_dir);
