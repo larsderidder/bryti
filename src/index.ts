@@ -205,6 +205,12 @@ interface AppState {
    * the agent can weave reminders into a single coherent response.
    */
   pendingSchedulerContext: Map<string, string[]>;
+  /**
+   * Restart context per userId. When bryti restarts, the reason is stored here
+   * and injected into the next user message so the agent knows why it restarted
+   * and can act on it (e.g. verify a new extension loaded, confirm a config change).
+   */
+  pendingRestartContext: Map<string, string>;
 }
 
 interface AssistantMessageLike {
@@ -490,6 +496,17 @@ async function processMessage(
     if (!isSchedulerMessage) {
       userSession.lastUserMessageAt = Date.now();
 
+      // Prepend restart context so the agent knows why it restarted and can
+      // verify or act on it (e.g. confirm a new extension loaded).
+      const restartReason = state.pendingRestartContext.get(msg.userId);
+      if (restartReason) {
+        msg = {
+          ...msg,
+          text: `[System: you just restarted. Reason: "${restartReason}". Verify the restart achieved its goal and briefly confirm to the user.]\n\n${msg.text}`,
+        };
+        state.pendingRestartContext.delete(msg.userId);
+      }
+
       // Prepend any buffered scheduler context (daily reviews, etc.) so the
       // agent can weave them into a single coherent response instead of
       // sending separate messages for each scheduler event.
@@ -699,6 +716,7 @@ async function startApp(): Promise<RunningApp> {
     lastUserMessages: new Map(),
     recoveredSessions: new Set(),
     pendingSchedulerContext: new Map(),
+    pendingRestartContext: new Map(),
   };
 
   const queue = new MessageQueue(
@@ -759,6 +777,9 @@ async function startApp(): Promise<RunningApp> {
     const { marker } = restartResult;
     console.log(`[restart] Back online after restart requested by ${marker.userId}: ${marker.reason}`);
     const bridge = bridges.find((b) => b.platform === marker.platform) ?? bridges[0];
+
+    // Store the restart reason so the agent can act on it in its next turn.
+    state.pendingRestartContext.set(marker.userId, marker.reason);
 
     if (rolledBack) {
       console.warn(`[config] Config was rolled back due to: ${rollbackReason}`);
