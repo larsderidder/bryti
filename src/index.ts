@@ -219,6 +219,11 @@ interface AppState {
    * and can act on it (e.g. verify a new extension loaded, confirm a config change).
    */
   pendingRestartContext: Map<string, string>;
+  /**
+   * Signal the supervisor to restart the app. Set by runWithSupervisor(),
+   * called by triggerRestart() instead of process.exit(42).
+   */
+  requestRestart: (() => void) | null;
 }
 
 interface AssistantMessageLike {
@@ -324,7 +329,7 @@ async function getOrLoadSession(state: AppState, msg: IncomingMessage): Promise<
       raw: { type: "worker_trigger" },
     });
   }, async (reason: string) => {
-    // Agent-triggered restart. Send notification then exit 42.
+    // Agent-triggered restart. Signals supervisor to restart the app.
     await triggerRestart(state, { userId, channelId, platform, text: "", raw: null }, reason);
   });
 
@@ -373,7 +378,9 @@ async function getOrLoadSession(state: AppState, msg: IncomingMessage): Promise<
 
 
 /**
- * Write a restart marker and exit with code 42 (intentional restart).
+ * Write a restart marker and signal the supervisor to restart.
+ * Falls back to process.exit(42) if the supervisor callback is not set
+ * (running outside the supervisor, like in tests).
  */
 async function triggerRestart(
   state: AppState,
@@ -382,8 +389,6 @@ async function triggerRestart(
 ): Promise<void> {
   console.log(`[restart] Requested by user ${msg.userId}: ${reason}`);
   deletePendingCheckpoint(state.config, msg.userId);
-  // Snapshot current config.yml before restarting so we can roll back if the
-  // agent left it in a broken state.
   snapshotConfig(state.config.data_dir);
   writeRestartMarker(state.config.data_dir, {
     userId: msg.userId,
@@ -395,7 +400,11 @@ async function triggerRestart(
     msg.channelId,
     "Restarting now. Back in a few seconds.",
   );
-  process.exit(RESTART_EXIT_CODE);
+  if (state.requestRestart) {
+    state.requestRestart();
+  } else {
+    process.exit(RESTART_EXIT_CODE);
+  }
 }
 
 /**
@@ -674,7 +683,7 @@ async function processMessage(
 /**
  * Start one app instance.
  */
-async function startApp(): Promise<RunningApp> {
+async function startApp(onRequestRestart?: () => void): Promise<RunningApp> {
   // ---------------------------------------------------------------------------
   // Infra setup: config, logging, embedding model
   // ---------------------------------------------------------------------------
@@ -746,6 +755,7 @@ async function startApp(): Promise<RunningApp> {
     recoveredSessions: new Set(),
     pendingSchedulerContext: new Map(),
     pendingRestartContext: new Map(),
+    requestRestart: onRequestRestart ?? null,
   };
 
   const queue = new MessageQueue(
@@ -895,7 +905,7 @@ async function runWithSupervisor(): Promise<void> {
     let app: RunningApp | undefined;
     let fatalError: Error | undefined;
     try {
-      app = await startApp();
+      app = await startApp(() => resolveOutcome("restart"));
     } catch (error) {
       fatalError = asError(error);
     }
