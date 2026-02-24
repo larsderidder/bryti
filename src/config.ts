@@ -6,6 +6,7 @@
  */
 
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
@@ -256,12 +257,36 @@ function toolsFromConfig(substituted: Record<string, unknown>, dataDir: string):
   };
 }
 
+/**
+ * Resolve the data directory. Checked in order:
+ * 1. BRYTI_DATA_DIR env var
+ * 2. ./data  (development: running from the repo)
+ * 3. ~/.config/bryti  (installed via npm)
+ */
+export function resolveDataDir(): string {
+  if (process.env.BRYTI_DATA_DIR) {
+    return path.resolve(process.env.BRYTI_DATA_DIR);
+  }
+  // If ./data/config.yml exists, we're probably in the repo
+  const local = path.resolve("./data");
+  if (fs.existsSync(path.join(local, "config.yml"))) {
+    return local;
+  }
+  // XDG-style default for installed binary
+  const xdg = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config");
+  return path.join(xdg, "bryti");
+}
+
 export function loadConfig(configPath?: string): Config {
-  const dataDir = path.resolve(process.env.BRYTI_DATA_DIR || "./data");
+  const dataDir = resolveDataDir();
   const cfgPath = configPath || path.join(dataDir, "config.yml");
 
   if (!fs.existsSync(cfgPath)) {
-    throw new Error(`Config file not found: ${cfgPath}`);
+    throw new Error(
+      `Config file not found: ${cfgPath}\n` +
+      `Create one from the example:  cp config.example.yml ${cfgPath}\n` +
+      `Or set BRYTI_DATA_DIR to point to your data directory.`,
+    );
   }
 
   const raw = fs.readFileSync(cfgPath, "utf-8");

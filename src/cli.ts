@@ -16,7 +16,7 @@ try { process.loadEnvFile(".env"); } catch { /* not present, fine */ }
 import fs from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
-import { loadConfig } from "./config.js";
+import { loadConfig, resolveDataDir as defaultDataDir } from "./config.js";
 import { runReflection } from "./projection/index.js";
 
 // ---------------------------------------------------------------------------
@@ -52,14 +52,14 @@ function positional(afterFlags: number): string | undefined {
 // ---------------------------------------------------------------------------
 
 function resolveDataDir(): string {
-  return opt("--data-dir") ?? process.env.BRYTI_DATA_DIR ?? "./data";
+  return opt("--data-dir") ?? defaultDataDir();
 }
 
-function resolveUserId(dataDir: string): string {
+function resolveUserId(_dataDir: string): string {
   if (opt("--user-id")) return opt("--user-id")!;
   if (process.env.BRYTI_USER_ID) return process.env.BRYTI_USER_ID;
   try {
-    const config = loadConfig(path.join(dataDir, "config.yml"));
+    const config = loadConfig();
     const first = config.telegram.allowed_users[0];
     if (first) return String(first);
   } catch {
@@ -283,10 +283,75 @@ async function cmdArchiveFact(dataDir: string, userId: string, content: string):
 }
 
 // ---------------------------------------------------------------------------
+// Command: init
+// ---------------------------------------------------------------------------
+
+function cmdInit(target: string): void {
+  const resolved = path.resolve(target);
+
+  if (fs.existsSync(path.join(resolved, "config.yml"))) {
+    console.log(`Already initialized: ${resolved}/config.yml exists.`);
+    return;
+  }
+
+  fs.mkdirSync(resolved, { recursive: true });
+
+  // Copy config.example.yml from the package
+  const pkgRoot = path.resolve(new URL(".", import.meta.url).pathname, "..");
+  const exampleSrc = path.join(pkgRoot, "config.example.yml");
+
+  if (fs.existsSync(exampleSrc)) {
+    fs.copyFileSync(exampleSrc, path.join(resolved, "config.yml"));
+  } else {
+    // Fallback: create a minimal config
+    fs.writeFileSync(path.join(resolved, "config.yml"), [
+      "# Bryti configuration. See https://github.com/larsderidder/bryti",
+      "agent:",
+      "  name: Bryti",
+      "  model: anthropic/claude-sonnet-4-6",
+      "",
+      "telegram:",
+      "  token: ${TELEGRAM_BOT_TOKEN}",
+      "  allowed_users: []",
+      "",
+      "models:",
+      "  providers:",
+      "    - name: anthropic",
+      "      api: anthropic",
+      "      api_key: ${ANTHROPIC_API_KEY}",
+      "      models:",
+      "        - id: claude-sonnet-4-6",
+      "",
+    ].join("\n"), "utf-8");
+  }
+
+  // Copy default extensions
+  const defaultExtDir = path.join(pkgRoot, "defaults", "extensions");
+  const extDir = path.join(resolved, "files", "extensions");
+  if (fs.existsSync(defaultExtDir)) {
+    fs.mkdirSync(extDir, { recursive: true });
+    for (const file of fs.readdirSync(defaultExtDir)) {
+      fs.copyFileSync(path.join(defaultExtDir, file), path.join(extDir, file));
+    }
+  }
+
+  console.log(`Initialized bryti data directory: ${resolved}`);
+  console.log(`\nNext steps:`);
+  console.log(`  1. Edit ${resolved}/config.yml`);
+  console.log(`  2. Set your Telegram bot token and API keys`);
+  console.log(`  3. Run: bryti serve`);
+
+  if (resolved !== path.resolve("./data")) {
+    console.log(`\n  Tip: set BRYTI_DATA_DIR=${resolved} so bryti finds it.`);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Help
 // ---------------------------------------------------------------------------
 
 function showHelp(): void {
+  const dataDir = resolveDataDir();
   console.log(`
 bryti ${VERSION} — AI colleague in your messaging apps
 
@@ -296,6 +361,10 @@ Usage:
   bryti <command>      Run a management command (safe while server is running)
 
 Commands:
+  init [<path>]
+    Create a new bryti data directory with config.example.yml.
+    Default path: ${dataDir}
+
   serve
     Start the bryti server.
 
@@ -322,7 +391,7 @@ Commands:
 
 Global options:
   --user-id <id>     User ID (default: first entry in telegram.allowed_users)
-  --data-dir <path>  Data directory (default: BRYTI_DATA_DIR env or ./data)
+  --data-dir <path>  Data directory (default: ${dataDir})
 `);
 }
 
@@ -358,6 +427,12 @@ async function main(): Promise<void> {
 
   if (command === "help") {
     showHelp();
+    return;
+  }
+
+  if (command === "init") {
+    const target = positional(1) ?? resolveDataDir();
+    cmdInit(target);
     return;
   }
 
