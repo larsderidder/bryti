@@ -67,6 +67,7 @@ export function buildSystemPrompt(
   tools: ToolSummary[],
   extensionToolNames: Set<string>,
   projections: string,
+  opts?: { isNewUser?: boolean },
 ): string {
   const parts: string[] = [];
 
@@ -200,11 +201,11 @@ export function buildSystemPrompt(
   );
 
   // First conversation guidance
-  if (!coreMemory.trim()) {
+  if (opts?.isNewUser) {
     parts.push(
       `## First Conversation\n` +
-      `Your core memory is empty, which means this is likely your first conversation with this user. ` +
-      `Hail them warmly. Introduce yourself by name (from the config above), briefly explain ` +
+      `This is your first conversation with this user. ` +
+      `Hail them warmly. Introduce yourself by name, briefly explain ` +
       `what you can help with, and ask them to tell you a bit about themselves so you can ` +
       `remember it. Keep it short and natural. Don't list features or commands.`,
     );

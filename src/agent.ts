@@ -158,6 +158,7 @@ export async function loadUserSession(
   // Session manager: continue most recent session for this user, or create new.
   // Each user gets their own session directory so continueRecent finds the right file.
   const sessDir = userSessionDir(config, userId);
+  const isNewUser = !fs.existsSync(sessDir) || fs.readdirSync(sessDir).length === 0;
   const sessionManager = SessionManager.continueRecent(config.data_dir, sessDir);
   const promptTools: ToolSummary[] = customTools.map((tool) => ({
     name: tool.name,
@@ -198,6 +199,7 @@ export async function loadUserSession(
         promptTools,
         extensionToolNames,
         projectionText,
+        { isNewUser },
       );
     },
   });

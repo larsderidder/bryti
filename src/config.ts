@@ -303,7 +303,7 @@ export function loadConfig(configPath?: string): Config {
   const config: Config = {
     agent: {
       name: "Bryti",
-      system_prompt: "You are a helpful personal assistant.",
+      system_prompt: "You are a personal AI colleague. You are warm, direct, and proactive.",
       model: "",
       fallback_models: [],
       ...(substituted.agent as object),
