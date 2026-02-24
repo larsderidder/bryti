@@ -348,11 +348,6 @@ export class TelegramBridge implements ChannelBridge {
       const text = ctx.message.text;
       if (!text) return;
 
-      // Ignore /start — Telegram sends it automatically when a user opens
-      // the chat for the first time. The agent introduces itself on the
-      // first real message instead.
-      if (text === "/start") return;
-
       if (this.handler) {
         const msg: IncomingMessage = {
           channelId: String(ctx.chat.id),
