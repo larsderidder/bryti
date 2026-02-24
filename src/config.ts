@@ -282,11 +282,12 @@ export function loadConfig(configPath?: string): Config {
   const cfgPath = configPath || path.join(dataDir, "config.yml");
 
   if (!fs.existsSync(cfgPath)) {
-    throw new Error(
+    const err = new Error(
       `Config file not found: ${cfgPath}\n` +
-      `Create one from the example:  cp config.example.yml ${cfgPath}\n` +
-      `Or set BRYTI_DATA_DIR to point to your data directory.`,
+      `Run 'bryti hail' to set up, or set BRYTI_DATA_DIR to point to your data directory.`,
     );
+    (err as any).code = "CONFIG_NOT_FOUND";
+    throw err;
   }
 
   const raw = fs.readFileSync(cfgPath, "utf-8");

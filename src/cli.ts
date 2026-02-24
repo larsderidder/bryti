@@ -283,70 +283,6 @@ async function cmdArchiveFact(dataDir: string, userId: string, content: string):
 }
 
 // ---------------------------------------------------------------------------
-// Command: init
-// ---------------------------------------------------------------------------
-
-function cmdInit(target: string): void {
-  const resolved = path.resolve(target);
-
-  if (fs.existsSync(path.join(resolved, "config.yml"))) {
-    console.log(`Already initialized: ${resolved}/config.yml exists.`);
-    return;
-  }
-
-  fs.mkdirSync(resolved, { recursive: true });
-
-  // Copy config.example.yml from the package
-  const pkgRoot = path.resolve(new URL(".", import.meta.url).pathname, "..");
-  const exampleSrc = path.join(pkgRoot, "config.example.yml");
-
-  if (fs.existsSync(exampleSrc)) {
-    fs.copyFileSync(exampleSrc, path.join(resolved, "config.yml"));
-  } else {
-    // Fallback: create a minimal config
-    fs.writeFileSync(path.join(resolved, "config.yml"), [
-      "# Bryti configuration. See https://github.com/larsderidder/bryti",
-      "agent:",
-      "  name: Bryti",
-      "  model: anthropic/claude-sonnet-4-6",
-      "",
-      "telegram:",
-      "  token: ${TELEGRAM_BOT_TOKEN}",
-      "  allowed_users: []",
-      "",
-      "models:",
-      "  providers:",
-      "    - name: anthropic",
-      "      api: anthropic",
-      "      api_key: ${ANTHROPIC_API_KEY}",
-      "      models:",
-      "        - id: claude-sonnet-4-6",
-      "",
-    ].join("\n"), "utf-8");
-  }
-
-  // Copy default extensions
-  const defaultExtDir = path.join(pkgRoot, "defaults", "extensions");
-  const extDir = path.join(resolved, "files", "extensions");
-  if (fs.existsSync(defaultExtDir)) {
-    fs.mkdirSync(extDir, { recursive: true });
-    for (const file of fs.readdirSync(defaultExtDir)) {
-      fs.copyFileSync(path.join(defaultExtDir, file), path.join(extDir, file));
-    }
-  }
-
-  console.log(`Initialized bryti data directory: ${resolved}`);
-  console.log(`\nNext steps:`);
-  console.log(`  1. Edit ${resolved}/config.yml`);
-  console.log(`  2. Set your Telegram bot token and API keys`);
-  console.log(`  3. Run: bryti serve`);
-
-  if (resolved !== path.resolve("./data")) {
-    console.log(`\n  Tip: set BRYTI_DATA_DIR=${resolved} so bryti finds it.`);
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Help
 // ---------------------------------------------------------------------------
 
@@ -361,9 +297,9 @@ Usage:
   bryti <command>      Run a management command (safe while server is running)
 
 Commands:
-  init [<path>]
-    Create a new bryti data directory with config.example.yml.
-    Default path: ${dataDir}
+  hail [<path>]
+    First-run setup. Walks you through creating a config.
+    Alias: init
 
   serve
     Start the bryti server.
@@ -413,8 +349,14 @@ async function main(): Promise<void> {
 
   const command = positional(0);
 
-  // No args or "serve": start the server
+  // No args or "serve": start the server (or suggest hail if no config)
   if (!command || command === "serve") {
+    const configPath = path.join(resolveDataDir(), "config.yml");
+    if (!fs.existsSync(configPath)) {
+      console.log(`\n  No config found at ${configPath}`);
+      console.log(`  Run 'bryti hail' to set up your steward.\n`);
+      return;
+    }
     const { startServer } = await import("./index.js");
     await startServer();
     return;
@@ -430,9 +372,9 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (command === "init") {
-    const target = positional(1) ?? resolveDataDir();
-    cmdInit(target);
+  if (command === "hail" || command === "init") {
+    const { runSetup } = await import("./setup.js");
+    await runSetup(positional(1));
     return;
   }
 

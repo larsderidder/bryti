@@ -912,7 +912,9 @@ async function runWithSupervisor(): Promise<void> {
 
     if (!app) {
       console.error("Fatal startup error:", fatalError);
-      if (shutdownRequested) {
+      // Don't retry on config errors (missing file, bad YAML, validation).
+      // These won't fix themselves between restarts.
+      if ((fatalError as any)?.code === "CONFIG_NOT_FOUND" || shutdownRequested) {
         break;
       }
       console.log(`Restarting in ${restartDelayMs}ms...`);
