@@ -199,6 +199,17 @@ export function buildSystemPrompt(
     `Workers use a cheaper model by default. You can override with the model parameter if needed.`,
   );
 
+  // First conversation guidance
+  if (!coreMemory.trim()) {
+    parts.push(
+      `## First Conversation\n` +
+      `Your core memory is empty, which means this is likely your first conversation with this user. ` +
+      `Hail them warmly. Introduce yourself by name (from the config above), briefly explain ` +
+      `what you can help with, and ask them to tell you a bit about themselves so you can ` +
+      `remember it. Keep it short and natural. Don't list features or commands.`,
+    );
+  }
+
   // Silent reply — for scheduled/proactive turns where there's nothing to say
   parts.push(
     `## Silent Replies\n` +

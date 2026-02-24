@@ -334,75 +334,9 @@ export class TelegramBridge implements ChannelBridge {
   async start(): Promise<void> {
     this.bot = new Bot(this.botToken);
 
-    // Handle /start command
-    this.bot.command("start", async (ctx) => {
-      if (!this.isAllowed(ctx)) {
-        await ctx.reply("Sorry, you're not authorized to use this bot.");
-        return;
-      }
-      await ctx.reply(
-        "Welcome to Bryti! I'm your personal AI assistant.\n\n" +
-        "Commands:\n" +
-        "/start - Show this message\n" +
-        "/clear - Clear conversation history\n" +
-        "/memory - Show your persistent memory\n" +
-        "/help - Show available commands",
-      );
-    });
-
-    // Handle /help command
-    this.bot.command("help", async (ctx) => {
-      if (!this.isAllowed(ctx)) {
-        await ctx.reply("Sorry, you're not authorized to use this bot.");
-        return;
-      }
-      await ctx.reply(
-        "I can help you with:\n" +
-        "- Web search and information lookup\n" +
-        "- Reading and writing files\n" +
-        "- Remembering important information\n\n" +
-        "Just send me a message and I'll help you!",
-      );
-    });
-
-    // Handle /clear command - handled by the message handler
-    this.bot.command("clear", async (ctx) => {
-      if (!this.isAllowed(ctx)) {
-        await ctx.reply("Sorry, you're not authorized to use this bot.");
-        return;
-      }
-      // Signal to handler that this is a clear command
-      if (this.handler && ctx.message) {
-        const msg: IncomingMessage = {
-          channelId: String(ctx.chat.id),
-          userId: String(ctx.from?.id),
-          text: "/clear",
-          platform: "telegram",
-          raw: ctx.message,
-        };
-        await this.handler(msg);
-        await ctx.reply("Conversation history cleared.");
-      }
-    });
-
-    // Handle /memory command
-    this.bot.command("memory", async (ctx) => {
-      if (!this.isAllowed(ctx)) {
-        await ctx.reply("Sorry, you're not authorized to use this bot.");
-        return;
-      }
-      // Signal to handler that this is a memory command
-      if (this.handler && ctx.message) {
-        const msg: IncomingMessage = {
-          channelId: String(ctx.chat.id),
-          userId: String(ctx.from?.id),
-          text: "/memory",
-          platform: "telegram",
-          raw: ctx.message,
-        };
-        await this.handler(msg);
-      }
-    });
+    // Slash commands (/clear, /memory, /log, /restart) are handled in
+    // commands.ts through the normal message flow. No need to intercept
+    // them here — they arrive as regular text messages.
 
     // Handle text messages
     this.bot.on("message:text", async (ctx) => {
@@ -412,9 +346,12 @@ export class TelegramBridge implements ChannelBridge {
       }
 
       const text = ctx.message.text;
-      if (!text || text.startsWith("/")) {
-        return; // Skip commands (handled above)
-      }
+      if (!text) return;
+
+      // Ignore /start — Telegram sends it automatically when a user opens
+      // the chat for the first time. The agent introduces itself on the
+      // first real message instead.
+      if (text === "/start") return;
 
       if (this.handler) {
         const msg: IncomingMessage = {
