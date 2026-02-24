@@ -14,7 +14,20 @@
  */
 
 // Load .env if present (needed when running as an installed npm binary)
-try { process.loadEnvFile(".env"); } catch { /* not present, fine */ }
+import { existsSync } from "node:fs";
+try {
+  if (existsSync(".env")) {
+    process.loadEnvFile(".env");
+  } else {
+    const xdg = process.env.XDG_CONFIG_HOME || (process.env.HOME + "/.config");
+    const dataEnv = process.env.BRYTI_DATA_DIR
+      ? process.env.BRYTI_DATA_DIR + "/.env"
+      : xdg + "/bryti/.env";
+    if (existsSync(dataEnv)) {
+      process.loadEnvFile(dataEnv);
+    }
+  }
+} catch { /* not present, fine */ }
 
 import fs from "node:fs";
 import path from "node:path";

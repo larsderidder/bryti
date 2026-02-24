@@ -1,6 +1,20 @@
 #!/usr/bin/env node
-// Load .env if present (needed when running as an installed npm binary)
-try { process.loadEnvFile(".env"); } catch { /* not present, fine */ }
+// Load .env from cwd or data dir (whichever exists)
+import { existsSync } from "node:fs";
+try {
+  if (existsSync(".env")) {
+    process.loadEnvFile(".env");
+  } else {
+    // Defer full resolution until after imports, but try common locations
+    const xdg = process.env.XDG_CONFIG_HOME || (process.env.HOME + "/.config");
+    const dataEnv = process.env.BRYTI_DATA_DIR
+      ? process.env.BRYTI_DATA_DIR + "/.env"
+      : xdg + "/bryti/.env";
+    if (existsSync(dataEnv)) {
+      process.loadEnvFile(dataEnv);
+    }
+  }
+} catch { /* not present, fine */ }
 
 /**
  * Bryti CLI. Starts the server or runs management commands.

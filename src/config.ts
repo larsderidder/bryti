@@ -161,7 +161,12 @@ function substituteEnvVars(text: string): string {
   return text.replace(/\$\{([A-Z_][A-Z0-9_]*)\}/g, (_match, varName: string) => {
     const value = process.env[varName];
     if (value === undefined) {
-      throw new Error(`Environment variable ${varName} is not set`);
+      const err = new Error(
+        `Environment variable ${varName} is not set.\n` +
+        `Set it in your shell, or add it to .env in your data directory.`,
+      );
+      (err as any).code = "CONFIG_NOT_FOUND";
+      throw err;
     }
     return value;
   });
