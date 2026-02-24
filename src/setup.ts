@@ -111,18 +111,24 @@ function generateConfig(opts: {
   ];
 
   if (opts.provider === "anthropic") {
+    const apiLine = opts.apiKey
+      ? "      api_key: ${ANTHROPIC_API_KEY}"
+      : '      api_key: ""';
     lines.push(
       "    - name: anthropic",
-      "      api: anthropic",
-      "      api_key: ${ANTHROPIC_API_KEY}",
+      "      api: anthropic-messages",
+      apiLine,
       "      models:",
       `        - id: ${opts.model}`,
     );
   } else if (opts.provider === "openai") {
+    const apiLine = opts.apiKey
+      ? "      api_key: ${OPENAI_API_KEY}"
+      : '      api_key: ""';
     lines.push(
       "    - name: openai",
       "      api: openai-completions",
-      "      api_key: ${OPENAI_API_KEY}",
+      apiLine,
       "      models:",
       `        - id: ${opts.model}`,
     );
@@ -196,16 +202,28 @@ export async function runSetup(targetDir?: string): Promise<void> {
     const providerMap = ["anthropic", "openai", "opencode"] as const;
     const provider = providerMap[providerIdx];
 
-    // --- API key ---
+    // --- Auth method ---
     let apiKey = "";
-    if (provider === "anthropic") {
+    let useOAuth = false;
+    if (provider === "anthropic" || provider === "openai") {
       console.log("");
-      console.log("  Get an API key at: https://console.anthropic.com/settings/keys");
-      apiKey = await prompt.ask("Anthropic API key");
-    } else if (provider === "openai") {
-      console.log("");
-      console.log("  Get an API key at: https://platform.openai.com/api-keys");
-      apiKey = await prompt.ask("OpenAI API key");
+      const providerName = provider === "anthropic" ? "Anthropic" : "OpenAI";
+      const authIdx = await prompt.choose(`How do you authenticate with ${providerName}?`, [
+        `${providerName} subscription (Max/Pro/Plus plan)`,
+        "API key",
+      ], 0);
+
+      if (authIdx === 1) {
+        const keyUrl = provider === "anthropic"
+          ? "https://console.anthropic.com/settings/keys"
+          : "https://platform.openai.com/api-keys";
+        console.log(`  Get an API key at: ${keyUrl}`);
+        apiKey = await prompt.ask(`${providerName} API key`);
+      } else {
+        useOAuth = true;
+        console.log(`  Bryti will use your ${providerName} subscription via OAuth.`);
+        console.log("  You'll be prompted to sign in on first start.");
+      }
     }
 
     // --- Model ---
