@@ -174,7 +174,7 @@ export async function runSetup(targetDir?: string): Promise<void> {
   const dataDir = targetDir ? path.resolve(targetDir) : resolveDataDir();
 
   console.log("");
-  console.log("  ᛒ  Bryti hails you.");
+  console.log("  ◆ Bryti hails you.");
   console.log("");
   console.log("  Let's set up your AI colleague.");
   console.log(`  Config will be written to: ${dataDir}`);
