@@ -550,8 +550,16 @@ export class TelegramBridge implements ChannelBridge {
   // Message sending with retry
   // -------------------------------------------------------------------------
   async sendMessage(channelId: string, text: string, opts?: SendOpts): Promise<string> {
+    // During restart cycles the bot may briefly be null. Wait up to 10s
+    // for it to come back rather than throwing immediately.
     if (!this.bot) {
-      throw new Error("Bot not started");
+      for (let i = 0; i < 20; i++) {
+        await new Promise((r) => setTimeout(r, 500));
+        if (this.bot) break;
+      }
+      if (!this.bot) {
+        throw new Error("Bot not started");
+      }
     }
 
     const chatId = parseInt(channelId, 10);
