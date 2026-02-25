@@ -550,20 +550,8 @@ export class TelegramBridge implements ChannelBridge {
   // Message sending with retry
   // -------------------------------------------------------------------------
   async sendMessage(channelId: string, text: string, opts?: SendOpts): Promise<string> {
-    // During restart cycles the bot may briefly be null. Wait up to 10s
-    // for it to come back rather than throwing immediately.
-    if (!this.bot) {
-      for (let i = 0; i < 20; i++) {
-        await new Promise((r) => setTimeout(r, 500));
-        if (this.bot) break;
-      }
-      if (!this.bot) {
-        throw new Error("Bot not started");
-      }
-    }
-
+    const bot = await this.requireBot();
     const chatId = parseInt(channelId, 10);
-    const bot = this.bot;
 
     // Stop typing indicator for this chat
     this.stopTyping(channelId);
@@ -603,13 +591,9 @@ export class TelegramBridge implements ChannelBridge {
   }
 
   async editMessage(channelId: string, messageId: string, text: string): Promise<void> {
-    if (!this.bot) {
-      throw new Error("Bot not started");
-    }
-
+    const bot = await this.requireBot();
     const chatId = parseInt(channelId, 10);
     const msgId = parseInt(messageId, 10);
-    const bot = this.bot;
 
     try {
       await withRetry(() =>
@@ -627,9 +611,8 @@ export class TelegramBridge implements ChannelBridge {
   }
 
   async sendTyping(channelId: string): Promise<void> {
-    if (!this.bot) {
-      throw new Error("Bot not started");
-    }
+    // Don't wait for bot during typing — it's cosmetic. Just skip silently.
+    if (!this.bot) return;
 
     // If already typing, don't start another interval
     if (this.typingIntervals.has(channelId)) {
@@ -687,7 +670,7 @@ export class TelegramBridge implements ChannelBridge {
     approvalKey: string,
     timeoutMs = 5 * 60 * 1000,
   ): Promise<ApprovalResult> {
-    if (!this.bot) throw new Error("Bot not started");
+    const bot = await this.requireBot();
 
     // Telegram limits callback_query data to 64 bytes. Use a short hash
     // as the callback key and map it back to the full approvalKey internally.
@@ -700,7 +683,7 @@ export class TelegramBridge implements ChannelBridge {
       .text("✗ Deny", `a:${shortKey}:deny`);
 
     await withRetry(() =>
-      this.bot!.api.sendMessage(parseInt(channelId, 10), prompt, {
+      bot.api.sendMessage(parseInt(channelId, 10), prompt, {
         parse_mode: "HTML",
         reply_markup: keyboard,
       }),
@@ -873,6 +856,19 @@ export class TelegramBridge implements ChannelBridge {
       console.error("[telegram] Document fetch failed:", (err as Error).message);
       return null;
     }
+  }
+
+  /**
+   * Wait for the bot to be available. During restart cycles the bot may
+   * briefly be null between stop() and start(). Waits up to 10s.
+   */
+  private async requireBot(): Promise<Bot> {
+    if (this.bot) return this.bot;
+    for (let i = 0; i < 20; i++) {
+      await new Promise((r) => setTimeout(r, 500));
+      if (this.bot) return this.bot;
+    }
+    throw new Error("Bot not started");
   }
 
   /**

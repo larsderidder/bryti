@@ -227,12 +227,6 @@ interface AppState {
    */
   pendingSchedulerContext: Map<string, string[]>;
   /**
-   * Restart context per userId. When bryti restarts, the reason is stored here
-   * and injected into the next user message so the agent knows why it restarted
-   * and can act on it (e.g. verify a new extension loaded, confirm a config change).
-   */
-  pendingRestartContext: Map<string, string>;
-  /**
    * Signal the supervisor to restart the app. Set by runWithSupervisor(),
    * called by triggerRestart() instead of process.exit(42).
    */
@@ -526,17 +520,6 @@ async function processMessage(
     if (!isSchedulerMessage) {
       userSession.lastUserMessageAt = Date.now();
 
-      // Prepend restart context so the agent knows why it restarted and can
-      // verify or act on it (e.g. confirm a new extension loaded).
-      const restartReason = state.pendingRestartContext.get(msg.userId);
-      if (restartReason) {
-        msg = {
-          ...msg,
-          text: `[System: you just restarted. Reason: "${restartReason}". Verify the restart achieved its goal and briefly confirm to the user.]\n\n${msg.text}`,
-        };
-        state.pendingRestartContext.delete(msg.userId);
-      }
-
       // Surface extension load errors so the agent can fix broken extensions.
       // Consumed on first message so the agent sees each error only once.
       if (userSession.extensionErrors.length > 0) {
@@ -767,7 +750,6 @@ async function startApp(onRequestRestart?: () => void): Promise<RunningApp> {
     lastUserMessages: new Map(),
     recoveredSessions: new Set(),
     pendingSchedulerContext: new Map(),
-    pendingRestartContext: new Map(),
     requestRestart: onRequestRestart ?? null,
   };
 
@@ -830,9 +812,6 @@ async function startApp(onRequestRestart?: () => void): Promise<RunningApp> {
     console.log(`[restart] Back online after restart requested by ${marker.userId}: ${marker.reason}`);
     const bridge = bridges.find((b) => b.platform === marker.platform) ?? bridges[0];
 
-    // Store the restart reason so the agent can act on it in its next turn.
-    state.pendingRestartContext.set(marker.userId, marker.reason);
-
     if (rolledBack) {
       console.warn(`[config] Config was rolled back due to: ${rollbackReason}`);
       await bridge.sendMessage(
@@ -840,7 +819,18 @@ async function startApp(onRequestRestart?: () => void): Promise<RunningApp> {
         `Back online, but your config.yml change was invalid and has been rolled back.\n\nError: ${rollbackReason}\n\nThe previous working config is still active.`,
       );
     } else {
-      await bridge.sendMessage(marker.channelId, "Back online.");
+      // Send a synthetic message through the agent so it can verify the
+      // restart worked and confirm to the user without waiting for input.
+      const restartMsg: IncomingMessage = {
+        channelId: marker.channelId,
+        userId: marker.userId,
+        platform: marker.platform as "telegram" | "whatsapp",
+        text: `[System: you just restarted. Reason: "${marker.reason}". ` +
+          `Verify the restart achieved its goal (check that new tools/extensions loaded, ` +
+          `config changes took effect, etc.) and briefly confirm to the user.]`,
+        raw: { type: "restart_verification" },
+      };
+      queue.enqueue(restartMsg);
     }
   } else if (rolledBack) {
     // Rare: a snapshot existed but there was no restart marker (e.g. previous crash).
