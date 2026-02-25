@@ -16,8 +16,8 @@ const projectSchema = Type.Object({
   when: Type.Optional(Type.String({
     description:
       "When this is expected to happen. Use a specific ISO datetime for exact events " +
-      "(e.g. '2026-02-19T10:00'). IMPORTANT: always express times in UTC. " +
-      "If the user said '13:45' in their local timezone, convert to UTC before storing. " +
+      "(e.g. '2026-02-19T10:00'). IMPORTANT: always use the user's LOCAL time, not UTC. " +
+      "If the user says '10:00', store '2026-02-19T10:00'. The system converts to UTC automatically. " +
       "Use a date string for day-resolution (e.g. '2026-02-19'), " +
       "'someday' for no specific time, or a natural phrase if UTC conversion is not possible.",
   })),
@@ -143,7 +143,9 @@ export function createProjectionTools(store: ProjectionStore, timezone?: string)
       "Store a future event, plan, or expectation in projection memory. " +
       "Use when the user mentions anything about the future: appointments, deadlines, " +
       "plans, reminders, or things they intend to do. " +
-      "Resolve the time expression to an ISO datetime or date when possible. " +
+      "IMPORTANT: The 'when' field must be in the user's LOCAL timezone (not UTC). " +
+      "Use ISO format: '2026-02-25T10:00' for 10:00 local time. " +
+      "The system converts to UTC automatically. " +
       "Link related projections using linked_ids.",
     parameters: projectSchema,
     async execute(
