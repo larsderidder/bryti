@@ -106,7 +106,9 @@ export function wrapToolWithTrustCheck<T extends AgentTool<any>>(
 
         const duration = result === "allow_always" ? "always" : "once";
         trustStore.approve(tool.name, duration);
-        // Fall through to guardrail with the now-approved tool
+        // User just explicitly approved — skip the guardrail to avoid a
+        // second prompt for the same action.
+        return originalExecute.call(tool, toolCallId, params, signal, onUpdate);
       } else {
         // No inline approval available — fall back to text-based flow
         setPendingApproval(userId, tool.name);
