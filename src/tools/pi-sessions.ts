@@ -673,6 +673,9 @@ export function createPiSessionTools(): AgentTool<any>[] {
     limit: Type.Optional(Type.Number({
       description: "Maximum results to return (default: 20).",
     })),
+    max_sessions_per_project: Type.Optional(Type.Number({
+      description: "Maximum session files to search per project directory (default: all). Set lower to speed up broad searches.",
+    })),
   });
 
   interface SearchHit {
@@ -721,12 +724,14 @@ export function createPiSessionTools(): AgentTool<any>[] {
           continue;
         }
 
-        // Search most recent session file per directory (avoid scanning old sessions)
-        const files = fs.readdirSync(dirPath)
+        // Search session files, most recent first
+        let files = fs.readdirSync(dirPath)
           .filter(f => f.endsWith(".jsonl"))
           .sort()
-          .reverse()
-          .slice(0, 3); // Check up to 3 most recent sessions per project
+          .reverse();
+        if (params.max_sessions_per_project) {
+          files = files.slice(0, params.max_sessions_per_project);
+        }
 
         for (const file of files) {
           if (hits.length >= maxResults) break;
