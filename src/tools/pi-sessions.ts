@@ -12,6 +12,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
+import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import type { AgentTool, AgentToolResult } from "@mariozechner/pi-agent-core";
@@ -278,10 +279,25 @@ function findSessionFileById(sessionId: string): string | null {
 // Socket bridge for running sessions
 // ---------------------------------------------------------------------------
 
-const SOCKET_DIR = "/tmp";
+function bridgeSocketsDir(): string {
+  return path.join(os.homedir(), ".pi", "agent", "sockets");
+}
 
-function bridgeSocketPath(sessionId: string): string {
-  return `${SOCKET_DIR}/bryti-pi-${sessionId}.sock`;
+/**
+ * Find the bridge socket for a session by listing the sockets directory
+ * and matching the session ID prefix. The filename includes a random token
+ * for security: <session-id>-<token>.sock
+ */
+function findBridgeSocket(sessionId: string): string | null {
+  const dir = bridgeSocketsDir();
+  try {
+    for (const f of fs.readdirSync(dir)) {
+      if (f.startsWith(sessionId) && f.endsWith(".sock")) {
+        return path.join(dir, f);
+      }
+    }
+  } catch { /* directory doesn't exist */ }
+  return null;
 }
 
 /**
@@ -290,9 +306,9 @@ function bridgeSocketPath(sessionId: string): string {
  */
 function sendViaBridge(sessionId: string, text: string): Promise<string | null> {
   return new Promise((resolve) => {
-    const sockPath = bridgeSocketPath(sessionId);
+    const sockPath = findBridgeSocket(sessionId);
 
-    if (!fs.existsSync(sockPath)) {
+    if (!sockPath) {
       resolve("Bridge socket not found. The pi session may not have the bryti-bridge extension installed.");
       return;
     }

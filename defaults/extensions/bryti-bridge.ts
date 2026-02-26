@@ -1,23 +1,29 @@
 /**
  * Bryti Bridge - Allows bryti to inject messages into running pi sessions.
  *
- * Creates a Unix socket at /tmp/bryti-pi-<session-id>.sock that accepts
- * JSON messages. Bryti's pi_session_inject tool connects to this socket
- * to send messages into the running session.
+ * Creates a Unix socket at ~/.pi/agent/sockets/<session-id>-<token>.sock
+ * that accepts JSON messages. The random token prevents blind connection
+ * attempts. Bryti discovers the socket by listing the sockets directory
+ * and matching the session ID prefix.
  *
  * Protocol: one JSON object per line (newline-delimited JSON)
  *   Request:  { "type": "user_message", "text": "..." }
  *   Response: { "ok": true } or { "ok": false, "error": "..." }
  */
 
+import * as crypto from "node:crypto";
 import * as net from "node:net";
 import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 
-const SOCKET_DIR = "/tmp";
+function socketsDir(): string {
+  return path.join(os.homedir(), ".pi", "agent", "sockets");
+}
 
-function socketPath(sessionId: string): string {
-  return `${SOCKET_DIR}/bryti-pi-${sessionId}.sock`;
+function socketPath(sessionId: string, token: string): string {
+  return path.join(socketsDir(), `${sessionId}-${token}.sock`);
 }
 
 export default function (pi: ExtensionAPI) {
@@ -29,14 +35,24 @@ export default function (pi: ExtensionAPI) {
     const sessionId = ctx.sessionManager.getSessionId();
     if (!sessionId) return;
 
-    // Capture sendUserMessage from the API
     sendUserMessage = (text: string) => pi.sendUserMessage(text);
 
-    const sockPath = socketPath(sessionId);
-    currentSocketPath = sockPath;
+    // Create sockets directory if needed
+    const dir = socketsDir();
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
 
-    // Clean up stale socket from a previous crash
-    try { fs.unlinkSync(sockPath); } catch { /* ignore */ }
+    // Clean up any stale sockets for this session ID
+    try {
+      for (const f of fs.readdirSync(dir)) {
+        if (f.startsWith(sessionId) && f.endsWith(".sock")) {
+          try { fs.unlinkSync(path.join(dir, f)); } catch { /* ignore */ }
+        }
+      }
+    } catch { /* ignore */ }
+
+    const token = crypto.randomBytes(8).toString("hex");
+    const sockPath = socketPath(sessionId, token);
+    currentSocketPath = sockPath;
 
     server = net.createServer((conn) => {
       let buffer = "";
@@ -70,7 +86,6 @@ export default function (pi: ExtensionAPI) {
     });
 
     server.listen(sockPath, () => {
-      // Make socket owner-accessible only
       try { fs.chmodSync(sockPath, 0o600); } catch { /* ignore */ }
     });
   });
