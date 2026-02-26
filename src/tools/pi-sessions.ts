@@ -98,7 +98,6 @@ interface SessionSummary {
   firstPrompt: string | null;
   lastPrompt: string | null;
   lastActivity: string;
-  messageCount: number;
   isRunning: boolean;
 }
 
@@ -108,43 +107,60 @@ interface SessionMessage {
   timestamp: string | null;
 }
 
+/**
+ * Parse a session file for summary info. Optimized: reads the first few KB
+ * for the session header and first prompt, then tails the file for the last
+ * prompt and activity timestamp. Avoids reading multi-MB files fully.
+ */
 function parseSessionFile(filePath: string, running: Set<string>): SessionSummary | null {
   try {
-    const raw = fs.readFileSync(filePath, "utf-8");
+    const stat = fs.statSync(filePath);
     let sessionId: string | null = null;
     let directory: string | null = null;
     let firstPrompt: string | null = null;
     let lastPrompt: string | null = null;
     let lastActivity: string | null = null;
-    let messageCount = 0;
 
-    for (const line of raw.split("\n")) {
-      if (!line.trim()) continue;
-      let record: SessionRecord;
-      try {
-        record = JSON.parse(line);
-      } catch {
-        continue;
-      }
-
-      if (record.timestamp) lastActivity = record.timestamp;
-
-      if (record.type === "session") {
-        sessionId = record.id ?? null;
-        if (record.cwd) directory = record.cwd;
-      }
-
-      if (record.type === "message" && record.message) {
-        const role = record.message.role;
-        if (role === "user" || role === "assistant") messageCount++;
-        if (role === "user") {
-          const text = extractUserText(record.message.content);
-          if (text) {
-            if (!firstPrompt) firstPrompt = text.slice(0, 200);
-            lastPrompt = text.slice(0, 200);
-          }
+    // Read head (first 16KB) for session header + first user message
+    const fd = fs.openSync(filePath, "r");
+    try {
+      const headBuf = Buffer.alloc(Math.min(16384, stat.size));
+      fs.readSync(fd, headBuf, 0, headBuf.length, 0);
+      const headStr = headBuf.toString("utf-8");
+      for (const line of headStr.split("\n")) {
+        if (!line.trim()) continue;
+        let record: SessionRecord;
+        try { record = JSON.parse(line); } catch { continue; }
+        if (record.type === "session") {
+          sessionId = record.id ?? null;
+          if (record.cwd) directory = record.cwd;
         }
+        if (record.type === "message" && record.message?.role === "user" && !firstPrompt) {
+          const text = extractUserText(record.message.content);
+          if (text) firstPrompt = text.slice(0, 200);
+        }
+        if (firstPrompt) break; // Got what we need from the head
       }
+
+      // Read tail (last 16KB) for last user message + last timestamp
+      const tailSize = Math.min(16384, stat.size);
+      const tailBuf = Buffer.alloc(tailSize);
+      fs.readSync(fd, tailBuf, 0, tailSize, Math.max(0, stat.size - tailSize));
+      const tailStr = tailBuf.toString("utf-8");
+      const tailLines = tailStr.split("\n").reverse();
+      for (const line of tailLines) {
+        if (!line.trim()) continue;
+        let record: SessionRecord;
+        try { record = JSON.parse(line); } catch { continue; }
+        if (record.timestamp && !lastActivity) lastActivity = record.timestamp;
+        if (record.type === "message" && record.message?.role === "user" && !lastPrompt) {
+          const text = extractUserText(record.message.content);
+          if (text) lastPrompt = text.slice(0, 200);
+        }
+        if (lastActivity && lastPrompt) break;
+      }
+    } finally {
+      fs.closeSync(fd);
     }
 
     if (!directory) {
@@ -155,7 +171,7 @@ function parseSessionFile(filePath: string, running: Set<string>): SessionSummar
       sessionId = stem.includes("_") ? stem.split("_")[1] : stem;
     }
     if (!lastActivity) {
-      lastActivity = fs.statSync(filePath).mtime.toISOString();
+      lastActivity = stat.mtime.toISOString();
     }
 
     return {
@@ -164,7 +180,6 @@ function parseSessionFile(filePath: string, running: Set<string>): SessionSummar
       firstPrompt,
       lastPrompt,
       lastActivity,
-      messageCount,
       isRunning: running.has(sessionId),
     };
   } catch {
@@ -313,15 +328,23 @@ export function createPiSessionTools(): AgentTool<any>[] {
           if (decoded !== params.directory && !decoded.startsWith(params.directory)) continue;
         }
 
-        // Only parse the most recent session file per project
         const files = fs.readdirSync(dirPath)
           .filter(f => f.endsWith(".jsonl"))
           .sort()
           .reverse();
 
-        if (files.length > 0) {
-          const summary = parseSessionFile(path.join(dirPath, files[0]), running);
-          if (summary) summaries.push(summary);
+        if (params.directory) {
+          // When filtering by directory, show all sessions (user wants detail)
+          for (const file of files) {
+            const summary = parseSessionFile(path.join(dirPath, file), running);
+            if (summary) summaries.push(summary);
+          }
+        } else {
+          // Overview mode: only the most recent session per project
+          if (files.length > 0) {
+            const summary = parseSessionFile(path.join(dirPath, files[0]), running);
+            if (summary) summaries.push(summary);
+          }
         }
       }
 
