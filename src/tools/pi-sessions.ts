@@ -2,11 +2,16 @@
  * Pi session awareness tools.
  *
  * Gives bryti awareness of pi CLI sessions on disk. Bryti can see what
- * other agents are working on, check their progress, and inject messages
- * into stopped sessions to leave instructions for when they resume.
+ * other agents are working on, check their progress, search conversations,
+ * and inject messages into running or stopped sessions.
  *
  * Sessions live at ~/.pi/agent/sessions/<encoded-dir>/<timestamp>_<uuid>.jsonl
  * The encoded dir replaces / with - and wraps with --.
+ *
+ * Running detection uses three signals:
+ * 1. bryti-bridge socket exists at ~/.pi/agent/sockets/<session-id>-<token>.sock
+ * 2. A pi process has matching cwd (via /proc/<pid>/cwd)
+ * 3. Session file was modified in the last 60 seconds
  */
 
 import crypto from "node:crypto";
@@ -37,20 +42,59 @@ function decodeDirectoryName(encoded: string): string {
 // Running session detection
 // ---------------------------------------------------------------------------
 
-function findRunningPiSessionIds(): Set<string> {
-  const running = new Set<string>();
+/**
+ * Map running pi processes to their working directories.
+ * Uses /proc/<pid>/cwd since pi processes show as just "pi" in ps
+ * with no session ID in the command line.
+ */
+function findRunningPiCwds(): Map<string, number> {
+  const cwdToPid = new Map<string, number>();
   try {
     const ps = execSync("ps aux", { timeout: 5000, encoding: "utf-8" });
-    const uuidPattern = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/;
     for (const line of ps.split("\n")) {
-      if (!line.includes("pi-coding-agent") && !line.includes("/pi ")) continue;
-      const match = uuidPattern.exec(line);
-      if (match) running.add(match[1]);
+      // Match lines where the command is exactly "pi" (end of line)
+      // or contains "/pi " or "pi-coding-agent"
+      const fields = line.trim().split(/\s+/);
+      const cmd = fields.slice(10).join(" ");
+      if (cmd !== "pi" && !cmd.endsWith("/pi") && !cmd.includes("/pi ") && !cmd.includes("pi-coding-agent")) continue;
+
+      const pid = parseInt(fields[1], 10);
+      if (isNaN(pid)) continue;
+
+      try {
+        const cwd = fs.readlinkSync(`/proc/${pid}/cwd`);
+        cwdToPid.set(cwd, pid);
+      } catch { /* process may have exited */ }
     }
-  } catch {
-    // Best effort
-  }
-  return running;
+  } catch { /* best effort */ }
+  return cwdToPid;
+}
+
+/**
+ * Check if a session is running using multiple signals:
+ * 1. Bridge socket exists in ~/.pi/agent/sockets/
+ * 2. A pi process has the matching cwd
+ * 3. Session file was modified in the last 60 seconds
+ */
+function isSessionRunning(
+  sessionId: string,
+  directory: string,
+  filePath: string,
+  piCwds: Map<string, number>,
+): boolean {
+  // Signal 1: bridge socket exists
+  if (findBridgeSocket(sessionId)) return true;
+
+  // Signal 2: a pi process is running in the matching directory
+  if (piCwds.has(directory)) return true;
+
+  // Signal 3: file recently modified (active writing)
+  try {
+    const mtime = fs.statSync(filePath).mtimeMs;
+    if (Date.now() - mtime < 60_000) return true;
+  } catch { /* ignore */ }
+
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -115,7 +159,7 @@ interface SessionMessage {
  * for the session header and first prompt, then tails the file for the last
  * prompt and activity timestamp. Avoids reading multi-MB files fully.
  */
-function parseSessionFile(filePath: string, running: Set<string>): SessionSummary | null {
+function parseSessionFile(filePath: string, piCwds: Map<string, number>): SessionSummary | null {
   try {
     const stat = fs.statSync(filePath);
     let sessionId: string | null = null;
@@ -183,7 +227,7 @@ function parseSessionFile(filePath: string, running: Set<string>): SessionSummar
       firstPrompt,
       lastPrompt,
       lastActivity,
-      isRunning: running.has(sessionId),
+      isRunning: isSessionRunning(sessionId, directory, filePath, piCwds),
     };
   } catch {
     return null;
@@ -399,7 +443,7 @@ export function createPiSessionTools(): AgentTool<any>[] {
         return toolError("No pi sessions directory found");
       }
 
-      const running = findRunningPiSessionIds();
+      const piCwds = findRunningPiCwds();
       const limit = params.limit ?? 20;
       const summaries: SessionSummary[] = [];
 
@@ -420,13 +464,13 @@ export function createPiSessionTools(): AgentTool<any>[] {
         if (params.directory) {
           // When filtering by directory, show all sessions (user wants detail)
           for (const file of files) {
-            const summary = parseSessionFile(path.join(dirPath, file), running);
+            const summary = parseSessionFile(path.join(dirPath, file), piCwds);
             if (summary) summaries.push(summary);
           }
         } else {
           // Overview mode: only the most recent session per project
           if (files.length > 0) {
-            const summary = parseSessionFile(path.join(dirPath, files[0]), running);
+            const summary = parseSessionFile(path.join(dirPath, files[0]), piCwds);
             if (summary) summaries.push(summary);
           }
         }
@@ -465,16 +509,17 @@ export function createPiSessionTools(): AgentTool<any>[] {
       }
 
       const messages = parseSessionMessages(filePath, limit);
-      const running = findRunningPiSessionIds();
+      const piCwds = findRunningPiCwds();
 
       // Extract session ID from filename
       const stem = path.basename(filePath, ".jsonl");
       const sessionId = stem.includes("_") ? stem.split("_")[1] : stem;
+      const directory = decodeDirectoryName(path.basename(path.dirname(filePath)));
 
       return toolSuccess({
         session_id: sessionId,
-        directory: decodeDirectoryName(path.basename(path.dirname(filePath))),
-        is_running: running.has(sessionId),
+        directory,
+        is_running: isSessionRunning(sessionId, directory, filePath, piCwds),
         message_count: messages.length,
         messages,
       });
@@ -520,12 +565,11 @@ export function createPiSessionTools(): AgentTool<any>[] {
         return toolError("Session not found");
       }
 
-      const running = findRunningPiSessionIds();
+      const piCwds = findRunningPiCwds();
       const stem = path.basename(filePath, ".jsonl");
       const sessionId = stem.includes("_") ? stem.split("_")[1] : stem;
-      const lastModified = fs.statSync(filePath).mtimeMs;
-      const recentlyActive = (Date.now() - lastModified) < 60_000;
-      const isRunning = running.has(sessionId) || recentlyActive;
+      const directory = decodeDirectoryName(path.basename(path.dirname(filePath)));
+      const isRunning = isSessionRunning(sessionId, directory, filePath, piCwds);
 
       // For running sessions, try the bryti-bridge socket
       if (isRunning) {
@@ -617,5 +661,138 @@ export function createPiSessionTools(): AgentTool<any>[] {
     },
   };
 
-  return [listTool, readTool, injectTool];
+  // --- Search tool ---
+
+  const searchSchema = Type.Object({
+    query: Type.String({
+      description: "Search terms to find in session conversations. Matches against user and assistant messages.",
+    }),
+    directory: Type.Optional(Type.String({
+      description: "Limit search to sessions in this project directory.",
+    })),
+    limit: Type.Optional(Type.Number({
+      description: "Maximum results to return (default: 20).",
+    })),
+  });
+
+  interface SearchHit {
+    session_id: string;
+    directory: string;
+    is_running: boolean;
+    role: string;
+    content_snippet: string;
+    timestamp: string | null;
+  }
+
+  const searchTool: AgentTool<typeof searchSchema> = {
+    name: "pi_session_search",
+    label: "pi_session_search",
+    description:
+      "Search across all pi coding agent session conversations for keywords. " +
+      "Returns matching messages with context. Use to find where a topic was " +
+      "discussed, what decisions were made, or locate a specific session.",
+    parameters: searchSchema,
+    async execute(
+      _toolCallId: string,
+      params: Static<typeof searchSchema>,
+    ): Promise<AgentToolResult<unknown>> {
+      const sessionsRoot = piSessionsDir();
+      if (!fs.existsSync(sessionsRoot)) {
+        return toolError("No pi sessions directory found");
+      }
+
+      const terms = params.query.toLowerCase().split(/\s+/).filter(Boolean);
+      if (terms.length === 0) {
+        return toolError("Provide at least one search term");
+      }
+
+      const piCwds = findRunningPiCwds();
+      const maxResults = params.limit ?? 20;
+      const hits: SearchHit[] = [];
+
+      for (const entry of fs.readdirSync(sessionsRoot)) {
+        if (hits.length >= maxResults) break;
+
+        const dirPath = path.join(sessionsRoot, entry);
+        if (!fs.statSync(dirPath).isDirectory()) continue;
+
+        const directory = decodeDirectoryName(entry);
+        if (params.directory && directory !== params.directory && !directory.startsWith(params.directory)) {
+          continue;
+        }
+
+        // Search most recent session file per directory (avoid scanning old sessions)
+        const files = fs.readdirSync(dirPath)
+          .filter(f => f.endsWith(".jsonl"))
+          .sort()
+          .reverse()
+          .slice(0, 3); // Check up to 3 most recent sessions per project
+
+        for (const file of files) {
+          if (hits.length >= maxResults) break;
+          const filePath = path.join(dirPath, file);
+
+          const stem = path.basename(file, ".jsonl");
+          const sessionId = stem.includes("_") ? stem.split("_")[1] : stem;
+          const running = isSessionRunning(sessionId, directory, filePath, piCwds);
+
+          // Read the file and search line by line
+          try {
+            const raw = fs.readFileSync(filePath, "utf-8");
+            for (const line of raw.split("\n")) {
+              if (hits.length >= maxResults) break;
+              if (!line.trim()) continue;
+
+              let record: SessionRecord;
+              try { record = JSON.parse(line); } catch { continue; }
+              if (record.type !== "message" || !record.message) continue;
+
+              const role = record.message.role;
+              if (role !== "user" && role !== "assistant") continue;
+
+              const text = role === "user"
+                ? extractUserText(record.message.content)
+                : extractAssistantText(record.message.content);
+              if (!text) continue;
+
+              const lower = text.toLowerCase();
+              if (!terms.every(t => lower.includes(t))) continue;
+
+              // Build a snippet around the first match
+              const firstTermIdx = Math.min(...terms.map(t => {
+                const idx = lower.indexOf(t);
+                return idx >= 0 ? idx : Infinity;
+              }));
+              const snippetStart = Math.max(0, firstTermIdx - 80);
+              const snippetEnd = Math.min(text.length, firstTermIdx + 200);
+              const snippet = (snippetStart > 0 ? "..." : "") +
+                text.slice(snippetStart, snippetEnd).trim() +
+                (snippetEnd < text.length ? "..." : "");
+
+              hits.push({
+                session_id: sessionId,
+                directory,
+                is_running: running,
+                role,
+                content_snippet: snippet,
+                timestamp: record.timestamp ?? null,
+              });
+            }
+          } catch { /* skip unreadable files */ }
+        }
+      }
+
+      if (hits.length === 0) {
+        return toolSuccess({ message: "No matches found", query: params.query, results: [] });
+      }
+
+      return toolSuccess({
+        query: params.query,
+        result_count: hits.length,
+        results: hits,
+      });
+    },
+  };
+
+  return [listTool, readTool, injectTool, searchTool];
 }
