@@ -1,14 +1,15 @@
 /**
  * Pi session awareness tools.
  *
- * Gives bryti read-only access to pi CLI sessions on disk. Bryti can see
- * what other agents are working on, check their progress, and surface
- * relevant info to the user.
+ * Gives bryti awareness of pi CLI sessions on disk. Bryti can see what
+ * other agents are working on, check their progress, and inject messages
+ * into stopped sessions to leave instructions for when they resume.
  *
  * Sessions live at ~/.pi/agent/sessions/<encoded-dir>/<timestamp>_<uuid>.jsonl
  * The encoded dir replaces / with - and wraps with --.
  */
 
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { execSync } from "node:child_process";
@@ -397,5 +398,129 @@ export function createPiSessionTools(): AgentTool<any>[] {
     },
   };
 
-  return [listTool, readTool];
+  const injectSchema = Type.Object({
+    session_id: Type.Optional(Type.String({
+      description: "Session UUID to inject into. Use pi_session_list to find IDs.",
+    })),
+    directory: Type.Optional(Type.String({
+      description: "Inject into the most recent session in this project directory.",
+    })),
+    message: Type.String({
+      description: "The message to inject as a user message into the session.",
+    }),
+  });
+
+  const injectTool: AgentTool<typeof injectSchema> = {
+    name: "pi_session_inject",
+    label: "pi_session_inject",
+    description:
+      "Inject a user message into a stopped pi coding agent session. The message " +
+      "will appear in the conversation when the session is resumed. ONLY works on " +
+      "stopped sessions (not currently running). Use to leave instructions, context, " +
+      "or follow-up tasks for a coding agent session.",
+    parameters: injectSchema,
+    async execute(
+      _toolCallId: string,
+      params: Static<typeof injectSchema>,
+    ): Promise<AgentToolResult<unknown>> {
+      let filePath: string | null = null;
+
+      if (params.session_id) {
+        filePath = findSessionFileById(params.session_id);
+      } else if (params.directory) {
+        filePath = findLatestSessionFile(params.directory);
+      } else {
+        return toolError("Provide either session_id or directory");
+      }
+
+      if (!filePath) {
+        return toolError("Session not found");
+      }
+
+      // Safety check: don't inject into running sessions.
+      // Two checks: (1) process detection via ps, (2) file was modified in the
+      // last 60 seconds (a running session writes frequently).
+      const running = findRunningPiSessionIds();
+      const stem = path.basename(filePath, ".jsonl");
+      const sessionId = stem.includes("_") ? stem.split("_")[1] : stem;
+      const lastModified = fs.statSync(filePath).mtimeMs;
+      const recentlyActive = (Date.now() - lastModified) < 60_000;
+
+      if (running.has(sessionId) || recentlyActive) {
+        return toolError(
+          "Session appears to be running (recently active). Cannot inject into a live session. " +
+          "Wait for it to stop or ask the user to relay the message.",
+        );
+      }
+
+      // Find the last entry's id to set as parentId
+      let lastEntryId: string | null = null;
+      try {
+        const stat = fs.statSync(filePath);
+        const tailSize = Math.min(8192, stat.size);
+        const fd = fs.openSync(filePath, "r");
+        try {
+          const buf = Buffer.alloc(tailSize);
+          fs.readSync(fd, buf, 0, tailSize, Math.max(0, stat.size - tailSize));
+          const lines = buf.toString("utf-8").split("\n").reverse();
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            try {
+              const record = JSON.parse(line);
+              if (record.id) {
+                lastEntryId = record.id;
+                break;
+              }
+            } catch { continue; }
+          }
+        } finally {
+          fs.closeSync(fd);
+        }
+      } catch {
+        return toolError("Failed to read session file");
+      }
+
+      if (!lastEntryId) {
+        return toolError("Could not find last entry in session file");
+      }
+
+      // Generate a short hex id (matching pi's format)
+      const id = crypto.randomUUID().replace(/-/g, "").slice(0, 8);
+      const now = new Date();
+
+      const entry = {
+        type: "message",
+        id,
+        parentId: lastEntryId,
+        timestamp: now.toISOString(),
+        message: {
+          role: "user",
+          content: [{ type: "text", text: params.message }],
+          timestamp: now.getTime(),
+        },
+      };
+
+      try {
+        // Check if file ends with newline (read last byte only)
+        const fd = fs.openSync(filePath, "r");
+        const stat = fs.fstatSync(fd);
+        const lastByte = Buffer.alloc(1);
+        fs.readSync(fd, lastByte, 0, 1, stat.size - 1);
+        fs.closeSync(fd);
+        const sep = lastByte[0] === 0x0a ? "" : "\n"; // 0x0a = '\n'
+        fs.appendFileSync(filePath, sep + JSON.stringify(entry) + "\n", "utf-8");
+      } catch {
+        return toolError("Failed to write to session file");
+      }
+
+      return toolSuccess({
+        injected: true,
+        session_id: sessionId,
+        directory: decodeDirectoryName(path.basename(path.dirname(filePath))),
+        message_preview: params.message.slice(0, 100),
+      });
+    },
+  };
+
+  return [listTool, readTool, injectTool];
 }

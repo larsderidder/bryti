@@ -93,9 +93,14 @@ export function createTools(
 
   tools.push(createConversationSearchTool(path.join(config.data_dir, "history")));
 
-  // Pi session awareness: read-only access to pi CLI sessions on disk.
-  // Lets bryti see what other coding agents are working on.
+  // Pi session awareness: read + inject into pi CLI sessions on disk.
+  // Lets bryti see what other coding agents are working on and steer stopped sessions.
   tools.push(...createPiSessionTools());
+  registerToolCapabilities("pi_session_inject", {
+    level: "elevated",
+    capabilities: ["filesystem"],
+    reason: "Injects messages into pi coding agent session files.",
+  });
 
   // Worker tools: dispatch and check background research sessions.
   // The registry lives for the lifetime of this tool set (one per user session).
