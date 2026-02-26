@@ -617,6 +617,16 @@ async function processMessage(
       latency_ms: latencyMs,
     });
 
+    // Log context usage so operators can see when compaction is approaching
+    const ctxUsage = session.getContextUsage();
+    if (ctxUsage?.percent !== null && ctxUsage?.percent !== undefined) {
+      const tokensStr = ctxUsage.tokens !== null
+        ? `${Math.round(ctxUsage.tokens / 1000)}K/${Math.round(ctxUsage.contextWindow / 1000)}K`
+        : `?/${Math.round(ctxUsage.contextWindow / 1000)}K`;
+      const logFn = ctxUsage.percent > 80 ? console.warn : console.log;
+      logFn(`[context] ${tokensStr} tokens (${Math.round(ctxUsage.percent)}%) for user ${msg.userId}`);
+    }
+
     if (lastAssistant?.stopReason === "error") {
       const errorMsg = String(lastAssistant.errorMessage ?? "Unknown model error");
       console.error("Model error:", errorMsg);
