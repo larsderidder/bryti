@@ -6,6 +6,7 @@
 import type { AgentTool, AgentToolResult } from "@mariozechner/pi-agent-core";
 import { Type } from "@sinclair/typebox";
 import { createFileTools } from "./files.js";
+import { createPiSessionTools } from "./pi-sessions.js";
 import { createSkillInstallTool } from "./skill-install.js";
 import { createCoreMemoryTools } from "./core-memory-tool.js";
 import { createArchivalMemoryTools } from "./archival-memory-tool.js";
@@ -91,6 +92,10 @@ export function createTools(
   );
 
   tools.push(createConversationSearchTool(path.join(config.data_dir, "history")));
+
+  // Pi session awareness: read-only access to pi CLI sessions on disk.
+  // Lets bryti see what other coding agents are working on.
+  tools.push(...createPiSessionTools());
 
   // Worker tools: dispatch and check background research sessions.
   // The registry lives for the lifetime of this tool set (one per user session).
