@@ -52,6 +52,8 @@ export interface UserSession {
   lastUserMessageAt: number;
   /** Extension files that failed to load on startup. Empty if all loaded. */
   extensionErrors: Array<{ path: string; error: string }>;
+  /** Called after auto-compaction completes successfully. Set by index.ts. */
+  onCompactionComplete?: () => void;
   /** Clean up event listeners. Does NOT delete the session file. */
   dispose(): void;
 }
@@ -286,6 +288,7 @@ export async function loadUserSession(
   const toolCallLogPath = path.join(logsDir, "tool-calls.jsonl");
 
   // Log compaction and tool call events
+  let userSessionRef: UserSession | null = null;
   const toolCallCounts = new Map<string, number>();
   const unsubscribe = session.subscribe((event: AgentSessionEvent) => {
     if (event.type === "auto_compaction_start") {
@@ -298,6 +301,7 @@ export async function loadUserSession(
           `tokensBefore=${event.result.tokensBefore} ` +
           `summaryLength=${summary.length}`,
         );
+        userSessionRef?.onCompactionComplete?.();
       } else if (event.errorMessage) {
         console.error(`[compaction] failed for user ${userId}: ${event.errorMessage}`);
       }
@@ -324,7 +328,7 @@ export async function loadUserSession(
     }
   });
 
-  return {
+  const userSession: UserSession = {
     session,
     modelRegistry,
     userId,
@@ -340,6 +344,8 @@ export async function loadUserSession(
       projectionStore.close();
     },
   };
+  userSessionRef = userSession;
+  return userSession;
 }
 
 /**

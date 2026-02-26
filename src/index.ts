@@ -376,6 +376,21 @@ async function getOrLoadSession(state: AppState, msg: IncomingMessage): Promise<
     state.recoveredSessions.add(userId);
   }
 
+  // After auto-compaction, nudge the agent so it can resume any interrupted
+  // task instead of going silent and waiting for the user.
+  userSession.onCompactionComplete = () => {
+    const channelId = String(state.config.telegram.allowed_users[0] ?? userId);
+    const msg: IncomingMessage = {
+      channelId,
+      userId,
+      platform: "telegram",
+      text: "[System: context was automatically compacted. If you were in the middle of a task " +
+        "for the user, continue where you left off. If not, say nothing (NOOP).]",
+      raw: { type: "compaction_resume" },
+    };
+    state.enqueue?.(msg);
+  };
+
   state.sessions.set(userId, userSession);
   return userSession;
 }
