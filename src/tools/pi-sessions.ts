@@ -11,6 +11,7 @@
 
 import crypto from "node:crypto";
 import fs from "node:fs";
+import net from "node:net";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import type { AgentTool, AgentToolResult } from "@mariozechner/pi-agent-core";
@@ -274,6 +275,72 @@ function findSessionFileById(sessionId: string): string | null {
 }
 
 // ---------------------------------------------------------------------------
+// Socket bridge for running sessions
+// ---------------------------------------------------------------------------
+
+const SOCKET_DIR = "/tmp";
+
+function bridgeSocketPath(sessionId: string): string {
+  return `${SOCKET_DIR}/bryti-pi-${sessionId}.sock`;
+}
+
+/**
+ * Send a message to a running pi session via the bryti-bridge extension socket.
+ * Returns null on success, or an error message on failure.
+ */
+function sendViaBridge(sessionId: string, text: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    const sockPath = bridgeSocketPath(sessionId);
+
+    if (!fs.existsSync(sockPath)) {
+      resolve("Bridge socket not found. The pi session may not have the bryti-bridge extension installed.");
+      return;
+    }
+
+    const conn = net.createConnection(sockPath);
+    let buffer = "";
+    const timeout = setTimeout(() => {
+      conn.destroy();
+      resolve("Bridge connection timed out");
+    }, 5000);
+
+    conn.on("connect", () => {
+      conn.write(JSON.stringify({ type: "user_message", text }) + "\n");
+    });
+
+    conn.on("data", (data) => {
+      buffer += data.toString();
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const resp = JSON.parse(line);
+          clearTimeout(timeout);
+          conn.end();
+          if (resp.ok) {
+            resolve(null);
+          } else {
+            resolve(resp.error || "Bridge returned error");
+          }
+        } catch {
+          clearTimeout(timeout);
+          conn.end();
+          resolve("Invalid response from bridge");
+        }
+        return; // Only process first response
+      }
+    });
+
+    conn.on("error", (err) => {
+      clearTimeout(timeout);
+      resolve(`Bridge connection failed: ${err.message}`);
+    });
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Tool definitions
 // ---------------------------------------------------------------------------
 
@@ -414,10 +481,10 @@ export function createPiSessionTools(): AgentTool<any>[] {
     name: "pi_session_inject",
     label: "pi_session_inject",
     description:
-      "Inject a user message into a stopped pi coding agent session. The message " +
-      "will appear in the conversation when the session is resumed. ONLY works on " +
-      "stopped sessions (not currently running). Use to leave instructions, context, " +
-      "or follow-up tasks for a coding agent session.",
+      "Inject a user message into a pi coding agent session. For running sessions, " +
+      "sends via the bryti-bridge extension (requires the extension to be installed). " +
+      "For stopped sessions, appends to the session file so the message appears when " +
+      "the session is resumed. Use to steer, leave instructions, or add context.",
     parameters: injectSchema,
     async execute(
       _toolCallId: string,
@@ -437,22 +504,34 @@ export function createPiSessionTools(): AgentTool<any>[] {
         return toolError("Session not found");
       }
 
-      // Safety check: don't inject into running sessions.
-      // Two checks: (1) process detection via ps, (2) file was modified in the
-      // last 60 seconds (a running session writes frequently).
       const running = findRunningPiSessionIds();
       const stem = path.basename(filePath, ".jsonl");
       const sessionId = stem.includes("_") ? stem.split("_")[1] : stem;
       const lastModified = fs.statSync(filePath).mtimeMs;
       const recentlyActive = (Date.now() - lastModified) < 60_000;
+      const isRunning = running.has(sessionId) || recentlyActive;
 
-      if (running.has(sessionId) || recentlyActive) {
+      // For running sessions, try the bryti-bridge socket
+      if (isRunning) {
+        const bridgeError = await sendViaBridge(sessionId, params.message);
+        if (bridgeError === null) {
+          return toolSuccess({
+            injected: true,
+            method: "bridge",
+            session_id: sessionId,
+            directory: decodeDirectoryName(path.basename(path.dirname(filePath))),
+            message_preview: params.message.slice(0, 100),
+          });
+        }
+        // Bridge failed; can't inject into running session without it
         return toolError(
-          "Session appears to be running (recently active). Cannot inject into a live session. " +
-          "Wait for it to stop or ask the user to relay the message.",
+          `Session is running but bridge injection failed: ${bridgeError}. ` +
+          "Either install the bryti-bridge pi extension, wait for the session to stop, " +
+          "or ask the user to relay the message.",
         );
       }
 
+      // Stopped session: append to JSONL file directly.
       // Find the last entry's id to set as parentId
       let lastEntryId: string | null = null;
       try {
