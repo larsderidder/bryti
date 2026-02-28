@@ -258,7 +258,10 @@ export function createWorkerTools(
       });
 
       // Return immediately — worker is running in the background
-      const relativeResultPath = path.relative(config.data_dir, resultPath);
+      // Path relative to the file sandbox base (data/files/), not data_dir,
+      // so it's directly usable with file_read.
+      const filesBase = path.join(config.data_dir, "files");
+      const relativeResultPath = path.relative(filesBase, resultPath);
       return toolSuccess({
         worker_id: workerId,
         status: "running",
@@ -266,7 +269,7 @@ export function createWorkerTools(
         trigger_hint: `worker ${workerId} complete`,
         note:
           `Worker dispatched. Create a projection with trigger_on_fact: "worker ${workerId} complete" ` +
-          `to be notified when results are ready. Results will be at: ${relativeResultPath}`,
+          `to be notified when results are ready. Read results with file_read path: ${relativeResultPath}`,
       });
     },
   };
@@ -290,7 +293,8 @@ export function createWorkerTools(
         if (fs.existsSync(statusFile)) {
           try {
             const data = JSON.parse(fs.readFileSync(statusFile, "utf-8")) as WorkerStatusFile;
-            const relResult = path.relative(config.data_dir, data.result_path);
+            const filesBase = path.join(config.data_dir, "files");
+            const relResult = path.relative(filesBase, data.result_path);
             const elapsed = data.completed_at
               ? Math.round((new Date(data.completed_at).getTime() - new Date(data.started_at).getTime()) / 60000)
               : null;
@@ -300,7 +304,7 @@ export function createWorkerTools(
               elapsed_minutes: elapsed,
               result_path: relResult,
               error: data.error ?? undefined,
-              note: "Status read from disk (worker no longer in active registry).",
+              note: `Status read from disk. Read results with file_read path: ${relResult}`,
             });
           } catch {
             // Fall through to not-found
@@ -311,7 +315,8 @@ export function createWorkerTools(
 
       const elapsedMs = Date.now() - entry.startedAt.getTime();
       const elapsedMinutes = Math.round(elapsedMs / 60000);
-      const relativeResultPath = path.relative(config.data_dir, entry.resultPath);
+      const filesBase = path.join(config.data_dir, "files");
+      const relativeResultPath = path.relative(filesBase, entry.resultPath);
 
       return toolSuccess({
         worker_id: entry.workerId,
@@ -319,7 +324,7 @@ export function createWorkerTools(
         elapsed_minutes: elapsedMinutes,
         result_path: relativeResultPath,
         ...(entry.error ? { error: entry.error } : {}),
-        ...(entry.status === "complete" ? { note: `Results available at ${relativeResultPath}` } : {}),
+        ...(entry.status === "complete" ? { note: `Read results with file_read path: ${relativeResultPath}` } : {}),
       });
     },
   };
