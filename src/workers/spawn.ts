@@ -23,7 +23,7 @@ import { createFetchUrlTool } from "../tools/fetch-url.js";
 import { createWorkerScopedTools } from "./scoped-tools.js";
 import type { WorkerRegistry } from "./registry.js";
 import type { ProjectionStore } from "../projection/store.js";
-import { createModelInfra, resolveModel } from "../model-infra.js";
+import { createModelInfra, resolveModel, resolveFirstModel } from "../model-infra.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -160,17 +160,26 @@ export async function spawnWorkerSession(opts: {
   const modelsDir = path.join(config.data_dir, ".models");
   const resultPath = path.join(workerDir, "result.md");
 
-  // Resolve model. Workers default to the first fallback model (cheaper) rather
-  // than the primary model. The primary might be Opus/Sonnet via OAuth; we don't
-  // want workers burning those tokens on research tasks.
-  const workerDefault = config.tools.workers.model
-    ?? config.agent.fallback_models?.[0]
-    ?? config.agent.model;
-  const modelString = modelOverride ?? workerDefault;
-  const model = resolveModel(modelString, modelRegistry);
+  // Build the model candidate list for the fallback chain.
+  // Priority: explicit override > worker default > agent fallback chain > primary.
+  // Duplicates and nulls are removed so we don't retry the same model twice.
+  const rawCandidates = [
+    modelOverride,
+    config.tools.workers.model,
+    ...(config.agent.fallback_models ?? []),
+    config.agent.model,
+  ].filter((s): s is string => Boolean(s));
+  // Deduplicate while preserving order.
+  const candidateStrings = [...new Set(rawCandidates)];
+
+  const model = resolveFirstModel(candidateStrings, modelRegistry);
   if (!model) {
-    throw new Error(`Worker model not found: ${modelString}`);
+    throw new Error(
+      `Worker: no usable model found. Tried: ${candidateStrings.join(", ")}`,
+    );
   }
+  // modelString tracks which model string was actually used (updated on fallback).
+  let modelString = model.provider + "/" + model.id;
 
   // ---- Tool selection -------------------------------------------------------
   // Only the tools explicitly requested by the dispatcher are included. The
@@ -270,20 +279,64 @@ export async function spawnWorkerSession(opts: {
   // ---- Task execution and completion callback --------------------------------
   // session.prompt() runs the worker to completion. Everything below the await
   // is the completion callback — it runs once the model has stopped generating.
+  //
+  // Fallback chain: if the chosen model throws or returns stopReason="error",
+  // switch to the next candidate in order and retry with a fresh prompt. This
+  // mirrors the main agent's promptWithFallback() behaviour.
   const taskPrompt =
     `Please complete the task described in the system prompt. ` +
     `Write your findings to result.md when done.`;
 
   try {
-    await session.prompt(taskPrompt);
+    let promptError: unknown = null;
 
-    // Check for model errors
-    const lastAssistant = session.messages
-      .filter((m) => m.role === "assistant")
-      .pop() as Record<string, unknown> | undefined;
+    for (let i = 0; i < candidateStrings.length; i++) {
+      // On retry: switch the session to the next candidate model.
+      if (i > 0) {
+        const nextModel = resolveModel(candidateStrings[i], modelRegistry);
+        if (!nextModel) {
+          console.warn(`[worker] ${workerId} fallback model not found: ${candidateStrings[i]}, skipping`);
+          continue;
+        }
+        console.warn(
+          `[worker] ${workerId} switching to fallback model ${candidateStrings[i]} ` +
+          `(previous error: ${(promptError as Error | null)?.message ?? "model error"})`,
+        );
+        await session.setModel(nextModel);
+        modelString = nextModel.provider + "/" + nextModel.id;
+      }
 
-    if (lastAssistant?.stopReason === "error") {
-      throw new Error(String(lastAssistant.errorMessage ?? "Model error"));
+      promptError = null;
+      try {
+        await session.prompt(taskPrompt);
+      } catch (err) {
+        promptError = err;
+      }
+
+      // Check for model-level errors (stopReason="error") even when no exception
+      // was thrown — the SDK can return an error response without throwing.
+      if (!promptError) {
+        const lastAssistant = session.messages
+          .filter((m) => m.role === "assistant")
+          .pop() as Record<string, unknown> | undefined;
+        if (lastAssistant?.stopReason === "error") {
+          promptError = new Error(String(lastAssistant.errorMessage ?? "Model error"));
+        }
+      }
+
+      if (!promptError) {
+        // Success — stop trying further candidates.
+        if (i > 0) {
+          console.log(`[worker] ${workerId} succeeded with fallback model ${modelString}`);
+        }
+        break;
+      }
+
+      // Last candidate also failed: re-throw after the loop.
+    }
+
+    if (promptError) {
+      throw promptError;
     }
 
     // Success path
