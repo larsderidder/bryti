@@ -31,8 +31,17 @@ try {
 
 import fs from "node:fs";
 import path from "node:path";
-import type { Cron } from "croner";
 import { loadConfig, ensureDataDirs, applyIntegrationEnvVars, type Config } from "./config.js";
+import {
+  RESTART_EXIT_CODE,
+  writeRestartMarker,
+  readAndClearRestartMarker,
+  snapshotConfig,
+  loadConfigWithRollback,
+  type RestartMarker,
+  type RestartMarkerResult,
+} from "./restart.js";
+import { runWithSupervisor, type RunningApp } from "./supervisor.js";
 import { createCoreMemory, type CoreMemory } from "./memory/core-memory.js";
 import { createHistoryManager, type HistoryManager } from "./history.js";
 import { warmupEmbeddings, disposeEmbeddings } from "./memory/embeddings.js";
@@ -72,125 +81,8 @@ import { createRequire } from "node:module";
 const _require = createRequire(import.meta.url);
 const { version: BRYTI_VERSION } = _require("../package.json") as { version: string };
 
-// ---------------------------------------------------------------------------
-// Restart protocol
-//
-// Exit code 42 tells run.sh this was intentional, so it loops immediately
-// without delay. A marker file records who triggered the restart and which
-// channel they're on, so the "Back online" message goes to the right place.
-// ---------------------------------------------------------------------------
-
-/**
- * Exit code that signals an intentional restart to the run.sh supervisor loop.
- * The loop checks for this code and restarts immediately without delay.
- */
-export const RESTART_EXIT_CODE = 42;
-
-interface RestartMarker {
-  userId: string;
-  channelId: string;
-  platform: string;
-  reason: string;
-}
-
-function restartMarkerPath(dataDir: string): string {
-  return path.join(dataDir, "pending", "restart.json");
-}
-
-function writeRestartMarker(dataDir: string, marker: RestartMarker): void {
-  fs.mkdirSync(path.join(dataDir, "pending"), { recursive: true });
-  fs.writeFileSync(restartMarkerPath(dataDir), JSON.stringify(marker), "utf8");
-}
-
-interface RestartMarkerResult {
-  marker: RestartMarker;
-  /** True if config.yml was corrupted and auto-rolled back to the pre-restart snapshot. */
-  configRolledBack: boolean;
-  /** The parse/validation error message if a rollback occurred. */
-  rollbackReason?: string;
-}
-
-function readAndClearRestartMarker(dataDir: string): RestartMarkerResult | null {
-  const p = restartMarkerPath(dataDir);
-  if (!fs.existsSync(p)) return null;
-  try {
-    const marker = JSON.parse(fs.readFileSync(p, "utf8")) as RestartMarker;
-    fs.rmSync(p, { force: true });
-    return { marker, configRolledBack: false };
-  } catch {
-    fs.rmSync(p, { force: true });
-    return null;
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Config snapshot / rollback
-//
-// Before restarting with a potentially-modified config.yml, we snapshot the
-// current (known-good) file. On the next startup, if loadConfig() fails, we
-// restore the snapshot and retry so the process comes back up even after a
-// bad config edit. On successful startup the snapshot is deleted.
-// ---------------------------------------------------------------------------
-
-function configSnapshotPath(dataDir: string): string {
-  return path.join(dataDir, "pending", "config.yml.pre-restart");
-}
-
-/**
- * Snapshot the current config.yml before triggering a restart.
- * Called only when config.yml exists (successful boot confirms it was valid).
- */
-function snapshotConfig(dataDir: string): void {
-  const dataDir_ = path.resolve(process.env.BRYTI_DATA_DIR || "./data");
-  // Use the resolved data dir from env, not the one stored in config (same value, but safer).
-  const src = path.join(dataDir_, "config.yml");
-  const dst = configSnapshotPath(dataDir_);
-  if (fs.existsSync(src)) {
-    fs.mkdirSync(path.dirname(dst), { recursive: true });
-    fs.copyFileSync(src, dst);
-    console.log("[config] Snapshotted config.yml for rollback if restart fails.");
-  }
-}
-
-/**
- * On startup: if loadConfig() throws and a snapshot exists, restore it and
- * return the error that triggered the rollback. Otherwise rethrow.
- *
- * Returns the loaded config (from snapshot or original).
- * Throws only if loadConfig() fails AND no snapshot is available.
- */
-function loadConfigWithRollback(): { config: ReturnType<typeof loadConfig>; rolledBack: boolean; rollbackReason?: string } {
-  const dataDir = path.resolve(process.env.BRYTI_DATA_DIR || "./data");
-  try {
-    const config = loadConfig();
-    // Success: delete any leftover snapshot (previous good restart).
-    const snap = configSnapshotPath(dataDir);
-    if (fs.existsSync(snap)) {
-      fs.rmSync(snap, { force: true });
-      console.log("[config] Deleted config snapshot (current config loaded successfully).");
-    }
-    return { config, rolledBack: false };
-  } catch (err) {
-    const snap = configSnapshotPath(dataDir);
-    if (!fs.existsSync(snap)) {
-      // No snapshot to fall back on — propagate the error.
-      throw err;
-    }
-
-    const reason = (err as Error).message;
-    console.warn(`[config] loadConfig() failed: ${reason}`);
-    console.warn("[config] Restoring config.yml from pre-restart snapshot...");
-
-    const cfgPath = path.join(dataDir, "config.yml");
-    fs.copyFileSync(snap, cfgPath);
-    fs.rmSync(snap, { force: true });
-
-    // Retry with the restored config — if this also fails, propagate.
-    const config = loadConfig();
-    console.warn("[config] Rollback successful. Running on previous config.");
-    return { config, rolledBack: true, rollbackReason: reason };
-  }
-}
+// RESTART_EXIT_CODE, writeRestartMarker, readAndClearRestartMarker,
+// snapshotConfig, and loadConfigWithRollback are imported from ./restart.ts
 
 /**
  * Application state.
@@ -251,9 +143,7 @@ interface AssistantMessageLike {
   };
 }
 
-interface RunningApp {
-  stop(): Promise<void>;
-}
+// RunningApp is imported from ./supervisor.ts
 
 function toAssistantMessage(message: unknown): AssistantMessageLike | undefined {
   if (!message || typeof message !== "object") {
@@ -905,118 +795,12 @@ async function startApp(onRequestRestart?: () => void): Promise<RunningApp> {
   };
 }
 
-function asError(reason: unknown): Error {
-  if (reason instanceof Error) {
-    return reason;
-  }
-  return new Error(String(reason));
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/**
- * Top-level supervisor loop. Starts the app, catches fatal errors, and
- * restarts automatically after a delay.
- *
- * State machine: the `resolver` is a promise resolve function that is set
- * when we're waiting for either a SIGINT/SIGTERM (shutdown) or an uncaught
- * exception (restart). When one fires, it resolves the promise with the
- * appropriate outcome string, the app is stopped, and the loop continues
- * or breaks accordingly. The indirection via `resolver` lets signal handlers
- * and error handlers share a single control path.
- */
-async function runWithSupervisor(): Promise<void> {
-  const restartDelayMs = Number(process.env.BRYTI_RESTART_DELAY_MS ?? 2000);
-  let shutdownRequested = false;
-  let resolver: ((outcome: "shutdown" | "restart") => void) | null = null;
-
-  const resolveOutcome = (outcome: "shutdown" | "restart"): void => {
-    if (!resolver) {
-      return;
-    }
-    const current = resolver;
-    resolver = null;
-    current(outcome);
-  };
-
-  const onSignal = (): void => {
-    shutdownRequested = true;
-    resolveOutcome("shutdown");
-  };
-
-  process.once("SIGINT", onSignal);
-  process.once("SIGTERM", onSignal);
-
-  while (!shutdownRequested) {
-    let app: RunningApp | undefined;
-    let fatalError: Error | undefined;
-    try {
-      app = await startApp(() => resolveOutcome("restart"));
-    } catch (error) {
-      fatalError = asError(error);
-    }
-
-    if (!app) {
-      console.error("Fatal startup error:", fatalError);
-      // Don't retry on config errors (missing file, bad YAML, validation).
-      // These won't fix themselves between restarts.
-      if ((fatalError as any)?.code === "CONFIG_NOT_FOUND" || shutdownRequested) {
-        break;
-      }
-      console.log(`Restarting in ${restartDelayMs}ms...`);
-      await sleep(restartDelayMs);
-      continue;
-    }
-
-    const onUncaughtException = (error: Error): void => {
-      fatalError = error;
-      resolveOutcome("restart");
-    };
-    const onUnhandledRejection = (reason: unknown): void => {
-      fatalError = asError(reason);
-      resolveOutcome("restart");
-    };
-
-    process.once("uncaughtException", onUncaughtException);
-    process.once("unhandledRejection", onUnhandledRejection);
-
-    const outcome = await new Promise<"shutdown" | "restart">((resolve) => {
-      if (shutdownRequested) {
-        resolve("shutdown");
-        return;
-      }
-      resolver = resolve;
-    });
-
-    process.removeListener("uncaughtException", onUncaughtException);
-    process.removeListener("unhandledRejection", onUnhandledRejection);
-
-    await app.stop();
-
-    if (outcome === "shutdown") {
-      break;
-    }
-
-    console.error("Fatal runtime error:", fatalError);
-    if (shutdownRequested) {
-      break;
-    }
-    console.log(`Restarting in ${restartDelayMs}ms...`);
-    await sleep(restartDelayMs);
-  }
-
-  process.removeListener("SIGINT", onSignal);
-  process.removeListener("SIGTERM", onSignal);
-}
-
 /**
  * Start the bryti server. Called from the CLI dispatcher or directly
  * when index.ts is the entry point.
  */
 export async function startServer(): Promise<void> {
-  await runWithSupervisor();
+  await runWithSupervisor(startApp);
 }
 
 // When run directly (not imported by cli.ts), start immediately.
