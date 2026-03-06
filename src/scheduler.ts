@@ -272,6 +272,17 @@ export function createScheduler(
    * Reflection cron: every 30 minutes, scan recent conversation for future
    * references the agent missed. Writes projections directly to SQLite
    * without touching the agent loop. Skips when there are no new messages.
+   *
+   * Backoff: consecutive LLM failures (provider outage) cause exponential
+   * backoff capped at 8 hours. This avoids log noise and pointless API calls
+   * during outages. The backoff resets on the next successful run.
+   *
+   *   failures  backoff before next attempt
+   *   1         30 min  (normal interval, no extra wait)
+   *   2         1 h
+   *   3         2 h
+   *   4         4 h
+   *   5+        8 h
    */
   function startReflectionJob(): void {
     const primaryUserId = String(config.telegram.allowed_users[0] ?? "");
@@ -279,11 +290,31 @@ export function createScheduler(
       return;
     }
 
+    const BASE_INTERVAL_MS = 30 * 60 * 1000;
+    const MAX_BACKOFF_MS = 8 * 60 * 60 * 1000;
+
+    let consecutiveFailures = 0;
+    let backoffUntil = 0;
+
     const job = new Cron(
       "*/30 * * * *",
       async () => {
+        // During a backoff window, skip silently — the cron still fires every
+        // 30 min so recovery is detected promptly once the window expires.
+        if (Date.now() < backoffUntil) {
+          return;
+        }
+
         try {
           const result = await runReflection(config, primaryUserId, 30);
+
+          // Success: clear backoff state.
+          if (consecutiveFailures > 0) {
+            console.log(`[reflection] Recovered after ${consecutiveFailures} consecutive failure(s)`);
+            consecutiveFailures = 0;
+            backoffUntil = 0;
+          }
+
           if (result.skipped) {
             // Only log at debug level — this fires often and is usually a no-op
             return;
@@ -296,7 +327,18 @@ export function createScheduler(
             console.log("[reflection] No new projections found in recent conversation");
           }
         } catch (err) {
-          console.error("[reflection] Unhandled error:", (err as Error).message);
+          consecutiveFailures += 1;
+          // Exponential backoff: 30m * 2^(failures-1), capped at 8h.
+          const delayMs = Math.min(
+            BASE_INTERVAL_MS * Math.pow(2, consecutiveFailures - 1),
+            MAX_BACKOFF_MS,
+          );
+          backoffUntil = Date.now() + delayMs;
+          const delayMin = Math.round(delayMs / 60_000);
+          console.error(
+            `[reflection] Failure #${consecutiveFailures}: ${(err as Error).message}. ` +
+            `Backing off for ${delayMin} min (until ${new Date(backoffUntil).toISOString()})`,
+          );
         }
       },
       { timezone: "UTC" },
