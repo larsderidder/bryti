@@ -28,7 +28,7 @@ import {
 import type { Config } from "./config.js";
 import type { CoreMemory } from "./memory/core-memory.js";
 import { repairToolUseResultPairing } from "./compaction/transcript-repair.js";
-import { createProjectionStore, formatProjectionsForPrompt } from "./projection/index.js";
+import { createProjectionStore, formatProjectionsForPrompt, type ProjectionStore } from "./projection/index.js";
 import { registerToolCapabilities, getToolCapabilities } from "./trust/index.js";
 import { createModelInfra, resolveModel } from "./model-infra.js";
 import { buildSystemPrompt, buildToolSection, SILENT_REPLY_TOKEN, type ToolSummary } from "./system-prompt.js";
@@ -54,6 +54,11 @@ export interface UserSession {
   extensionErrors: Array<{ path: string; error: string }>;
   /** Called after auto-compaction completes successfully. Set by index.ts. */
   onCompactionComplete?: () => void;
+  /**
+   * The single ProjectionStore for this user. Shared with the tool set so
+   * there is exactly one DB connection per user. Closed by dispose().
+   */
+  projectionStore: ProjectionStore;
   /** Clean up event listeners. Does NOT delete the session file. */
   dispose(): void;
 }
@@ -142,6 +147,7 @@ export async function loadUserSession(
   coreMemory: CoreMemory,
   userId: string,
   customTools: AgentTool[],
+  existingProjectionStore?: ProjectionStore,
 ): Promise<UserSession> {
   const { authStorage, modelRegistry, agentDir } = createModelInfra(config);
 
@@ -176,8 +182,10 @@ export async function loadUserSession(
   // Bryti has its own skills directory in the data dir, separate from the global
   // pi CLI skills. Skills are curated for bryti independently of the CLI.
 
-  // Projection store for this user. Opened once per session, closed on dispose.
-  const projectionStore = createProjectionStore(userId, config.data_dir);
+  // Projection store for this user. Reuse the caller-supplied store when
+  // available so there is exactly one DB connection per user. Create a new
+  // one only as a fallback (tests, standalone use).
+  const projectionStore = existingProjectionStore ?? createProjectionStore(userId, config.data_dir);
 
   const brytiSkillsDir = path.join(config.data_dir, "skills");
   const additionalSkillPaths = fs.existsSync(brytiSkillsDir) ? [brytiSkillsDir] : [];
@@ -338,10 +346,14 @@ export async function loadUserSession(
       path: e.path,
       error: String(e.error),
     })),
+    projectionStore,
     dispose() {
       unsubscribe();
       session.dispose();
-      projectionStore.close();
+      // Close only if we own the store (it was not passed in by the caller).
+      if (!existingProjectionStore) {
+        projectionStore.close();
+      }
     },
   };
   userSessionRef = userSession;

@@ -38,6 +38,7 @@ import { createHistoryManager, type HistoryManager } from "./history.js";
 import { warmupEmbeddings, disposeEmbeddings } from "./memory/embeddings.js";
 import { createTools } from "./tools/index.js";
 import { loadUserSession, repairSessionTranscript, refreshSystemPrompt, promptWithFallback, SILENT_REPLY_TOKEN, type UserSession } from "./agent.js";
+import { createProjectionStore } from "./projection/index.js";
 import { TelegramBridge } from "./channels/telegram.js";
 import { WhatsAppBridge } from "./channels/whatsapp.js";
 import { createScheduler, type Scheduler } from "./scheduler.js";
@@ -310,6 +311,11 @@ async function getOrLoadSession(state: AppState, msg: IncomingMessage): Promise<
     return existing;
   }
 
+  // Create a single ProjectionStore for this user, shared between the tool set
+  // and the agent session. This avoids two concurrent DB connections to the same
+  // SQLite file and makes ownership explicit.
+  const projectionStore = createProjectionStore(userId, state.config.data_dir);
+
   const tools = createTools(state.config, state.coreMemory, userId, (triggered) => {
     // Worker completion triggered projections. Inject an immediate message
     // so the agent reads the results and notifies the user without waiting
@@ -338,7 +344,7 @@ async function getOrLoadSession(state: AppState, msg: IncomingMessage): Promise<
   }, async (reason: string) => {
     // Agent-triggered restart. Signals supervisor to restart the app.
     await triggerRestart(state, { userId, channelId, platform, text: "", raw: null }, reason);
-  });
+  }, projectionStore);
 
   // Wrap tools with trust checks + LLM guardrail
   const trustContext: TrustWrapperContext = {
@@ -355,7 +361,7 @@ async function getOrLoadSession(state: AppState, msg: IncomingMessage): Promise<
 
   let userSession: UserSession;
   try {
-    userSession = await loadUserSession(state.config, state.coreMemory, userId, wrappedTools);
+    userSession = await loadUserSession(state.config, state.coreMemory, userId, wrappedTools, projectionStore);
   } catch (err) {
     console.error(`[session] Failed to load session for user ${userId}, attempting recovery:`, err);
     const corruptDir = path.join(
@@ -372,7 +378,7 @@ async function getOrLoadSession(state: AppState, msg: IncomingMessage): Promise<
       }
     }
     // Retry with a clean slate — loadUserSession will create a fresh session directory
-    userSession = await loadUserSession(state.config, state.coreMemory, userId, wrappedTools);
+    userSession = await loadUserSession(state.config, state.coreMemory, userId, wrappedTools, projectionStore);
     state.recoveredSessions.add(userId);
   }
 
@@ -389,6 +395,13 @@ async function getOrLoadSession(state: AppState, msg: IncomingMessage): Promise<
       raw: { type: "compaction_resume" },
     };
     state.enqueue?.(msg);
+  };
+
+  // Wrap dispose so index.ts closes the store it owns.
+  const originalDispose = userSession.dispose.bind(userSession);
+  userSession.dispose = () => {
+    originalDispose();
+    projectionStore.close();
   };
 
   state.sessions.set(userId, userSession);

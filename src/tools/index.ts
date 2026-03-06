@@ -11,7 +11,7 @@ import { createSkillInstallTool } from "./skill-install.js";
 import { createCoreMemoryTools } from "./core-memory-tool.js";
 import { createArchivalMemoryTools } from "./archival-memory-tool.js";
 import { createConversationSearchTool } from "./conversation-search-tool.js";
-import { createProjectionTools, createProjectionStore } from "../projection/index.js";
+import { createProjectionTools, createProjectionStore, type ProjectionStore } from "../projection/index.js";
 import { createWorkerTools, createWorkerRegistry } from "../workers/index.js";
 import { toolSuccess } from "./result.js";
 import { embed } from "../memory/embeddings.js";
@@ -33,6 +33,10 @@ const restartSchema = Type.Object({
 
 /**
  * Create all bryti tools based on configuration.
+ *
+ * Pass an existing `projectionStore` to share the single store instance
+ * created by the agent session. If omitted a new store is created here
+ * (backward-compatible, but creates a second connection to the same DB).
  */
 export function createTools(
   config: Config,
@@ -40,6 +44,7 @@ export function createTools(
   userId: string,
   onWorkerTrigger?: WorkerTriggerCallback,
   onRestart?: RestartCallback,
+  projectionStore?: ProjectionStore,
 ): BrytiTool[] {
   const tools: BrytiTool[] = [];
 
@@ -72,23 +77,18 @@ export function createTools(
   // Projection memory: forward-looking events and commitments.
   // Created before archival tools so we can pass it in for trigger checking.
   //
-  // NOTE: this is a second ProjectionStore instance for the same user — agent.ts
-  // creates one too when assembling the system prompt. Both instances point at
-  // the same SQLite file, which is safe because the DB is opened in WAL mode
-  // (concurrent readers, serialised writers). They do not share in-memory state,
-  // so neither instance caches stale rows across the other's writes.
-  //
-  // TODO: consolidate into a single store per user (pass it in from agent.ts)
-  // to make the ownership model explicit and remove the WAL dependency.
-  const projectionStore = createProjectionStore(userId, config.data_dir);
-  tools.push(...createProjectionTools(projectionStore, config.agent.timezone));
+  // Use the store passed in by the caller (shared with agent.ts) so there is
+  // exactly one ProjectionStore per user. Fall back to creating a new one only
+  // if no store was provided (e.g. in tests or standalone tool use).
+  const resolvedProjectionStore = projectionStore ?? createProjectionStore(userId, config.data_dir);
+  tools.push(...createProjectionTools(resolvedProjectionStore, config.agent.timezone));
 
   // Archival memory: always available, uses local embeddings (no API key needed).
   // Receives the projection store so archival inserts can activate trigger-based projections.
   const modelsDir = path.join(config.data_dir, ".models");
   const archivalStore = createMemoryStore(userId, config.data_dir);
   tools.push(
-    ...createArchivalMemoryTools(archivalStore, (text) => embed(text, modelsDir), projectionStore),
+    ...createArchivalMemoryTools(archivalStore, (text) => embed(text, modelsDir), resolvedProjectionStore),
   );
 
   tools.push(createConversationSearchTool(path.join(config.data_dir, "history")));
@@ -109,7 +109,7 @@ export function createTools(
   // immediately (instead of waiting for the 5-minute scheduler tick).
   const workerRegistry = createWorkerRegistry();
   tools.push(...createWorkerTools(
-    config, archivalStore, workerRegistry, false, projectionStore, onWorkerTrigger,
+    config, archivalStore, workerRegistry, false, resolvedProjectionStore, onWorkerTrigger,
   ));
 
   // Restart tool: agent can trigger a clean process restart.
