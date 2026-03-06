@@ -39,6 +39,7 @@ import { warmupEmbeddings, disposeEmbeddings } from "./memory/embeddings.js";
 import { createTools } from "./tools/index.js";
 import { loadUserSession, repairSessionTranscript, refreshSystemPrompt, promptWithFallback, SILENT_REPLY_TOKEN, type UserSession } from "./agent.js";
 import { createProjectionStore } from "./projection/index.js";
+import { createModelInfra } from "./model-infra.js";
 import { TelegramBridge } from "./channels/telegram.js";
 import { WhatsAppBridge } from "./channels/whatsapp.js";
 import { createScheduler, type Scheduler } from "./scheduler.js";
@@ -311,6 +312,11 @@ async function getOrLoadSession(state: AppState, msg: IncomingMessage): Promise<
     return existing;
   }
 
+  // Create shared infrastructure once. Both the guardrail and the agent session
+  // need a ModelRegistry; creating two from the same config is redundant and
+  // reads/writes the same models.json file twice.
+  const modelInfra = createModelInfra(state.config);
+
   // Create a single ProjectionStore for this user, shared between the tool set
   // and the agent session. This avoids two concurrent DB connections to the same
   // SQLite file and makes ownership explicit.
@@ -349,6 +355,7 @@ async function getOrLoadSession(state: AppState, msg: IncomingMessage): Promise<
   // Wrap tools with trust checks + LLM guardrail
   const trustContext: TrustWrapperContext = {
     config: state.config,
+    modelInfra,
     getLastUserMessage: () => state.lastUserMessages.get(userId),
     onApprovalNeeded: async (prompt, approvalKey) => {
       const bridge = getBridge(state, platform);

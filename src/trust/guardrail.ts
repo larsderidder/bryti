@@ -119,18 +119,6 @@ function parseVerdict(response: string): GuardrailResult {
 }
 
 // ---------------------------------------------------------------------------
-// Model resolution
-// ---------------------------------------------------------------------------
-
-let cachedInfra: ModelInfra | null = null;
-
-function getModelInfra(config: Config): ModelInfra {
-  if (cachedInfra) return cachedInfra;
-  cachedInfra = createModelInfra(config);
-  return cachedInfra;
-}
-
-// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -152,12 +140,17 @@ function getModelInfra(config: Config): ModelInfra {
  * The classification task (~300 tokens in, ~20 out) is trivially simple, so
  * a smaller/cheaper model (Haiku, GPT-4o-mini) is a good fit and reduces
  * cost on every elevated tool call.
+ *
+ * Pass an already-initialised `infra` to avoid creating a second ModelRegistry
+ * for the same config. When omitted a new infra is created from config (useful
+ * in tests and standalone callers).
  */
 export async function evaluateToolCall(
   config: Config,
   input: GuardrailInput,
+  infra?: ModelInfra,
 ): Promise<GuardrailResult> {
-  const { modelRegistry } = getModelInfra(config);
+  const { modelRegistry } = infra ?? createModelInfra(config);
 
   // Resolution order: guardrail_model > primary > fallback chain.
   const candidates = [

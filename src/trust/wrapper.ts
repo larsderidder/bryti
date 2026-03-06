@@ -17,6 +17,7 @@ import {
 import { evaluateToolCall, type GuardrailResult } from "./guardrail.js";
 import type { Config } from "../config.js";
 import type { ApprovalResult } from "../channels/types.js";
+import type { ModelInfra } from "../model-infra.js";
 
 /**
  * Callback for interactive approval requests. Sends a prompt to the user
@@ -33,6 +34,12 @@ export interface TrustWrapperContext {
   getLastUserMessage: () => string | undefined;
   /** If provided, approval requests use this instead of text-based blocking. */
   onApprovalNeeded?: ApprovalCallback;
+  /**
+   * Pre-initialised model infrastructure to pass to the guardrail. When
+   * provided the guardrail reuses the existing ModelRegistry instead of
+   * creating a second one. Omit only in tests or standalone callers.
+   */
+  modelInfra?: ModelInfra;
 }
 
 function escapeHtml(text: string): string {
@@ -131,7 +138,7 @@ export function wrapToolWithTrustCheck<T extends AgentTool<any>>(
           args: argsStr,
           userMessage: context.getLastUserMessage?.(),
           toolDescription: tool.description,
-        });
+        }, context.modelInfra);
       } catch {
         // Guardrail failure: fail safe to ASK
         guardrailResult = { verdict: "ASK", reason: "Guardrail unavailable." };
