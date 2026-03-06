@@ -148,11 +148,10 @@ function getModelInfra(config: Config): ModelInfra {
  * fail open. An operator who wants fewer interruptions should tune the
  * GUARDRAIL_SYSTEM_PROMPT guidelines, not weaken the error path.
  *
- * TODO: the guardrail currently uses the same primary model as the main agent.
- * A smaller, faster model (Claude Haiku, GPT-4o-mini) would be more
- * appropriate here: the classification task is simple, latency matters, and
- * cost adds up on every elevated tool call. Consider adding a
- * `guardrail_model` config key analogous to `reflection_model`.
+ * Model resolution order: guardrail_model > primary model > fallback_models.
+ * The classification task (~300 tokens in, ~20 out) is trivially simple, so
+ * a smaller/cheaper model (Haiku, GPT-4o-mini) is a good fit and reduces
+ * cost on every elevated tool call.
  */
 export async function evaluateToolCall(
   config: Config,
@@ -160,12 +159,12 @@ export async function evaluateToolCall(
 ): Promise<GuardrailResult> {
   const { modelRegistry } = getModelInfra(config);
 
-  // Use the primary model for guardrail evaluation. This is a security boundary;
-  // reliability matters more than cost. The prompt is tiny (~300 tokens in, ~20 out).
+  // Resolution order: guardrail_model > primary > fallback chain.
   const candidates = [
+    config.agent.guardrail_model,
     config.agent.model,
     ...(config.agent.fallback_models ?? []),
-  ];
+  ].filter(Boolean) as string[];
 
   const model = resolveFirstModel(candidates, modelRegistry);
   if (!model) {

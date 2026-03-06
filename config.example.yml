@@ -62,6 +62,11 @@ agent:
   # Model for the background reflection pass (defaults to primary model)
   # reflection_model: "opencode/minimax-m2.5-free"
 
+  # Model for the LLM guardrail (defaults to primary model).
+  # The guardrail only classifies tool calls (ALLOW/ASK/BLOCK), so a small
+  # cheap model works well here — lower latency and lower cost per call.
+  # guardrail_model: "anthropic/claude-haiku-4-5"
+
 # ---------------------------------------------------------------------------
 # Channels (enable at least one)
 # ---------------------------------------------------------------------------

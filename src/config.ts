@@ -71,6 +71,11 @@ export interface Config {
      *  Use this to pick a cheaper model for background reflection without
      *  affecting the main agent. Format: "provider/model-id". */
     reflection_model?: string;
+    /** Model to use for the LLM guardrail. Defaults to the primary model.
+     *  The guardrail task (ALLOW/ASK/BLOCK classification) is simple and
+     *  latency-sensitive, so a smaller/cheaper model is a good fit.
+     *  Format: "provider/model-id". */
+    guardrail_model?: string;
   };
   telegram: {
     token: string;
