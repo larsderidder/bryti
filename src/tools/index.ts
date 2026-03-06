@@ -48,7 +48,7 @@ export function createTools(
 ): BrytiTool[] {
   const tools: BrytiTool[] = [];
 
-  // File tools (main agent can read/write in its sandbox)
+  // File tools: read is unsandboxed (any path), write/list are sandboxed to data/files/
   tools.push(...createFileTools(config.tools.files.base_dir));
 
   // Skill installation: fetch and install skills from URLs or local paths

@@ -10,7 +10,7 @@ Built-in tools + extension system.
 - Projections: projection_create, projection_resolve, projection_list, projection_link
 - Workers: worker_dispatch, worker_check, worker_interrupt, worker_steer
 - Pi sessions: pi_session_list, pi_session_read, pi_session_search, pi_session_inject
-- Files: file_read, file_write, file_list (only in workers, scoped to worker dir)
+- Files: file_read (unsandboxed, any path), file_write + file_list (sandboxed to data/files/)
 - Web: web_search, fetch_url (only in workers)
 - Skills: skill_install (agent writes skills to `data/skills/`)
 

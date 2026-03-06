@@ -1,6 +1,9 @@
 /**
- * Sandboxed file read/write/list tools. Operates within data/files/ with
- * path traversal protection (resolve and verify under base_dir).
+ * File tools.
+ *
+ * - file_read: reads any file on the filesystem (unsandboxed).
+ * - file_write: sandboxed to data/files/ with path traversal protection.
+ * - file_list: sandboxed to data/files/ with path traversal protection.
  */
 
 import fs from "node:fs";
@@ -13,14 +16,18 @@ import { toolError, toolSuccess } from "./result.js";
 const MAX_FILE_SIZE = 50 * 1024; // 50KB
 const MAX_DEPTH = 3;
 
-// Schema for read_file
+// Schema for read_file — accepts absolute or relative paths
 const readFileSchema = Type.Object({
-  path: Type.String({ description: "Relative path to the file (e.g., 'notes/todo.md')" }),
+  path: Type.String({
+    description:
+      "Path to read. Absolute paths read from the filesystem directly. " +
+      "Relative paths are resolved from the sandboxed files directory.",
+  }),
 });
 
 type ReadFileInput = Static<typeof readFileSchema>;
 
-// Schema for write_file
+// Schema for write_file — sandboxed
 const writeFileSchema = Type.Object({
   path: Type.String({ description: "Relative path to the file (e.g., 'notes/todo.md')" }),
   content: Type.String({ description: "Content to write to the file" }),
@@ -28,7 +35,7 @@ const writeFileSchema = Type.Object({
 
 type WriteFileInput = Static<typeof writeFileSchema>;
 
-// Schema for list_files
+// Schema for list_files — sandboxed
 const listFilesSchema = Type.Object({
   directory: Type.Optional(Type.String({ description: "Optional subdirectory to list (e.g., 'notes')" })),
 });
@@ -60,14 +67,18 @@ export function createFileTools(baseDir: string): AgentTool<any>[] {
   const readFileTool: AgentTool<typeof readFileSchema> = {
     name: "file_read",
     label: "file_read",
-    description: "Read the contents of a file from the sandboxed files directory.",
+    description:
+      "Read the contents of a file. Accepts absolute paths to read from anywhere " +
+      "on the filesystem, or relative paths which resolve from the sandboxed files directory.",
     parameters: readFileSchema,
     async execute(
       _toolCallId: string,
       { path: filePath }: ReadFileInput,
     ): Promise<AgentToolResult<unknown>> {
-      const resolved = resolveSafePath(baseDir, filePath);
-      if (!resolved) return toolError("Invalid path: path traversal not allowed");
+      // Absolute paths read directly; relative paths resolve from sandbox
+      const resolved = path.isAbsolute(filePath)
+        ? filePath
+        : path.resolve(baseDir, filePath);
 
       try {
         if (!fs.existsSync(resolved)) return toolError("File not found");

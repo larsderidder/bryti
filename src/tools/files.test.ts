@@ -37,13 +37,28 @@ describe("FileTools", () => {
       expect(text).toContain("not found");
     });
 
-    it("should reject path traversal", async () => {
-      const readFileTool = tools.find((t) => t.name === "file_read")!;
-      const result = await readFileTool.execute("call1", { path: "../package.json" }, undefined, undefined, undefined as any);
+    it("should read absolute paths outside sandbox", async () => {
+      // Write a file outside the sandbox
+      const outsideFile = path.join(tempDir, "..", "bryti-test-outside.txt");
+      fs.writeFileSync(outsideFile, "outside content", "utf-8");
 
-      expect(result.content[0]).toHaveProperty("text");
+      const readFileTool = tools.find((t) => t.name === "file_read")!;
+      const result = await readFileTool.execute("call1", { path: outsideFile }, undefined, undefined, undefined as any);
+
       const text = (result.content[0] as any).text;
-      expect(text).toContain("path traversal");
+      expect(text).toContain("outside content");
+
+      fs.rmSync(outsideFile, { force: true });
+    });
+
+    it("should resolve relative paths from sandbox base", async () => {
+      fs.writeFileSync(path.join(tempDir, "local.txt"), "sandbox file", "utf-8");
+
+      const readFileTool = tools.find((t) => t.name === "file_read")!;
+      const result = await readFileTool.execute("call1", { path: "local.txt" }, undefined, undefined, undefined as any);
+
+      const text = (result.content[0] as any).text;
+      expect(text).toContain("sandbox file");
     });
   });
 
