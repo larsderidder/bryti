@@ -1,10 +1,18 @@
 /**
  * Per-user memory store backed by SQLite with FTS5 for keyword search and
- * binary Float32Array blobs for embeddings. Vector search runs in-memory
- * via cosine similarity.
+ * binary Float32Array blobs for embeddings. Vector search uses the sqlite-vec
+ * extension (vec0 virtual table with cosine distance) when available, falling
+ * back to an in-memory full table scan for compatibility.
+ *
+ * Embedding dimensions: 2048 (embeddinggemma-300M-Q8_0 output size).
+ * vec0 uses cosine distance, matching the previous cosine similarity ranking.
+ * Distance 0 = identical; distance 2 = opposite. Results are re-expressed as
+ * similarity scores (1 - distance / 2) so callers see the same 0..1 range as
+ * before.
  */
 
 import Database from "better-sqlite3";
+import * as sqliteVec from "sqlite-vec";
 import { cosineSimilarity } from "../util/math.js";
 import fs from "node:fs";
 import path from "node:path";
@@ -29,19 +37,24 @@ export interface MemoryStore {
   /** Search using keyword (FTS5). */
   searchKeyword(query: string, limit: number): ScoredResult[];
 
-  /** Search using vector similarity (in-memory cosine similarity). */
+  /** Search using vector similarity. Uses the vec0 ANN index when available,
+   *  falls back to an in-memory cosine similarity scan otherwise. */
   searchVector(embedding: number[], limit: number): ScoredResult[];
 
   /** Close the database connection. */
   close(): void;
 }
 
-
+/**
+ * Embedding dimension produced by embeddinggemma-300M.
+ * Must match the vec0 table definition — change both together.
+ */
+const EMBEDDING_DIM = 2048;
 
 /**
  * Serialize an embedding vector to a raw binary buffer.
  * Stored as Float32Array bytes (4 bytes per dimension) rather than JSON,
- * which avoids the significant parse/stringify overhead for ~300-dim vectors
+ * which avoids the significant parse/stringify overhead for ~2048-dim vectors
  * and halves the storage footprint compared to text representation.
  */
 function serializeEmbedding(embedding: number[]): Buffer {
@@ -65,9 +78,14 @@ function deserializeEmbedding(buffer: Buffer): number[] {
  */
 export function createMemoryStore(userId: string, dataDir: string): MemoryStore {
   // Schema overview:
-  //   facts          — main table; one row per stored fact (id, content, source, timestamp, hash)
-  //   facts_fts      — FTS5 virtual table shadowing facts.content for BM25 keyword search
-  //   fact_embeddings — binary blob table keyed by the same id as facts
+  //   facts               — main table; one row per stored fact
+  //                         (id TEXT PK, content, source, timestamp, hash)
+  //   facts_fts           — FTS5 virtual table shadowing facts.content for
+  //                         BM25 keyword search
+  //   fact_embeddings     — binary blob table keyed by the same TEXT id as
+  //                         facts; used as fallback when sqlite-vec is absent
+  //   fact_embeddings_vec — vec0 virtual table for ANN (approximate nearest
+  //                         neighbour) search; keyed by facts.rowid (integer)
   //
   // Three triggers (facts_ai, facts_ad, facts_au) keep facts_fts in sync with
   // facts automatically on insert, delete, and update.
@@ -76,6 +94,16 @@ export function createMemoryStore(userId: string, dataDir: string): MemoryStore 
 
   const dbPath = path.join(userDir, "memory.db");
   const db = new Database(dbPath);
+
+  // Load the sqlite-vec extension. This is a no-op if the shared library is
+  // missing; we catch the error and fall back to the full-scan path.
+  let vecAvailable = false;
+  try {
+    sqliteVec.load(db);
+    vecAvailable = true;
+  } catch (err) {
+    console.warn("[memory] sqlite-vec not available, using full-scan vector search:", err);
+  }
 
   // Enable WAL mode for concurrent reads
   db.pragma("journal_mode = WAL");
@@ -112,13 +140,51 @@ export function createMemoryStore(userId: string, dataDir: string): MemoryStore 
       INSERT INTO facts_fts(rowid, content) VALUES (NEW.rowid, NEW.content);
     END;
 
-    -- Table to store embeddings (binary Float32Array)
+    -- Blob table to store embeddings (binary Float32Array).
+    -- Retained as the data source for backfill and as a fallback when
+    -- sqlite-vec is not available.
     CREATE TABLE IF NOT EXISTS fact_embeddings (
       id TEXT PRIMARY KEY,
       embedding BLOB NOT NULL,
       FOREIGN KEY (id) REFERENCES facts(id) ON DELETE CASCADE
     );
   `);
+
+  // Create the vec0 ANN index when sqlite-vec loaded successfully.
+  // Uses cosine distance to match the previous ranking behaviour.
+  // Keyed by facts.rowid (integer) so we can join back to facts without
+  // a separate id-to-rowid lookup table.
+  if (vecAvailable) {
+    db.exec(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS fact_embeddings_vec
+      USING vec0(embedding float[${EMBEDDING_DIM}] distance_metric=cosine);
+    `);
+
+    // One-time backfill: populate vec0 from any embeddings already stored in
+    // fact_embeddings that are not yet in the ANN index. This runs on every
+    // startup but is a no-op once all rows are indexed.
+    const unindexed = db.prepare(`
+      SELECT f.rowid AS rowid, fe.embedding
+      FROM fact_embeddings fe
+      JOIN facts f ON f.id = fe.id
+      WHERE NOT EXISTS (
+        SELECT 1 FROM fact_embeddings_vec v WHERE v.rowid = f.rowid
+      )
+    `).all() as Array<{ rowid: number; embedding: Buffer }>;
+
+    if (unindexed.length > 0) {
+      const insVec = db.prepare(
+        "INSERT INTO fact_embeddings_vec(rowid, embedding) VALUES (?, ?)",
+      );
+      const backfill = db.transaction(() => {
+        for (const row of unindexed) {
+          insVec.run(BigInt(row.rowid), row.embedding);
+        }
+      });
+      backfill();
+      console.log(`[memory] Backfilled ${unindexed.length} embedding(s) into vec0 index for user ${userId}`);
+    }
+  }
 
   // Prepared statements for efficiency
   const insertFact = db.prepare(`
@@ -130,6 +196,10 @@ export function createMemoryStore(userId: string, dataDir: string): MemoryStore 
     INSERT INTO fact_embeddings (id, embedding) VALUES (?, ?)
   `);
 
+  const insertEmbeddingVec = vecAvailable
+    ? db.prepare("INSERT INTO fact_embeddings_vec(rowid, embedding) VALUES (?, ?)")
+    : null;
+
   const deleteFact = db.prepare(`
     DELETE FROM facts WHERE id = ?
   `);
@@ -138,6 +208,16 @@ export function createMemoryStore(userId: string, dataDir: string): MemoryStore 
     DELETE FROM fact_embeddings WHERE id = ?
   `);
 
+  // Look up the integer rowid for a fact UUID. Used when deleting from vec0.
+  const selectRowid = db.prepare<[string], { rowid: number }>(
+    "SELECT rowid FROM facts WHERE id = ?",
+  );
+
+  const deleteEmbeddingVec = vecAvailable
+    ? db.prepare("DELETE FROM fact_embeddings_vec WHERE rowid = ?")
+    : null;
+
+  // Full-scan fallback: load all embeddings from fact_embeddings into memory.
   const selectEmbeddings = db.prepare(`
     SELECT f.id, f.content, f.source, f.timestamp, fe.embedding
     FROM facts f
@@ -153,26 +233,39 @@ export function createMemoryStore(userId: string, dataDir: string): MemoryStore 
      * @param embedding Pre-computed embedding vector for this content.
      *
      * The `hash` field is a truncated SHA-256 of the content. It is used to
-     * deduplicate facts during bulk imports, not as an integrity check — the
-     * store does not verify it on read.
+     * deduplicate facts during bulk imports, not as an integrity check.
      */
     addFact(content: string, source: string, embedding: number[] | null): string {
       const id = crypto.randomUUID();
       const timestamp = Date.now();
       const hash = crypto.createHash("sha256").update(content).digest("hex").slice(0, 16);
 
-      insertFact.run(id, content, source, timestamp, hash);
+      const info = insertFact.run(id, content, source, timestamp, hash);
 
       // Store embedding when available. Without it the fact is still
       // searchable via FTS5 keyword search; only vector similarity is lost.
       if (embedding !== null) {
-        insertEmbedding.run(id, serializeEmbedding(embedding));
+        const blob = serializeEmbedding(embedding);
+        // Always keep the blob copy in fact_embeddings (backfill source +
+        // fallback when sqlite-vec is absent).
+        insertEmbedding.run(id, blob);
+        // Also insert into the ANN index when the extension is loaded.
+        if (insertEmbeddingVec !== null) {
+          insertEmbeddingVec.run(BigInt(info.lastInsertRowid), blob);
+        }
       }
 
       return id;
     },
 
     removeFact(id: string): void {
+      // Look up the rowid before deleting the fact row (the row is gone after).
+      if (deleteEmbeddingVec !== null) {
+        const row = selectRowid.get(id);
+        if (row) {
+          deleteEmbeddingVec.run(BigInt(row.rowid));
+        }
+      }
       deleteEmbedding.run(id);
       deleteFact.run(id);
     },
@@ -227,15 +320,48 @@ export function createMemoryStore(userId: string, dataDir: string): MemoryStore 
     /**
      * Search facts by vector similarity.
      *
-     * This is a full table scan: all embeddings are loaded from SQLite into
-     * memory, cosine similarity is computed for each one, and the top `limit`
-     * results are returned. This is acceptable up to roughly 100K facts.
-     * Beyond that, an approximate nearest-neighbour index would be needed
-     * (hnswlib-node or the sqlite-vec extension are natural fits here).
+     * When sqlite-vec is available, uses the vec0 ANN index (cosine distance)
+     * for sub-linear lookup. The cosine distance score (0 = identical, 2 =
+     * opposite) is converted back to a 0..1 similarity score so callers see
+     * the same value range as the previous full-scan implementation.
      *
-     * TODO: add ANN index when fact count regularly exceeds ~100K per user.
+     * Falls back to a full table scan when sqlite-vec is not loaded. The scan
+     * loads all embeddings into memory and computes cosine similarity for each
+     * one. Acceptable up to roughly 100K facts; beyond that the ANN path is
+     * required for reasonable latency.
      */
     searchVector(embedding: number[], limit: number): ScoredResult[] {
+      const blob = serializeEmbedding(embedding);
+
+      if (vecAvailable) {
+        // ANN path: vec0 KNN query returns the nearest neighbours without a
+        // full scan. The join to facts retrieves content and metadata.
+        const rows = db.prepare(`
+          SELECT f.id, f.content, f.source, f.timestamp, v.distance
+          FROM fact_embeddings_vec v
+          JOIN facts f ON f.rowid = v.rowid
+          WHERE v.embedding MATCH ?
+            AND k = ?
+          ORDER BY v.distance
+        `).all(blob, limit) as Array<{
+          id: string;
+          content: string;
+          source: string;
+          timestamp: number;
+          distance: number;
+        }>;
+
+        return rows.map((row) => ({
+          id: row.id,
+          content: row.content,
+          source: row.source,
+          timestamp: row.timestamp,
+          // Convert cosine distance [0, 2] to similarity [1, -1], clamped to [0, 1].
+          score: Math.max(0, 1 - row.distance),
+        }));
+      }
+
+      // Fallback: full table scan with in-memory cosine similarity.
       const rows = selectEmbeddings.all() as Array<{
         id: string;
         content: string;
@@ -248,7 +374,6 @@ export function createMemoryStore(userId: string, dataDir: string): MemoryStore 
         return [];
       }
 
-      // Compute cosine similarity for each fact
       const scored = rows
         .map((row) => ({
           ...row,
@@ -271,5 +396,3 @@ export function createMemoryStore(userId: string, dataDir: string): MemoryStore 
     },
   };
 }
-
-
