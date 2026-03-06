@@ -68,6 +68,27 @@ export interface Scheduler {
 // ---------------------------------------------------------------------------
 
 /**
+ * Return all user IDs that are authorised to use the bot.
+ *
+ * Combines Telegram and WhatsApp allowed_users into a single deduplicated
+ * list of string IDs. This is the canonical source of "known users" for
+ * scheduler jobs — more reliable than scanning session directories (which
+ * only exist after first contact) and consistent with the auth layer.
+ */
+function getKnownUsers(config: Config): string[] {
+  const ids = new Set<string>();
+  for (const id of config.telegram.allowed_users) {
+    ids.add(String(id));
+  }
+  if (config.whatsapp.enabled) {
+    for (const id of config.whatsapp.allowed_users) {
+      ids.add(String(id));
+    }
+  }
+  return [...ids];
+}
+
+/**
  * Create the scheduler.
  *
  * @param config      App config (for config.yml cron jobs and the default channel).
@@ -120,7 +141,7 @@ export function createScheduler(
   }
 
   /**
-   * Two projection jobs for the primary user:
+   * Two projection jobs, running for every known user:
    *
    * - Daily review at 8am UTC: a broad "what's coming up?" pass. The agent
    *   receives all projections due in the next 7 days and decides what to
@@ -131,19 +152,16 @@ export function createScheduler(
    *   have a specific datetime (resolution='exact'). Only fires when something
    *   is actually due; skips silently outside active hours.
    *
-   * The daily review is intentionally broad and agent-mediated; the exact-time
-   * check is a direct trigger for a concrete commitment. Both are distinct from
-   * config-driven jobs, which fire unconditionally and carry operator-authored
-   * message text.
+   * Each user gets their own independent store, message, and onMessage call.
+   * Known users are derived from config (telegram.allowed_users +
+   * whatsapp.allowed_users) so new users are picked up on the next restart.
    */
   function startProjectionJobs(): void {
-    const primaryUserId = String(config.telegram.allowed_users[0] ?? "");
-    if (!primaryUserId || primaryUserId === "undefined") {
-      console.warn("[projections] No primary user configured (telegram.allowed_users is empty) — projection jobs not started");
+    const knownUsers = getKnownUsers(config);
+    if (knownUsers.length === 0) {
+      console.warn("[projections] No users configured — projection jobs not started");
       return;
     }
-
-    const channelId = defaultChannelId();
 
     // Daily review: 8am UTC every day
     const dailyJob = new Cron(
@@ -157,56 +175,59 @@ export function createScheduler(
           console.log("[projections] Daily review skipped (outside active hours)");
           return;
         }
-        console.log("[projections] Daily review triggered");
-        const store = createProjectionStore(primaryUserId, config.data_dir);
-        try {
-          const expired = store.autoExpire(24);
-          if (expired > 0) {
-            console.log(`[projections] Auto-expired ${expired} stale projection(s)`);
+        console.log(`[projections] Daily review triggered for ${knownUsers.length} user(s)`);
+
+        for (const userId of knownUsers) {
+          const store = createProjectionStore(userId, config.data_dir);
+          try {
+            const expired = store.autoExpire(24);
+            if (expired > 0) {
+              console.log(`[projections] user=${userId} auto-expired ${expired} stale projection(s)`);
+            }
+            const activated = store.evaluateDependencies();
+            if (activated > 0) {
+              console.log(`[projections] user=${userId} activated ${activated} projection(s) via dependencies`);
+            }
+            const upcoming = store.getUpcoming(7);
+            if (upcoming.length === 0) {
+              console.log(`[projections] user=${userId} daily review: no upcoming projections, skipping`);
+              continue;
+            }
+            const formatted = formatProjectionsForPrompt(upcoming, 20);
+            // raw.type marks this as a scheduler message so processMessage() can
+            // distinguish it from a real user message and skip crash checkpoints.
+            const msg: IncomingMessage = {
+              channelId: userId,
+              userId,
+              text:
+                `[Daily review]\n\nHere is what's coming up:\n\n${formatted}\n\n` +
+                `Review each item. For each projection, decide whether to surface it TODAY:\n` +
+                `1. Search your memory for related context (use memory_archival_search)\n` +
+                `2. If due today or overdue: compose a message or take action.\n` +
+                `3. If due later this week: surface only if today is the right day for it.\n` +
+                `4. If further out: only act if something needs attention now.\n` +
+                `5. If cancelled, resolved, or clearly passed: resolve it and move on.\n` +
+                `6. If nothing needs to happen: say nothing (NOOP is fine).\n\n` +
+                `Timing rules:\n` +
+                `- If a task has a hard deadline AND an unresolved blocker (waiting on someone, missing info), ` +
+                `surface it EARLY so the user can start unblocking. Don't wait for the blocker to resolve itself.\n` +
+                `- If today is a light day and a task is due this week, today is probably a good day to surface it. ` +
+                `Don't skip it just because other days look busy.\n` +
+                `- Only defer if today is genuinely a bad day (too busy, user is overwhelmed, or a later day is ` +
+                `clearly better for a specific reason).`,
+              platform: "telegram",
+              raw: { type: "projection_daily_review" },
+            };
+            await onMessage(msg);
+          } finally {
+            store.close();
           }
-          const activated = store.evaluateDependencies();
-          if (activated > 0) {
-            console.log(`[projections] Activated ${activated} projection(s) via dependencies`);
-          }
-          const upcoming = store.getUpcoming(7);
-          if (upcoming.length === 0) {
-            console.log("[projections] Daily review: no upcoming projections, skipping");
-            return;
-          }
-          const formatted = formatProjectionsForPrompt(upcoming, 20);
-          // raw.type marks this as a scheduler message so processMessage() can
-          // distinguish it from a real user message and skip crash checkpoints.
-          const msg: IncomingMessage = {
-            channelId,
-            userId: primaryUserId,
-            text:
-              `[Daily review]\n\nHere is what's coming up:\n\n${formatted}\n\n` +
-              `Review each item. For each projection, decide whether to surface it TODAY:\n` +
-              `1. Search your memory for related context (use memory_archival_search)\n` +
-              `2. If due today or overdue: compose a message or take action.\n` +
-              `3. If due later this week: surface only if today is the right day for it.\n` +
-              `4. If further out: only act if something needs attention now.\n` +
-              `5. If cancelled, resolved, or clearly passed: resolve it and move on.\n` +
-              `6. If nothing needs to happen: say nothing (NOOP is fine).\n\n` +
-              `Timing rules:\n` +
-              `- If a task has a hard deadline AND an unresolved blocker (waiting on someone, missing info), ` +
-              `surface it EARLY so the user can start unblocking. Don't wait for the blocker to resolve itself.\n` +
-              `- If today is a light day and a task is due this week, today is probably a good day to surface it. ` +
-              `Don't skip it just because other days look busy.\n` +
-              `- Only defer if today is genuinely a bad day (too busy, user is overwhelmed, or a later day is ` +
-              `clearly better for a specific reason).`,
-            platform: "telegram",
-            raw: { type: "projection_daily_review" },
-          };
-          await onMessage(msg);
-        } finally {
-          store.close();
         }
       },
       { timezone: "UTC" },
     );
     cronJobs.set("projection-daily", dailyJob);
-    console.log("[projections] Daily review scheduled at 08:00 UTC");
+    console.log(`[projections] Daily review scheduled at 08:00 UTC for ${knownUsers.length} user(s)`);
 
     // Exact-time check: every 5 minutes
     const exactJob = new Cron(
@@ -215,57 +236,60 @@ export function createScheduler(
         if (!isActiveNow(config.active_hours)) {
           return; // Silent skip - fires every 5 min, no need to log each one
         }
-        const store = createProjectionStore(primaryUserId, config.data_dir);
-        try {
-          store.evaluateDependencies();
-          const due = store.getExactDue(15);
-          if (due.length === 0) {
-            return;
-          }
-          console.log(`[projections] Exact-time check: ${due.length} item(s) due`);
-          const formatted = formatProjectionsForPrompt(due, 10);
 
-          // Settle each projection: rearm recurring ones, mark one-offs as passed.
-          const now = new Date();
-          for (const p of due) {
-            if (p.recurrence) {
-              const next = nextCronOccurrence(p.recurrence, now);
-              if (next) {
-                store.rearm(p.id, next);
-                console.log(`[projections] Rearmed recurring projection ${p.id} → next: ${next}`);
-              } else {
-                // Cron produced no future occurrence — treat as one-off.
-                store.resolve(p.id, "passed");
-                console.warn(`[projections] Recurring projection ${p.id} produced no next occurrence, marked passed`);
-              }
-            } else {
-              store.resolve(p.id, "passed");
+        for (const userId of knownUsers) {
+          const store = createProjectionStore(userId, config.data_dir);
+          try {
+            store.evaluateDependencies();
+            const due = store.getExactDue(15);
+            if (due.length === 0) {
+              continue;
             }
-          }
+            console.log(`[projections] user=${userId} exact-time check: ${due.length} item(s) due`);
+            const formatted = formatProjectionsForPrompt(due, 10);
 
-          // raw.type marks this as a scheduler message so processMessage() can
-          // distinguish it from a real user message and skip crash checkpoints.
-          const msg: IncomingMessage = {
-            channelId,
-            userId: primaryUserId,
-            text:
-              `[Scheduled reminder]\n\nThe following reminder(s) are due now:\n\n` +
-              `${formatted}\n\n` +
-              `For each item:\n` +
-              `1. Search your memory for related context (use memory_archival_search)\n` +
-              `2. Send the user a helpful, natural message — or reply NOOP if nothing needs to be said.`,
-            platform: "telegram",
-            raw: { type: "projection_exact_check" },
-          };
-          await onMessage(msg);
-        } finally {
-          store.close();
+            // Settle each projection: rearm recurring ones, mark one-offs as passed.
+            const now = new Date();
+            for (const p of due) {
+              if (p.recurrence) {
+                const next = nextCronOccurrence(p.recurrence, now);
+                if (next) {
+                  store.rearm(p.id, next);
+                  console.log(`[projections] Rearmed recurring projection ${p.id} → next: ${next}`);
+                } else {
+                  // Cron produced no future occurrence — treat as one-off.
+                  store.resolve(p.id, "passed");
+                  console.warn(`[projections] Recurring projection ${p.id} produced no next occurrence, marked passed`);
+                }
+              } else {
+                store.resolve(p.id, "passed");
+              }
+            }
+
+            // raw.type marks this as a scheduler message so processMessage() can
+            // distinguish it from a real user message and skip crash checkpoints.
+            const msg: IncomingMessage = {
+              channelId: userId,
+              userId,
+              text:
+                `[Scheduled reminder]\n\nThe following reminder(s) are due now:\n\n` +
+                `${formatted}\n\n` +
+                `For each item:\n` +
+                `1. Search your memory for related context (use memory_archival_search)\n` +
+                `2. Send the user a helpful, natural message — or reply NOOP if nothing needs to be said.`,
+              platform: "telegram",
+              raw: { type: "projection_exact_check" },
+            };
+            await onMessage(msg);
+          } finally {
+            store.close();
+          }
         }
       },
       { timezone: "UTC" },
     );
     cronJobs.set("projection-exact", exactJob);
-    console.log("[projections] Exact-time check scheduled every 5 minutes");
+    console.log(`[projections] Exact-time check scheduled every 5 minutes for ${knownUsers.length} user(s)`);
   }
 
   /**
@@ -285,66 +309,73 @@ export function createScheduler(
    *   5+        8 h
    */
   function startReflectionJob(): void {
-    const primaryUserId = String(config.telegram.allowed_users[0] ?? "");
-    if (!primaryUserId || primaryUserId === "undefined") {
+    const knownUsers = getKnownUsers(config);
+    if (knownUsers.length === 0) {
       return;
     }
 
     const BASE_INTERVAL_MS = 30 * 60 * 1000;
     const MAX_BACKOFF_MS = 8 * 60 * 60 * 1000;
 
-    let consecutiveFailures = 0;
-    let backoffUntil = 0;
+    // Per-user backoff state. Each user has their own failure count and backoff
+    // window so a flaky per-user history file doesn't stall every other user.
+    const failureCount = new Map<string, number>();
+    const backoffUntil = new Map<string, number>();
 
     const job = new Cron(
       "*/30 * * * *",
       async () => {
-        // During a backoff window, skip silently — the cron still fires every
-        // 30 min so recovery is detected promptly once the window expires.
-        if (Date.now() < backoffUntil) {
-          return;
-        }
-
-        try {
-          const result = await runReflection(config, primaryUserId, 30);
-
-          // Success: clear backoff state.
-          if (consecutiveFailures > 0) {
-            console.log(`[reflection] Recovered after ${consecutiveFailures} consecutive failure(s)`);
-            consecutiveFailures = 0;
-            backoffUntil = 0;
+        for (const userId of knownUsers) {
+          const until = backoffUntil.get(userId) ?? 0;
+          // During a backoff window, skip silently — the cron still fires every
+          // 30 min so recovery is detected promptly once the window expires.
+          if (Date.now() < until) {
+            continue;
           }
 
-          if (result.skipped) {
-            // Only log at debug level — this fires often and is usually a no-op
-            return;
-          }
-          if (result.projectionsAdded > 0) {
-            console.log(
-              `[reflection] Added ${result.projectionsAdded} projection(s) from recent conversation`,
+          try {
+            const result = await runReflection(config, userId, 30);
+
+            // Success: clear per-user backoff state.
+            const prevFailures = failureCount.get(userId) ?? 0;
+            if (prevFailures > 0) {
+              console.log(`[reflection] user=${userId} recovered after ${prevFailures} consecutive failure(s)`);
+              failureCount.set(userId, 0);
+              backoffUntil.set(userId, 0);
+            }
+
+            if (result.skipped) {
+              // Only log at debug level — this fires often and is usually a no-op
+              continue;
+            }
+            if (result.projectionsAdded > 0) {
+              console.log(
+                `[reflection] user=${userId} added ${result.projectionsAdded} projection(s) from recent conversation`,
+              );
+            } else {
+              console.log(`[reflection] user=${userId} no new projections found in recent conversation`);
+            }
+          } catch (err) {
+            const failures = (failureCount.get(userId) ?? 0) + 1;
+            failureCount.set(userId, failures);
+            // Exponential backoff: 30m * 2^(failures-1), capped at 8h.
+            const delayMs = Math.min(
+              BASE_INTERVAL_MS * Math.pow(2, failures - 1),
+              MAX_BACKOFF_MS,
             );
-          } else {
-            console.log("[reflection] No new projections found in recent conversation");
+            backoffUntil.set(userId, Date.now() + delayMs);
+            const delayMin = Math.round(delayMs / 60_000);
+            console.error(
+              `[reflection] user=${userId} failure #${failures}: ${(err as Error).message}. ` +
+              `Backing off for ${delayMin} min (until ${new Date(Date.now() + delayMs).toISOString()})`,
+            );
           }
-        } catch (err) {
-          consecutiveFailures += 1;
-          // Exponential backoff: 30m * 2^(failures-1), capped at 8h.
-          const delayMs = Math.min(
-            BASE_INTERVAL_MS * Math.pow(2, consecutiveFailures - 1),
-            MAX_BACKOFF_MS,
-          );
-          backoffUntil = Date.now() + delayMs;
-          const delayMin = Math.round(delayMs / 60_000);
-          console.error(
-            `[reflection] Failure #${consecutiveFailures}: ${(err as Error).message}. ` +
-            `Backing off for ${delayMin} min (until ${new Date(backoffUntil).toISOString()})`,
-          );
         }
       },
       { timezone: "UTC" },
     );
     cronJobs.set("projection-reflection", job);
-    console.log("[projections] Reflection pass scheduled every 30 minutes");
+    console.log(`[projections] Reflection pass scheduled every 30 minutes for ${knownUsers.length} user(s)`);
   }
 
   return {
