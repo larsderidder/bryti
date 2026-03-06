@@ -195,12 +195,8 @@ export class MessageQueue {
 
   /**
    * Merge multiple queue entries into a single IncomingMessage by joining
-   * their text with newlines. Metadata (userId, channelId, platform, etc.) is
-   * taken from the first entry.
-   *
-   * Note: images (and other non-text attachments) from subsequent burst
-   * entries are currently dropped — only their text is merged.
-   * TODO: carry images from all burst entries into the merged message.
+   * their text with newlines and concatenating image arrays from all entries.
+   * Metadata (userId, channelId, platform, etc.) is taken from the first entry.
    */
   private mergeEntries(entries: QueueEntry[]): IncomingMessage {
     if (entries.length === 1) {
@@ -208,9 +204,15 @@ export class MessageQueue {
     }
 
     const texts = entries.map((e) => e.msg.text).filter(Boolean);
+
+    // Collect images from every entry so a photo followed by a caption (or
+    // vice versa) within the merge window is not silently dropped.
+    const allImages = entries.flatMap((e) => e.msg.images ?? []);
+
     return {
       ...entries[0].msg,
       text: texts.join("\n"),
+      ...(allImages.length > 0 ? { images: allImages } : {}),
     };
   }
 
