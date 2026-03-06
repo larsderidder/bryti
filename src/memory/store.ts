@@ -119,6 +119,10 @@ export function createMemoryStore(userId: string, dataDir: string): MemoryStore 
       hash TEXT NOT NULL
     );
 
+    -- Unique index on hash so duplicate content is detected in O(log n).
+    -- Added after the table creation so existing DBs gain it automatically.
+    CREATE UNIQUE INDEX IF NOT EXISTS facts_hash_unique ON facts(hash);
+
     -- FTS5 virtual table for keyword search
     CREATE VIRTUAL TABLE IF NOT EXISTS facts_fts USING fts5(
       content,
@@ -187,6 +191,13 @@ export function createMemoryStore(userId: string, dataDir: string): MemoryStore 
   }
 
   // Prepared statements for efficiency
+
+  // Duplicate detection: look up an existing fact by content hash.
+  // Returns the existing id when the same content was already stored.
+  const selectByHash = db.prepare<[string], { id: string }>(
+    "SELECT id FROM facts WHERE hash = ?",
+  );
+
   const insertFact = db.prepare(`
     INSERT INTO facts (id, content, source, timestamp, hash)
     VALUES (?, ?, ?, ?, ?)
@@ -226,19 +237,29 @@ export function createMemoryStore(userId: string, dataDir: string): MemoryStore 
 
   return {
     /**
-     * Add a fact to the store and return its generated UUID.
+     * Add a fact to the store and return its ID.
      *
      * @param content  The fact text to store and index.
      * @param source   Provenance label (e.g. "reflection", "user").
      * @param embedding Pre-computed embedding vector for this content.
      *
-     * The `hash` field is a truncated SHA-256 of the content. It is used to
-     * deduplicate facts during bulk imports, not as an integrity check.
+     * Deduplication: a truncated SHA-256 of the content is checked against
+     * the `facts_hash_unique` index before inserting. Exact-duplicate content
+     * (same bytes) returns the existing fact's ID immediately without writing
+     * anything. The 16-hex-char (64-bit) hash has negligible collision
+     * probability at the fact counts this store will realistically handle.
      */
     addFact(content: string, source: string, embedding: number[] | null): string {
+      const hash = crypto.createHash("sha256").update(content).digest("hex").slice(0, 16);
+
+      // Fast path: content already stored — return existing ID.
+      const existing = selectByHash.get(hash);
+      if (existing) {
+        return existing.id;
+      }
+
       const id = crypto.randomUUID();
       const timestamp = Date.now();
-      const hash = crypto.createHash("sha256").update(content).digest("hex").slice(0, 16);
 
       const info = insertFact.run(id, content, source, timestamp, hash);
 
