@@ -6,6 +6,7 @@
 import type { AgentTool, AgentToolResult } from "@mariozechner/pi-agent-core";
 import { Type } from "@sinclair/typebox";
 import { createFileTools } from "./files.js";
+import { createSystemLogTool } from "./system-log.js";
 import { createPiSessionTools } from "./pi-sessions.js";
 import { createSkillInstallTool } from "./skill-install.js";
 import { createCoreMemoryTools } from "./core-memory-tool.js";
@@ -50,6 +51,9 @@ export function createTools(
 
   // File tools: read is unsandboxed (any path), write/list are sandboxed to data/files/
   tools.push(...createFileTools(config.tools.files.base_dir));
+
+  // System log: agent can read its own runtime logs
+  tools.push(createSystemLogTool(path.join(config.data_dir, "logs")));
 
   // Skill installation: fetch and install skills from URLs or local paths
   tools.push(createSkillInstallTool(config.data_dir));

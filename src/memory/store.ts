@@ -159,51 +159,56 @@ export function createMemoryStore(userId: string, dataDir: string): MemoryStore 
   // Keyed by facts.rowid (integer) so we can join back to facts without
   // a separate id-to-rowid lookup table.
   if (vecAvailable) {
-    // Migration: detect dimension mismatch in existing vec0 table.
-    // Safe to drop because fact_embeddings is the source of truth;
-    // the backfill below repopulates the ANN index on every startup.
     try {
-      const testBuf = Buffer.from(new Float32Array(EMBEDDING_DIM).buffer);
-      db.prepare(
-        "INSERT INTO fact_embeddings_vec(rowid, embedding) VALUES (-1, ?)",
-      ).run(testBuf);
-      db.prepare("DELETE FROM fact_embeddings_vec WHERE rowid = -1").run();
-    } catch (err) {
-      if (err instanceof Error && err.message.includes("Dimension mismatch")) {
-        console.log(`[memory] Recreating vec0 index with ${EMBEDDING_DIM} dimensions for user ${userId}`);
-        db.exec("DROP TABLE IF EXISTS fact_embeddings_vec");
-      }
-      // If the table doesn't exist yet, CREATE below handles it
-    }
-
-    db.exec(`
-      CREATE VIRTUAL TABLE IF NOT EXISTS fact_embeddings_vec
-      USING vec0(embedding float[${EMBEDDING_DIM}] distance_metric=cosine);
-    `);
-
-    // One-time backfill: populate vec0 from any embeddings already stored in
-    // fact_embeddings that are not yet in the ANN index. This runs on every
-    // startup but is a no-op once all rows are indexed.
-    const unindexed = db.prepare(`
-      SELECT f.rowid AS rowid, fe.embedding
-      FROM fact_embeddings fe
-      JOIN facts f ON f.id = fe.id
-      WHERE NOT EXISTS (
-        SELECT 1 FROM fact_embeddings_vec v WHERE v.rowid = f.rowid
-      )
-    `).all() as Array<{ rowid: number; embedding: Buffer }>;
-
-    if (unindexed.length > 0) {
-      const insVec = db.prepare(
-        "INSERT INTO fact_embeddings_vec(rowid, embedding) VALUES (?, ?)",
-      );
-      const backfill = db.transaction(() => {
-        for (const row of unindexed) {
-          insVec.run(BigInt(row.rowid), row.embedding);
+      // Migration: detect dimension mismatch in existing vec0 table.
+      // Safe to drop because fact_embeddings is the source of truth;
+      // the backfill below repopulates the ANN index on every startup.
+      try {
+        const testBuf = Buffer.from(new Float32Array(EMBEDDING_DIM).buffer);
+        db.prepare(
+          "INSERT INTO fact_embeddings_vec(rowid, embedding) VALUES (-1, ?)",
+        ).run(testBuf);
+        db.prepare("DELETE FROM fact_embeddings_vec WHERE rowid = -1").run();
+      } catch (err) {
+        if (err instanceof Error && err.message.includes("Dimension mismatch")) {
+          console.log(`[memory] Recreating vec0 index with ${EMBEDDING_DIM} dimensions for user ${userId}`);
+          db.exec("DROP TABLE IF EXISTS fact_embeddings_vec");
         }
-      });
-      backfill();
-      console.log(`[memory] Backfilled ${unindexed.length} embedding(s) into vec0 index for user ${userId}`);
+        // If the table doesn't exist yet, CREATE below handles it
+      }
+
+      db.exec(`
+        CREATE VIRTUAL TABLE IF NOT EXISTS fact_embeddings_vec
+        USING vec0(embedding float[${EMBEDDING_DIM}] distance_metric=cosine);
+      `);
+
+      // One-time backfill: populate vec0 from any embeddings already stored in
+      // fact_embeddings that are not yet in the ANN index. This runs on every
+      // startup but is a no-op once all rows are indexed.
+      const unindexed = db.prepare(`
+        SELECT f.rowid AS rowid, fe.embedding
+        FROM fact_embeddings fe
+        JOIN facts f ON f.id = fe.id
+        WHERE NOT EXISTS (
+          SELECT 1 FROM fact_embeddings_vec v WHERE v.rowid = f.rowid
+        )
+      `).all() as Array<{ rowid: number; embedding: Buffer }>;
+
+      if (unindexed.length > 0) {
+        const insVec = db.prepare(
+          "INSERT INTO fact_embeddings_vec(rowid, embedding) VALUES (?, ?)",
+        );
+        const backfill = db.transaction(() => {
+          for (const row of unindexed) {
+            insVec.run(BigInt(row.rowid), row.embedding);
+          }
+        });
+        backfill();
+        console.log(`[memory] Backfilled ${unindexed.length} embedding(s) into vec0 index for user ${userId}`);
+      }
+    } catch (err) {
+      console.error(`[memory] vec0 index setup failed for user ${userId}, falling back to full-scan vector search:`, err);
+      vecAvailable = false;
     }
   }
 
@@ -289,7 +294,11 @@ export function createMemoryStore(userId: string, dataDir: string): MemoryStore 
         insertEmbedding.run(id, blob);
         // Also insert into the ANN index when the extension is loaded.
         if (insertEmbeddingVec !== null) {
-          insertEmbeddingVec.run(BigInt(info.lastInsertRowid), blob);
+          try {
+            insertEmbeddingVec.run(BigInt(info.lastInsertRowid), blob);
+          } catch (vecErr) {
+            console.error("[memory] vec0 insert failed, skipping ANN index:", vecErr);
+          }
         }
       }
 
