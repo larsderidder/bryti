@@ -38,7 +38,7 @@ describe("MemoryStore", () => {
 
   describe("addFact", () => {
     it("adds a fact and returns an ID", () => {
-      const embedding = new Array(2048).fill(0).map(() => Math.random());
+      const embedding = new Array(768).fill(0).map(() => Math.random());
       const id = store.addFact("Lars prefers dark mode", "memory.md", embedding);
 
       expect(id).toBeDefined();
@@ -47,7 +47,7 @@ describe("MemoryStore", () => {
     });
 
     it("stores fact with correct metadata", () => {
-      const embedding = new Array(2048).fill(0).map(() => Math.random());
+      const embedding = new Array(768).fill(0).map(() => Math.random());
       const id = store.addFact("Test fact", "test-source", embedding);
 
       const results = store.searchKeyword("Test fact", 10);
@@ -59,7 +59,7 @@ describe("MemoryStore", () => {
     });
 
     it("stores embeddings as binary blobs", () => {
-      const embedding = new Array(2048).fill(0.1);
+      const embedding = new Array(768).fill(0.1);
       const id = store.addFact("Binary embedding", "test", embedding);
       store.close();
 
@@ -77,7 +77,7 @@ describe("MemoryStore", () => {
 
   describe("removeFact", () => {
     it("removes a fact", () => {
-      const embedding = new Array(2048).fill(0).map(() => Math.random());
+      const embedding = new Array(768).fill(0).map(() => Math.random());
       const id = store.addFact("Fact to remove", "test", embedding);
 
       store.removeFact(id);
@@ -87,7 +87,7 @@ describe("MemoryStore", () => {
     });
 
     it("removes embeddings from vector search", () => {
-      const embedding = new Array(2048).fill(0.2);
+      const embedding = new Array(768).fill(0.2);
       const id = store.addFact("Vector fact", "test", embedding);
       store.removeFact(id);
 
@@ -100,9 +100,9 @@ describe("MemoryStore", () => {
     beforeEach(() => {
       // Add test facts
       const embeddings = [
-        new Array(2048).fill(0.1).map((v, i) => v + i * 0.001),
-        new Array(2048).fill(0.2).map((v, i) => v + i * 0.001),
-        new Array(2048).fill(0.3).map((v, i) => v + i * 0.001),
+        new Array(768).fill(0.1).map((v, i) => v + i * 0.001),
+        new Array(768).fill(0.2).map((v, i) => v + i * 0.001),
+        new Array(768).fill(0.3).map((v, i) => v + i * 0.001),
       ];
 
       store.addFact("Lars likes coffee", "memory.md", embeddings[0]);
@@ -146,14 +146,14 @@ describe("MemoryStore", () => {
     it("finds semantically similar facts", () => {
       // Add facts with known embeddings
       // Similar embeddings should be found together
-      const meetingEmbedding = new Array(2048).fill(0).map((_, i) => Math.sin(i * 0.1));
-      const groceryEmbedding = new Array(2048).fill(0).map((_, i) => Math.cos(i * 0.1));
+      const meetingEmbedding = new Array(768).fill(0).map((_, i) => Math.sin(i * 0.1));
+      const groceryEmbedding = new Array(768).fill(0).map((_, i) => Math.cos(i * 0.1));
 
       store.addFact("Meeting with client at 3pm", "calendar", meetingEmbedding);
       store.addFact("Grocery list: milk, eggs", "notes", groceryEmbedding);
 
       // Search with a query similar to "meeting" (similar to meetingEmbedding)
-      const queryEmbedding = new Array(2048).fill(0).map((_, i) => Math.sin(i * 0.1) + 0.01);
+      const queryEmbedding = new Array(768).fill(0).map((_, i) => Math.sin(i * 0.1) + 0.01);
       const results = store.searchVector(queryEmbedding, 10);
 
       expect(results.length).toBeGreaterThanOrEqual(1);
@@ -161,14 +161,14 @@ describe("MemoryStore", () => {
     });
 
     it("returns empty for empty database", () => {
-      const results = store.searchVector(new Array(2048).fill(0), 10);
+      const results = store.searchVector(new Array(768).fill(0), 10);
       expect(results).toEqual([]);
     });
   });
 
   describe("persistence", () => {
     it("persists facts across instances", () => {
-      const embedding = new Array(2048).fill(0.4);
+      const embedding = new Array(768).fill(0.4);
       store.addFact("Persistent fact", "memory.md", embedding);
       store.close();
 

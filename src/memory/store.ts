@@ -4,7 +4,7 @@
  * extension (vec0 virtual table with cosine distance) when available, falling
  * back to an in-memory full table scan for compatibility.
  *
- * Embedding dimensions: 2048 (embeddinggemma-300M-Q8_0 output size).
+ * Embedding dimensions: 768 (embeddinggemma-300M-Q8_0 output size).
  * vec0 uses cosine distance, matching the previous cosine similarity ranking.
  * Distance 0 = identical; distance 2 = opposite. Results are re-expressed as
  * similarity scores (1 - distance / 2) so callers see the same 0..1 range as
@@ -49,12 +49,12 @@ export interface MemoryStore {
  * Embedding dimension produced by embeddinggemma-300M.
  * Must match the vec0 table definition — change both together.
  */
-const EMBEDDING_DIM = 2048;
+const EMBEDDING_DIM = 768;
 
 /**
  * Serialize an embedding vector to a raw binary buffer.
  * Stored as Float32Array bytes (4 bytes per dimension) rather than JSON,
- * which avoids the significant parse/stringify overhead for ~2048-dim vectors
+ * which avoids the significant parse/stringify overhead for ~768-dim vectors
  * and halves the storage footprint compared to text representation.
  */
 function serializeEmbedding(embedding: number[]): Buffer {
@@ -159,6 +159,23 @@ export function createMemoryStore(userId: string, dataDir: string): MemoryStore 
   // Keyed by facts.rowid (integer) so we can join back to facts without
   // a separate id-to-rowid lookup table.
   if (vecAvailable) {
+    // Migration: detect dimension mismatch in existing vec0 table.
+    // Safe to drop because fact_embeddings is the source of truth;
+    // the backfill below repopulates the ANN index on every startup.
+    try {
+      const testBuf = Buffer.from(new Float32Array(EMBEDDING_DIM).buffer);
+      db.prepare(
+        "INSERT INTO fact_embeddings_vec(rowid, embedding) VALUES (-1, ?)",
+      ).run(testBuf);
+      db.prepare("DELETE FROM fact_embeddings_vec WHERE rowid = -1").run();
+    } catch (err) {
+      if (err instanceof Error && err.message.includes("Dimension mismatch")) {
+        console.log(`[memory] Recreating vec0 index with ${EMBEDDING_DIM} dimensions for user ${userId}`);
+        db.exec("DROP TABLE IF EXISTS fact_embeddings_vec");
+      }
+      // If the table doesn't exist yet, CREATE below handles it
+    }
+
     db.exec(`
       CREATE VIRTUAL TABLE IF NOT EXISTS fact_embeddings_vec
       USING vec0(embedding float[${EMBEDDING_DIM}] distance_metric=cosine);
