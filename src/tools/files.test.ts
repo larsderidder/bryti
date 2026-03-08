@@ -139,5 +139,23 @@ describe("FileTools", () => {
       const text = (result.content[0] as any).text;
       expect(text).toContain("todo.md");
     });
+
+    it("should list absolute paths outside sandbox", async () => {
+      const outsideDir = path.join(tempDir, "..", "bryti-test-listdir");
+      fs.mkdirSync(outsideDir, { recursive: true });
+      fs.writeFileSync(path.join(outsideDir, "outside.txt"), "hi");
+      fs.mkdirSync(path.join(outsideDir, "sub"));
+      fs.writeFileSync(path.join(outsideDir, "sub", "nested.txt"), "there");
+
+      const listFilesTool = tools.find((t) => t.name === "file_list")!;
+      const result = await listFilesTool.execute("call1", { directory: outsideDir }, undefined, undefined, undefined as any);
+
+      const text = (result.content[0] as any).text;
+      expect(text).toContain("outside.txt");
+      expect(text).toContain("nested.txt");
+      expect(text).toContain("sub/");
+
+      fs.rmSync(outsideDir, { recursive: true, force: true });
+    });
   });
 });

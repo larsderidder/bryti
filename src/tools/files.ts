@@ -35,9 +35,14 @@ const writeFileSchema = Type.Object({
 
 type WriteFileInput = Static<typeof writeFileSchema>;
 
-// Schema for list_files — sandboxed
+// Schema for list_files — absolute paths go anywhere, relative from sandbox
 const listFilesSchema = Type.Object({
-  directory: Type.Optional(Type.String({ description: "Optional subdirectory to list (e.g., 'notes')" })),
+  directory: Type.Optional(Type.String({
+    description:
+      "Directory to list. Absolute paths list from the filesystem directly. " +
+      "Relative paths are resolved from the sandboxed files directory. " +
+      "Omit to list the sandboxed files directory root.",
+  })),
 });
 
 type ListFilesInput = Static<typeof listFilesSchema>;
@@ -123,40 +128,53 @@ export function createFileTools(baseDir: string): AgentTool<any>[] {
   const listFilesTool: AgentTool<typeof listFilesSchema> = {
     name: "file_list",
     label: "file_list",
-    description: "List files in the sandboxed files directory, optionally under a subdirectory.",
+    description:
+      "List files and directories. Accepts absolute paths to list from anywhere " +
+      "on the filesystem, or relative paths which resolve from the sandboxed files directory. " +
+      "Omit directory to list the sandboxed files root.",
     parameters: listFilesSchema,
     async execute(
       _toolCallId: string,
       { directory }: ListFilesInput,
     ): Promise<AgentToolResult<unknown>> {
       let targetDir = baseDir;
+      let relativeBase = baseDir;
 
       if (directory) {
-        const resolved = resolveSafePath(baseDir, directory);
-        if (!resolved) return toolError("Invalid path: path traversal not allowed");
-        if (!fs.existsSync(resolved)) return toolError("Directory not found");
-        targetDir = resolved;
+        // Absolute paths list from anywhere; relative from sandbox
+        if (path.isAbsolute(directory)) {
+          targetDir = directory;
+          relativeBase = directory;
+        } else {
+          const resolved = resolveSafePath(baseDir, directory);
+          if (!resolved) return toolError("Invalid path: path traversal not allowed");
+          targetDir = resolved;
+        }
+        if (!fs.existsSync(targetDir)) return toolError("Directory not found");
+        if (!fs.statSync(targetDir).isDirectory()) return toolError("Path is not a directory");
       }
 
       try {
-        const files: string[] = [];
+        const entries: string[] = [];
 
         function walkDir(currentDir: string, depth: number): void {
           if (depth > MAX_DEPTH) return;
           for (const entry of fs.readdirSync(currentDir, { withFileTypes: true })) {
             const fullPath = path.join(currentDir, entry.name);
+            const rel = path.relative(relativeBase, fullPath);
             if (entry.isFile()) {
-              files.push(path.relative(baseDir, fullPath));
+              entries.push(rel);
             } else if (entry.isDirectory()) {
+              entries.push(rel + "/");
               walkDir(fullPath, depth + 1);
             }
           }
         }
 
         walkDir(targetDir, 0);
-        return toolSuccess({ files });
+        return toolSuccess({ files: entries });
       } catch (error) {
-        return toolError(error, "Failed to list files");
+        return toolError(error, "Failed to list directory");
       }
     },
   };
