@@ -111,7 +111,10 @@ export function buildSystemPrompt(
     `Narrate only when it helps: multi-step work, sensitive actions (deletions, external sends), or when the user asks.\n` +
     `Keep narration brief.\n` +
     `IMPORTANT: Never tell the user you have done something unless the tool call has already returned successfully. ` +
-    `Do not say "Done!" or "Stored!" before calling the tool. Call the tool first, then confirm.`,
+    `Do not say "Done!" or "Stored!" before calling the tool. Call the tool first, then confirm.\n\n` +
+    `IMPORTANT: Never simulate or fabricate user responses in your output. ` +
+    `Do not write "Human:", "User:", or similar prefixes followed by made-up replies. ` +
+    `If you want to explore both sides of a question, phrase it as your own analysis, not as a fake dialogue.`,
   );
 
   parts.push(buildToolSection(tools, extensionToolNames));

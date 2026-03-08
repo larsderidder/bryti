@@ -477,6 +477,9 @@ export async function processMessage(
       writePendingCheckpoint(state.config, msg);
     }
 
+    // Track message count before prompt so we can find all new messages after.
+    const messageCountBefore = session.messages.length;
+
     const promptStart = Date.now();
     await promptWithFallback(
       session,
@@ -491,6 +494,23 @@ export async function processMessage(
     const lastAssistant = toAssistantMessage(
       session.messages.filter((m) => m.role === "assistant").pop(),
     );
+
+    // Collect text from ALL assistant messages generated during this turn,
+    // not just the last one. The model may produce text in intermediate
+    // turns (between tool calls) that the user should see.
+    const newAssistantMessages = session.messages
+      .slice(messageCountBefore)
+      .filter((m) => m.role === "assistant")
+      .map((m) => toAssistantMessage(m))
+      .filter((m): m is NonNullable<typeof m> => m != null);
+
+    const allResponseTexts: string[] = [];
+    for (const assistantMsg of newAssistantMessages) {
+      const text = extractResponseText(assistantMsg).trim();
+      if (text && text !== SILENT_REPLY_TOKEN) {
+        allResponseTexts.push(text);
+      }
+    }
 
     const inputTokens = lastAssistant?.usage?.input ?? 0;
     const outputTokens = lastAssistant?.usage?.output ?? 0;
@@ -539,16 +559,21 @@ export async function processMessage(
       return;
     }
 
-    const responseText = extractResponseText(lastAssistant);
+    // Send ALL text the agent produced during this turn, not just the last
+    // message. Intermediate text (between tool calls) would otherwise be
+    // silently swallowed — the user never sees it.
+    // Filter out any NOOP entries — only suppress if ALL entries are NOOP.
+    const visibleTexts = allResponseTexts.filter((t) => t !== SILENT_REPLY_TOKEN);
 
-    if (responseText.trim() === SILENT_REPLY_TOKEN) {
+    if (allResponseTexts.length > 0 && visibleTexts.length === 0) {
       console.log(`[agent] Silent reply from ${msg.userId}, suppressing message`);
-    } else if (responseText.trim()) {
+    } else if (visibleTexts.length > 0) {
+      const combinedText = visibleTexts.join("\n\n");
       await state.historyManager.append({
         role: "assistant",
-        content: responseText,
+        content: combinedText,
       });
-      await getBridge(state, msg.platform).sendMessage(msg.channelId, responseText);
+      await getBridge(state, msg.platform).sendMessage(msg.channelId, combinedText);
     } else if (!isSchedulerMessage) {
       console.log(
         `[agent] No text response from ${msg.userId} after user message, re-prompting`,
