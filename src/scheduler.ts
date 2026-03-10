@@ -253,7 +253,7 @@ export function createScheduler(
           const store = createProjectionStore(userId, config.data_dir);
           try {
             store.evaluateDependencies();
-            const due = store.getExactDue(15);
+            const due = store.getExactDue(5);
             if (due.length === 0) {
               continue;
             }
@@ -261,10 +261,16 @@ export function createScheduler(
             const formatted = formatProjectionsForPrompt(due, 10);
 
             // Settle each projection: rearm recurring ones, mark one-offs as passed.
-            const now = new Date();
+            // Use the projection's scheduled time (not `now`) as the base for
+            // computing the next occurrence.  The lookahead window fires
+            // projections up to 15 min early, so using `now` would compute the
+            // *same* occurrence again (e.g., 08:45 → next cron at 09:00 today →
+            // fires again at 08:50).  Using `resolved_when` ensures the next
+            // occurrence is always in the future relative to the intended time.
             for (const p of due) {
               if (p.recurrence) {
-                const next = nextCronOccurrence(p.recurrence, now);
+                const scheduledTime = p.resolved_when ? new Date(p.resolved_when + "Z") : new Date();
+                const next = nextCronOccurrence(p.recurrence, scheduledTime);
                 if (next) {
                   store.rearm(p.id, next);
                   console.log(`[projections] Rearmed recurring projection ${p.id} → next: ${next}`);

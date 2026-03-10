@@ -567,10 +567,11 @@ export function createProjectionStore(userId: string, dataDir: string): Projecti
 
     getExactDue(window_minutes) {
       // Filters to resolution='exact' only: day/week/month projections are surfaced
-      // through getUpcoming, not here. window_minutes must be larger than the
-      // scheduler tick (5 min) so that projections due between ticks are never
-      // skipped. The lower bound ('-10 minutes') prevents re-firing events that
-      // already fired but whose resolved_at hasn't been written yet.
+      // through getUpcoming, not here. window_minutes should match the scheduler
+      // tick interval (5 min) so projections due between ticks are never skipped
+      // but also never fire early. The lower bound ('-10 minutes') prevents
+      // re-firing events that already fired but whose resolved_at hasn't been
+      // written yet.
       const rows = stmtExactDue.all(String(window_minutes)) as ProjectionRow[];
       return rows.map(rowToProjection);
     },
