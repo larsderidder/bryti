@@ -229,12 +229,24 @@ export function createScheduler(
     cronJobs.set("projection-daily", dailyJob);
     console.log(`[projections] Daily review scheduled at 08:00 UTC for ${knownUsers.length} user(s)`);
 
-    // Exact-time check: every 5 minutes
+    startExactTimeCheck();
+  }
+
+  /**
+   * Exact-time projection check: every 5 minutes, fires timed projections.
+   *
+   * Extracted from startProjectionJobs() so it can be started independently
+   * for operational agents that don't need a daily review.
+   */
+  function startExactTimeCheck(): void {
+    const knownUsers = getKnownUsers(config);
+    if (knownUsers.length === 0) return;
+
     const exactJob = new Cron(
       "*/5 * * * *",
       async () => {
         if (!isActiveNow(config.active_hours)) {
-          return; // Silent skip - fires every 5 min, no need to log each one
+          return; // Silent skip — fires every 5 min, no need to log each one
         }
 
         for (const userId of knownUsers) {
@@ -276,7 +288,9 @@ export function createScheduler(
                 `${formatted}\n\n` +
                 `For each item:\n` +
                 `1. Search your memory for related context (use memory_archival_search)\n` +
-                `2. Send the user a helpful, natural message — or reply NOOP if nothing needs to be said.`,
+                `2. Execute any actions described in the reminder (check email, check calendar, etc.)\n` +
+                `3. Send the user a helpful, natural message with your findings\n\n` +
+                `Only reply NOOP if the reminder is purely informational and requires no action or message.`,
               platform: "telegram",
               raw: { type: "projection_exact_check" },
             };
@@ -381,8 +395,37 @@ export function createScheduler(
   return {
     start(): void {
       startConfigJobs();
-      startProjectionJobs();
-      startReflectionJob();
+
+      // Projection and reflection jobs are opt-in via the agent definition.
+      //
+      // daily_review: the 08:00 UTC "what's coming up?" pass. Personal
+      //   assistant feature. A devops monitor has no morning briefing concept.
+      //
+      // projection_exact_check: the every-5-min precise trigger. Enabled
+      //   whenever the projections tool group is active (i.e. when the agent
+      //   definition includes projections at all). The scheduler doesn't have
+      //   direct visibility into tool groups, but daily_review=false and
+      //   reflection=true is the operational pattern, so we use that as the
+      //   signal: always start the exact-time check unless we have no
+      //   projection jobs at all.
+      //
+      // reflection: the every-30-min pass that extracts projections from
+      //   conversation history. Useful for both personal assistants (scheduling)
+      //   and operational agents (learning patterns).
+      const mem = config.agent_def.memory;
+
+      if (mem.daily_review) {
+        // Full projection suite: daily review + exact-time check
+        startProjectionJobs();
+      } else {
+        // No daily review, but still run the exact-time check so timed
+        // projections fire correctly for operational agents.
+        startExactTimeCheck();
+      }
+
+      if (mem.reflection) {
+        startReflectionJob();
+      }
 
       const total = cronJobs.size;
       if (total > 0) {
