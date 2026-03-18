@@ -1,6 +1,10 @@
 /**
  * Tool registry. Bryti-specific tools registered as pi SDK custom tools,
  * supplementing pi's built-in tools.
+ *
+ * Which tool groups are registered is controlled by config.agent_def.tool_groups.
+ * By default (personal-assistant preset) all groups are registered, matching
+ * the original behavior. Focused agents can opt in to only the groups they need.
  */
 
 import type { AgentTool, AgentToolResult } from "@mariozechner/pi-agent-core";
@@ -18,7 +22,7 @@ import { toolSuccess } from "./result.js";
 import { embed } from "../memory/embeddings.js";
 import { createMemoryStore } from "../memory/store.js";
 import path from "node:path";
-import type { Config } from "../config.js";
+import type { Config, ToolGroup } from "../config.js";
 import type { CoreMemory } from "../memory/core-memory.js";
 import type { WorkerTriggerCallback } from "../workers/tools.js";
 import { registerToolCapabilities } from "../trust/index.js";
@@ -33,7 +37,10 @@ const restartSchema = Type.Object({
 });
 
 /**
- * Create all bryti tools based on configuration.
+ * Create bryti tools based on configuration.
+ *
+ * Only tool groups listed in config.agent_def.tool_groups are registered.
+ * The default (personal-assistant preset) enables all groups.
  *
  * Pass an existing `projectionStore` to share the single store instance
  * created by the agent session. If omitted a new store is created here
@@ -48,20 +55,17 @@ export function createTools(
   projectionStore?: ProjectionStore,
 ): BrytiTool[] {
   const tools: BrytiTool[] = [];
+  const groups = new Set<ToolGroup>(config.agent_def.tool_groups);
 
-  // File tools: read is unsandboxed (any path), write/list are sandboxed to data/files/
-  tools.push(...createFileTools(config.tools.files.base_dir));
+  // ---------------------------------------------------------------------------
+  // Shared stores: created regardless of which tool groups are enabled so that
+  // inter-group dependencies (archival triggers projections, workers write to
+  // archival) work correctly when both groups are present.
+  // ---------------------------------------------------------------------------
 
-  // System log: agent can read its own runtime logs
-  tools.push(createSystemLogTool(path.join(config.data_dir, "logs")));
-
-  // Skill installation: fetch and install skills from URLs or local paths
-  tools.push(createSkillInstallTool(config.data_dir));
-  registerToolCapabilities("skill_install", {
-    level: "elevated",
-    capabilities: ["network", "filesystem"],
-    reason: "Installs skills from URLs or copies local directories into the skills folder.",
-  });
+  const resolvedProjectionStore = projectionStore ?? createProjectionStore(userId, config.data_dir);
+  const modelsDir = path.join(config.data_dir, ".models");
+  const archivalStore = createMemoryStore(userId, config.data_dir);
 
   // ---------------------------------------------------------------------------
   // SECURITY BOUNDARY: web_search and fetch_url are intentionally excluded
@@ -75,50 +79,86 @@ export function createTools(
   // result files.
   // ---------------------------------------------------------------------------
 
-  // Memory tools
-  tools.push(...createCoreMemoryTools(coreMemory));
+  // files — file_write sandboxed to data dir.
+  // Reading is handled by the SDK's built-in `read` and `ls` tools (always present).
+  if (groups.has("files")) {
+    tools.push(...createFileTools(config.data_dir));
+  }
 
-  // Projection memory: forward-looking events and commitments.
-  // Created before archival tools so we can pass it in for trigger checking.
+  // system_log — read runtime logs
+  if (groups.has("system_log")) {
+    tools.push(createSystemLogTool(path.join(config.data_dir, "logs")));
+  }
+
+  // extensions_management — skill_install + system_restart
+  if (groups.has("extensions_management")) {
+    tools.push(createSkillInstallTool(config.data_dir));
+    registerToolCapabilities("skill_install", {
+      level: "elevated",
+      capabilities: ["network", "filesystem"],
+      reason: "Installs skills from URLs or copies local directories into the skills folder.",
+    });
+  }
+
+  // memory_core — core_memory_append, core_memory_replace
+  if (groups.has("memory_core")) {
+    tools.push(...createCoreMemoryTools(coreMemory));
+  }
+
+  // projections — projection_create, projection_resolve, projection_list, projection_link
   //
-  // Use the store passed in by the caller (shared with agent.ts) so there is
-  // exactly one ProjectionStore per user. Fall back to creating a new one only
-  // if no store was provided (e.g. in tests or standalone tool use).
-  const resolvedProjectionStore = projectionStore ?? createProjectionStore(userId, config.data_dir);
-  tools.push(...createProjectionTools(resolvedProjectionStore, config.agent.timezone));
+  // Created before archival tools so the projection store is available when
+  // archival inserts need to activate trigger-based projections.
+  if (groups.has("projections")) {
+    tools.push(...createProjectionTools(resolvedProjectionStore, config.agent.timezone));
+  }
 
-  // Archival memory: always available, uses local embeddings (no API key needed).
-  // Receives the projection store so archival inserts can activate trigger-based projections.
-  const modelsDir = path.join(config.data_dir, ".models");
-  const archivalStore = createMemoryStore(userId, config.data_dir);
-  tools.push(
-    ...createArchivalMemoryTools(archivalStore, (text) => embed(text, modelsDir), resolvedProjectionStore),
-  );
+  // memory_archival — archival_insert, archival_search
+  //
+  // Passes the projection store so inserts can trigger projections immediately.
+  if (groups.has("memory_archival")) {
+    tools.push(
+      ...createArchivalMemoryTools(
+        archivalStore,
+        (text) => embed(text, modelsDir),
+        resolvedProjectionStore,
+      ),
+    );
+  }
 
-  tools.push(createConversationSearchTool(path.join(config.data_dir, "history")));
+  // memory_conversation — conversation_search
+  if (groups.has("memory_conversation")) {
+    tools.push(createConversationSearchTool(path.join(config.data_dir, "history")));
+  }
 
-  // Pi session awareness: read + inject into pi CLI sessions on disk.
-  // Lets bryti see what other coding agents are working on and steer stopped sessions.
-  tools.push(...createPiSessionTools());
-  registerToolCapabilities("pi_session_inject", {
-    level: "elevated",
-    capabilities: ["filesystem"],
-    reason: "Injects messages into pi coding agent session files.",
-  });
+  // pi_sessions — pi_session_list, pi_session_read, pi_session_search, pi_session_inject
+  if (groups.has("pi_sessions")) {
+    tools.push(...createPiSessionTools());
+    registerToolCapabilities("pi_session_inject", {
+      level: "elevated",
+      capabilities: ["filesystem"],
+      reason: "Injects messages into pi coding agent session files.",
+    });
+  }
 
-  // Worker tools: dispatch and check background research sessions.
+  // workers — worker_dispatch, worker_check, worker_interrupt, worker_steer
+  //
   // The registry lives for the lifetime of this tool set (one per user session).
   // Workers write completion facts to the user's archival memory store.
   // The projection store is passed so worker completion can trigger projections
   // immediately (instead of waiting for the 5-minute scheduler tick).
-  const workerRegistry = createWorkerRegistry();
-  tools.push(...createWorkerTools(
-    config, archivalStore, workerRegistry, false, resolvedProjectionStore, onWorkerTrigger,
-  ));
+  if (groups.has("workers")) {
+    const workerRegistry = createWorkerRegistry();
+    tools.push(...createWorkerTools(
+      config, archivalStore, workerRegistry, false, resolvedProjectionStore, onWorkerTrigger,
+    ));
+  }
 
-  // Restart tool: agent can trigger a clean process restart.
-  // Used after writing or modifying extensions so new tools load immediately.
-  if (onRestart) {
+  // extensions_management (cont.) — system_restart
+  //
+  // Restart is part of the extensions_management group but depends on the
+  // onRestart callback being provided, so it's registered separately here.
+  if (groups.has("extensions_management") && onRestart) {
     const restartTool: AgentTool<typeof restartSchema> = {
       name: "system_restart",
       label: "system_restart",
@@ -149,10 +189,9 @@ export function createTools(
     });
   }
 
-  // Register trust capabilities for well-known elevated tools.
-  // Extension tools (loaded by pi SDK from data/agent/extensions/) default to
-  // elevated since they can execute arbitrary code. Known extension names are
-  // registered explicitly for better permission prompts.
+  // Register trust capabilities for well-known elevated tools that may be
+  // loaded as extensions by the pi SDK. These are registered unconditionally
+  // since extension loading happens outside of tool groups.
   registerToolCapabilities("shell_exec", {
     level: "elevated",
     capabilities: ["shell", "filesystem"],

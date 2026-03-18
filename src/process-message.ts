@@ -238,7 +238,7 @@ export async function getOrLoadSession(
         text:
           `[Worker completed]\n\nThe following commitment(s) were triggered:\n\n${summaries}\n\n` +
           `IMPORTANT: The user has NOT seen the worker's results yet. You must:\n` +
-          `1. Read the worker's result file (file_read)\n` +
+          `1. Read the worker's result file (read tool)\n` +
           `2. Share the key findings with the user FIRST\n` +
           `3. Only THEN suggest next steps or act on them\n` +
           `Never assume the user knows what the worker found. Always present the findings before drawing conclusions or taking action.`,

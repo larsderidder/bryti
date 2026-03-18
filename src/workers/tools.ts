@@ -259,7 +259,7 @@ export function createWorkerTools(
 
       // Return immediately — worker is running in the background
       // Path relative to the file sandbox base (data/files/), not data_dir,
-      // so it's directly usable with file_read.
+      // so it's directly usable with the `read` tool.
       const filesBase = path.join(config.data_dir, "files");
       const relativeResultPath = path.relative(filesBase, resultPath);
       return toolSuccess({
@@ -269,7 +269,7 @@ export function createWorkerTools(
         trigger_hint: `worker ${workerId} complete`,
         note:
           `Worker dispatched. Create a projection with trigger_on_fact: "worker ${workerId} complete" ` +
-          `to be notified when results are ready. Read results with file_read path: ${relativeResultPath}`,
+          `to be notified when results are ready. Read results with read path: ${relativeResultPath}`,
       });
     },
   };
@@ -304,7 +304,7 @@ export function createWorkerTools(
               elapsed_minutes: elapsed,
               result_path: relResult,
               error: data.error ?? undefined,
-              note: `Status read from disk. Read results with file_read path: ${relResult}`,
+              note: `Status read from disk. Read results with read path: ${relResult}`,
             });
           } catch {
             // Fall through to not-found
@@ -324,7 +324,7 @@ export function createWorkerTools(
         elapsed_minutes: elapsedMinutes,
         result_path: relativeResultPath,
         ...(entry.error ? { error: entry.error } : {}),
-        ...(entry.status === "complete" ? { note: `Read results with file_read path: ${relativeResultPath}` } : {}),
+        ...(entry.status === "complete" ? { note: `Read results with read path: ${relativeResultPath}` } : {}),
       });
     },
   };

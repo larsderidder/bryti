@@ -30,9 +30,9 @@ export const TOOL_DESCRIPTIONS: Record<string, string> = {
   worker_check: "Checked background task",
   worker_interrupt: "Cancelled a background task",
   worker_steer: "Adjusted a background task",
-  file_read: "Read a file",
+  read: "Read a file",
   file_write: "Wrote a file",
-  file_list: "Listed files",
+  ls: "Listed directory",
 };
 
 interface ToolCallLogEntry {

@@ -16,52 +16,6 @@ describe("FileTools", () => {
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
-  describe("file_read", () => {
-    it("should read a file", async () => {
-      fs.writeFileSync(path.join(tempDir, "test.txt"), "Hello World", "utf-8");
-
-      const readFileTool = tools.find((t) => t.name === "file_read")!;
-      const result = await readFileTool.execute("call1", { path: "test.txt" }, undefined, undefined, undefined as any);
-
-      expect(result.content[0]).toHaveProperty("text");
-      const text = (result.content[0] as any).text;
-      expect(text).toContain("Hello World");
-    });
-
-    it("should return error for nonexistent file", async () => {
-      const readFileTool = tools.find((t) => t.name === "file_read")!;
-      const result = await readFileTool.execute("call1", { path: "nonexistent.txt" }, undefined, undefined, undefined as any);
-
-      expect(result.content[0]).toHaveProperty("text");
-      const text = (result.content[0] as any).text;
-      expect(text).toContain("not found");
-    });
-
-    it("should read absolute paths outside sandbox", async () => {
-      // Write a file outside the sandbox
-      const outsideFile = path.join(tempDir, "..", "bryti-test-outside.txt");
-      fs.writeFileSync(outsideFile, "outside content", "utf-8");
-
-      const readFileTool = tools.find((t) => t.name === "file_read")!;
-      const result = await readFileTool.execute("call1", { path: outsideFile }, undefined, undefined, undefined as any);
-
-      const text = (result.content[0] as any).text;
-      expect(text).toContain("outside content");
-
-      fs.rmSync(outsideFile, { force: true });
-    });
-
-    it("should resolve relative paths from sandbox base", async () => {
-      fs.writeFileSync(path.join(tempDir, "local.txt"), "sandbox file", "utf-8");
-
-      const readFileTool = tools.find((t) => t.name === "file_read")!;
-      const result = await readFileTool.execute("call1", { path: "local.txt" }, undefined, undefined, undefined as any);
-
-      const text = (result.content[0] as any).text;
-      expect(text).toContain("sandbox file");
-    });
-  });
-
   describe("file_write", () => {
     it("should write a file", async () => {
       const writeFileTool = tools.find((t) => t.name === "file_write")!;
@@ -77,7 +31,6 @@ describe("FileTools", () => {
       const text = (result.content[0] as any).text;
       expect(text).toContain("success");
 
-      // Verify file was created
       const fileContent = fs.readFileSync(path.join(tempDir, "newfile.txt"), "utf-8");
       expect(fileContent).toBe("Test content");
     });
@@ -100,62 +53,36 @@ describe("FileTools", () => {
       const writeFileTool = tools.find((t) => t.name === "file_write")!;
       const result = await writeFileTool.execute(
         "call1",
-        { path: "../test.txt", content: "Malicious" },
+        { path: "../escape.txt", content: "Malicious" },
         undefined,
         undefined,
         undefined as any,
       );
 
-      expect(result.content[0]).toHaveProperty("text");
       const text = (result.content[0] as any).text;
       expect(text).toContain("path traversal");
-    });
-  });
-
-  describe("file_list", () => {
-    it("should list files in directory", async () => {
-      fs.writeFileSync(path.join(tempDir, "file1.txt"), "content1");
-      fs.writeFileSync(path.join(tempDir, "file2.txt"), "content2");
-      fs.mkdirSync(path.join(tempDir, "subdir"));
-      fs.writeFileSync(path.join(tempDir, "subdir", "file3.txt"), "content3");
-
-      const listFilesTool = tools.find((t) => t.name === "file_list")!;
-      const result = await listFilesTool.execute("call1", { directory: undefined }, undefined, undefined, undefined as any);
-
-      expect(result.content[0]).toHaveProperty("text");
-      const text = (result.content[0] as any).text;
-      expect(text).toContain("file1.txt");
-      expect(text).toContain("file2.txt");
+      expect(fs.existsSync(path.join(tempDir, "..", "escape.txt"))).toBe(false);
     });
 
-    it("should list files in subdirectory", async () => {
-      fs.mkdirSync(path.join(tempDir, "notes"));
-      fs.writeFileSync(path.join(tempDir, "notes", "todo.md"), "- task 1");
+    it("should reject absolute paths", async () => {
+      const writeFileTool = tools.find((t) => t.name === "file_write")!;
+      const result = await writeFileTool.execute(
+        "call1",
+        { path: "/tmp/absolute.txt", content: "Nope" },
+        undefined,
+        undefined,
+        undefined as any,
+      );
 
-      const listFilesTool = tools.find((t) => t.name === "file_list")!;
-      const result = await listFilesTool.execute("call1", { directory: "notes" }, undefined, undefined, undefined as any);
-
-      expect(result.content[0]).toHaveProperty("text");
       const text = (result.content[0] as any).text;
-      expect(text).toContain("todo.md");
+      expect(text).toContain("relative");
     });
 
-    it("should list absolute paths outside sandbox", async () => {
-      const outsideDir = path.join(tempDir, "..", "bryti-test-listdir");
-      fs.mkdirSync(outsideDir, { recursive: true });
-      fs.writeFileSync(path.join(outsideDir, "outside.txt"), "hi");
-      fs.mkdirSync(path.join(outsideDir, "sub"));
-      fs.writeFileSync(path.join(outsideDir, "sub", "nested.txt"), "there");
-
-      const listFilesTool = tools.find((t) => t.name === "file_list")!;
-      const result = await listFilesTool.execute("call1", { directory: outsideDir }, undefined, undefined, undefined as any);
-
-      const text = (result.content[0] as any).text;
-      expect(text).toContain("outside.txt");
-      expect(text).toContain("nested.txt");
-      expect(text).toContain("sub/");
-
-      fs.rmSync(outsideDir, { recursive: true, force: true });
+    it("only registers file_write — read and ls come from the SDK", () => {
+      const names = tools.map((t) => t.name);
+      expect(names).toEqual(["file_write"]);
+      expect(names).not.toContain("file_read");
+      expect(names).not.toContain("file_list");
     });
   });
 });

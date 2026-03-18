@@ -28,7 +28,6 @@ function makeConfig(timezone?: string): Config {
     tools: {
       web_search: { enabled: false, searxng_url: "" },
       fetch_url: { enabled: false, timeout_ms: 10000 },
-      files: { enabled: false, base_dir: "" },
     },
     cron: [],
     data_dir: "/tmp",

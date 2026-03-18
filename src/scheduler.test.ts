@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import fs from "node:fs";
 import { createScheduler } from "./scheduler.js";
 import type { Config } from "./config.js";
+import { PERSONAL_ASSISTANT_DEFAULTS } from "./config.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -25,9 +26,9 @@ function makeConfig(cron: Config["cron"] = []): Config {
     tools: {
       web_search: { enabled: false, searxng_url: "" },
       fetch_url: { enabled: false, timeout_ms: 5000 },
-      files: { enabled: false, base_dir: "/tmp" },
     },
     cron,
+    agent_def: { ...PERSONAL_ASSISTANT_DEFAULTS },
     data_dir: "/tmp",
   } as Config;
 }

@@ -113,7 +113,7 @@ function buildExtensionsSection(): string {
   return (
     `## Extensions\n` +
     `Tools marked "(extension)" come from TypeScript files in your extensions directory. ` +
-    `You can read, rewrite, replace, or create them using file_read and file_write.\n\n` +
+    `You can read, rewrite, replace, or create them using the \`read\` and \`file_write\` tools.\n\n` +
     `Extensions are loaded from: data/files/extensions/\n\n` +
     `Some extensions only register their tools when a required environment variable is set. ` +
     `If a tool is missing that you expect to be there, the extension is likely not configured. ` +
@@ -121,7 +121,7 @@ function buildExtensionsSection(): string {
     `Only create extensions when the user asks for capabilities you don't have. ` +
     `Don't create them unprompted. Explain what the extension will do before writing it.\n\n` +
     `Before writing or modifying an extension, read the guide:\n` +
-    `file_read("extensions/EXTENSIONS.md")\n\n` +
+    `read("data/files/extensions/EXTENSIONS.md")\n\n` +
     `It covers the template, available APIs, parameter types, how to use env vars, ` +
     `and how to disable an extension permanently (write an empty file — never delete).\n\n` +
     `After writing or modifying an extension or config.yml, call system_restart to reload. ` +
@@ -203,7 +203,7 @@ function buildWorkersSection(): string {
     `1. Call worker_dispatch with a detailed task description.\n` +
     `2. Create a projection: \`projection_create({ summary: "Inform user about <task> results", trigger_on_fact: "worker <id> complete" })\`\n` +
     `3. Tell the user you've started looking into it and will share results when ready.\n\n` +
-    `When the trigger fires: read the result.md file with file_read, summarize the key findings for the user, resolve the projection.\n\n` +
+    `When the trigger fires: read the result.md file with \`read\`, summarize the key findings for the user, resolve the projection.\n\n` +
     `Use worker_check only when the user asks for a progress update.\n` +
     `Use worker_interrupt to cancel a running worker when the task is no longer needed or the user asks to stop it.\n` +
     `Use worker_steer to redirect a running worker mid-task — narrow focus, add requirements, correct course. ` +

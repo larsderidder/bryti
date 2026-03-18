@@ -121,7 +121,7 @@ describe("inline approval callback", () => {
 
     const approvalCallback: ApprovalCallback = async (_prompt, _key) => "allow";
     const wrapped = wrapToolWithTrustCheck(tool, store, "userA", {
-      config: { tools: { web_search: { enabled: false, searxng_url: "" }, fetch_url: { enabled: false, timeout_ms: 0 }, files: { enabled: false, base_dir: "" }, workers: { max_concurrent: 0 } }, integrations: {}, agent: { name: "", system_prompt: "", model: "", fallback_models: [] }, telegram: { token: "", allowed_users: [] }, whatsapp: { enabled: false, allowed_users: [] }, models: { providers: [] }, cron: [], trust: { approved_tools: [] }, data_dir: tmpDir } as any,
+      config: { tools: { web_search: { enabled: false, searxng_url: "" }, fetch_url: { enabled: false, timeout_ms: 0 }, workers: { max_concurrent: 0 } }, integrations: {}, agent: { name: "", system_prompt: "", model: "", fallback_models: [] }, telegram: { token: "", allowed_users: [] }, whatsapp: { enabled: false, allowed_users: [] }, models: { providers: [] }, cron: [], trust: { approved_tools: [] }, data_dir: tmpDir } as any,
       getLastUserMessage: () => undefined,
       onApprovalNeeded: approvalCallback,
     });

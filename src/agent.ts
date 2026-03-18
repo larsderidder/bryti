@@ -14,6 +14,7 @@
  */
 
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import type { AgentMessage, AgentTool } from "@mariozechner/pi-agent-core";
 import {
@@ -106,12 +107,12 @@ function buildArgsSummary(toolName: string, args: unknown): string {
       return String(a.worker_id ?? "");
     case "worker_steer":
       return String(a.worker_id ?? "");
-    case "file_read":
+    case "read":
       return String(a.path ?? "");
     case "file_write":
       return String(a.path ?? "");
-    case "file_list":
-      return String(a.directory ?? "");
+    case "ls":
+      return String(a.path ?? "");
     default:
       return "";
   }
@@ -188,11 +189,42 @@ export async function loadUserSession(
   const projectionStore = existingProjectionStore ?? createProjectionStore(userId, config.data_dir);
 
   const brytiSkillsDir = path.join(config.data_dir, "skills");
-  const additionalSkillPaths = fs.existsSync(brytiSkillsDir) ? [brytiSkillsDir] : [];
+  const baseSkillPaths = fs.existsSync(brytiSkillsDir) ? [brytiSkillsDir] : [];
+
+  // Expand ~ in paths declared in extension_files / skill_files. The skill
+  // loader handles ~ natively, but additionalExtensionPaths goes through
+  // resolvePackageSources which does not expand ~, so we do it here for both.
+  function expandHome(p: string): string {
+    if (p === "~") return os.homedir();
+    if (p.startsWith("~/")) return path.join(os.homedir(), p.slice(2));
+    return p;
+  }
+
+  const additionalExtensionPaths = config.agent_def.extension_files
+    .map(expandHome)
+    .filter((p) => {
+      if (!fs.existsSync(p)) {
+        console.warn(`[extensions] Configured extension file not found, skipping: ${p}`);
+        return false;
+      }
+      return true;
+    });
+
+  const additionalSkillPaths = [
+    ...baseSkillPaths,
+    ...config.agent_def.skill_files.map(expandHome).filter((p) => {
+      if (!fs.existsSync(p)) {
+        console.warn(`[skills] Configured skill file not found, skipping: ${p}`);
+        return false;
+      }
+      return true;
+    }),
+  ];
 
   const loader = new DefaultResourceLoader({
     cwd: config.data_dir,
     agentDir,
+    additionalExtensionPaths,
     additionalSkillPaths,
     settingsManager: SettingsManager.create(config.data_dir, agentDir),
     systemPromptOverride: () => {
