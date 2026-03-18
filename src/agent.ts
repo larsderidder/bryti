@@ -257,7 +257,6 @@ export async function loadUserSession(
     modelRegistry,
     model,
     thinkingLevel: "off",
-    tools: [],
     customTools,
     resourceLoader: loader,
     sessionManager,
