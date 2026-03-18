@@ -54,6 +54,7 @@ import { createUsageTracker } from "./usage.js";
 import { createAppLogger, installConsoleFileLogging } from "./logger.js";
 import { recoverPendingCheckpoints } from "./crash-recovery.js";
 import { startProactiveCompaction } from "./compaction/proactive.js";
+import { createEventsWatcher } from "./events-watcher.js";
 import { checkForUpdate } from "./update-check.js";
 import { createRequire } from "node:module";
 const _require = createRequire(import.meta.url);
@@ -180,6 +181,10 @@ async function startApp(onRequestRestart?: () => void): Promise<RunningApp> {
   // Start proactive compaction (idle + nightly)
   const compactionJobs = startProactiveCompaction(config, () => state.sessions);
 
+  // Watch data/events/ for notifications from pi sessions and external scripts
+  const eventsWatcher = createEventsWatcher(config, (msg) => queue.enqueue(msg));
+  eventsWatcher.start();
+
   // ---------------------------------------------------------------------------
   // Startup notifications: crash recovery, restart marker, config rollback
   // ---------------------------------------------------------------------------
@@ -238,6 +243,7 @@ async function startApp(onRequestRestart?: () => void): Promise<RunningApp> {
       stopped = true;
       console.log("Shutting down...");
       state.scheduler.stop();
+      eventsWatcher.stop();
       for (const job of compactionJobs) job.stop();
       await Promise.all(state.bridges.map((b) => b.stop()));
       for (const [userId, userSession] of state.sessions) {
