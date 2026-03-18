@@ -78,7 +78,6 @@ cron: []
 
     expect(config.tools.web_search.enabled).toBe(true);
     expect(config.tools.fetch_url.timeout_ms).toBe(10000);
-    expect(config.tools.files.base_dir).toContain("files");
   });
 
   it("should create data directories", () => {
@@ -408,5 +407,80 @@ integrations:
       url: "http://hedgedoc:3000",
       public_url: "https://docs.example.com",
     });
+  });
+});
+
+describe("AgentDefinition parsing", () => {
+  let tempDir: string;
+
+  const baseConfig = `
+agent:
+  name: TestBot
+  system_prompt: "You are a test bot"
+  model: "test/test-model"
+telegram:
+  token: "test-token"
+  allowed_users: [1]
+models:
+  providers:
+    - name: test
+      base_url: https://test.example.com
+      api_key: test-key
+      models:
+        - id: test-model
+`;
+
+  beforeEach(() => {
+    tempDir = fs.mkdtempSync("/tmp/bryti-agentdef-test-");
+    process.env.BRYTI_DATA_DIR = tempDir;
+    fs.writeFileSync(path.join(tempDir, "config.yml"), baseConfig);
+  });
+
+  afterEach(() => {
+    delete process.env.BRYTI_DATA_DIR;
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("defaults to empty extension_files and skill_files when agent.yml absent", () => {
+    const config = loadConfig();
+    expect(config.agent_def.extension_files).toEqual([]);
+    expect(config.agent_def.skill_files).toEqual([]);
+  });
+
+  it("parses extension_files and skill_files from agent.yml", () => {
+    fs.writeFileSync(path.join(tempDir, "agent.yml"), `
+extension_files:
+  - ~/.pi/agent/extensions/hedgedoc.ts
+  - ~/.pi/agent/extensions/loki.ts
+skill_files:
+  - ~/.pi/agent/skills/scribe/SKILL.md
+  - ~/.pi/agent/skills/mkt-copywriting/SKILL.md
+`);
+    const config = loadConfig();
+    expect(config.agent_def.extension_files).toEqual([
+      "~/.pi/agent/extensions/hedgedoc.ts",
+      "~/.pi/agent/extensions/loki.ts",
+    ]);
+    expect(config.agent_def.skill_files).toEqual([
+      "~/.pi/agent/skills/scribe/SKILL.md",
+      "~/.pi/agent/skills/mkt-copywriting/SKILL.md",
+    ]);
+  });
+
+  it("treats absent extension_files / skill_files keys as empty arrays", () => {
+    fs.writeFileSync(path.join(tempDir, "agent.yml"), `name: "Bryti"\n`);
+    const config = loadConfig();
+    expect(config.agent_def.extension_files).toEqual([]);
+    expect(config.agent_def.skill_files).toEqual([]);
+  });
+
+  it("extension_files and skill_files are independent", () => {
+    fs.writeFileSync(path.join(tempDir, "agent.yml"), `
+skill_files:
+  - ~/.pi/agent/skills/scribe/SKILL.md
+`);
+    const config = loadConfig();
+    expect(config.agent_def.extension_files).toEqual([]);
+    expect(config.agent_def.skill_files).toHaveLength(1);
   });
 });

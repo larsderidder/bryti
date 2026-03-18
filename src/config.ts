@@ -53,6 +53,135 @@ export interface CronJob {
   message: string;
 }
 
+// ---------------------------------------------------------------------------
+// Agent definition types
+//
+// These fields come from agent.yml (or the agent: section of config.yml for
+// backward compat). They describe what an agent IS, separate from the
+// infrastructure that runs it.
+// ---------------------------------------------------------------------------
+
+/**
+ * Tool groups that can be enabled for an agent.
+ *
+ * Each group corresponds to a set of tools registered at startup.
+ * The default ("all") enables every group, matching the current behavior.
+ */
+export type ToolGroup =
+  | "memory_core"
+  | "memory_archival"
+  | "memory_conversation"
+  | "projections"
+  | "workers"
+  | "files"
+  | "extensions_management"
+  | "pi_sessions"
+  | "system_log";
+
+/** All tool groups — used as the default when no explicit list is given. */
+export const ALL_TOOL_GROUPS: ToolGroup[] = [
+  "memory_core",
+  "memory_archival",
+  "memory_conversation",
+  "projections",
+  "workers",
+  "files",
+  "extensions_management",
+  "pi_sessions",
+  "system_log",
+];
+
+/**
+ * System prompt sections that can be included for an agent.
+ *
+ * The default ("all") includes every section, matching the current behavior.
+ */
+export type PromptSection =
+  | "datetime"
+  | "communication_style"
+  | "image_handling"
+  | "tools"
+  | "extensions"
+  | "skills"
+  | "core_memory"
+  | "projections"
+  | "workers"
+  | "first_conversation"
+  | "silent_reply";
+
+/** All prompt sections — used as the default when no explicit list is given. */
+export const ALL_PROMPT_SECTIONS: PromptSection[] = [
+  "datetime",
+  "communication_style",
+  "image_handling",
+  "tools",
+  "extensions",
+  "skills",
+  "core_memory",
+  "projections",
+  "workers",
+  "first_conversation",
+  "silent_reply",
+];
+
+/**
+ * Tone of the agent's system prompt.
+ *
+ * - "conversational": personal assistant style, hides internal concepts,
+ *   warm greetings, full projection/worker framing.
+ * - "operational": focused monitoring/task style, direct language, no
+ *   conversational ceremony, no sleep/wake compaction assumptions.
+ */
+export type PromptTone = "conversational" | "operational";
+
+/**
+ * Memory and background job configuration for an agent.
+ */
+export interface MemoryConfig {
+  /** Run the reflection pass every 30 min (extracts projections from history). Default: true. */
+  reflection: boolean;
+  /** Fire the projection daily review at 08:00 UTC. Default: true. */
+  daily_review: boolean;
+  /**
+   * Compaction strategy hint.
+   * - "conversational": nightly compaction prompt says "the user is asleep"
+   * - "operational": neutral compaction hint, no sleep assumptions
+   */
+  compaction: "conversational" | "operational";
+}
+
+/**
+ * Agent definition: the portable, identity-specific configuration.
+ *
+ * This can come from agent.yml (new) or from the agent: section of config.yml
+ * (legacy). Fields here describe what the agent IS and what it can do.
+ */
+export interface AgentDefinition {
+  /** Which tool groups to register. Defaults to all groups. */
+  tool_groups: ToolGroup[];
+  /** Which system prompt sections to include. Defaults to all sections. */
+  prompt_sections: PromptSection[];
+  /** Prompt tone. Default: "conversational". */
+  prompt_tone: PromptTone;
+  /** Memory and background job config. */
+  memory: MemoryConfig;
+  /**
+   * Additional extension .ts files to load into the agent session.
+   * Absolute paths or ~ paths. Loaded in addition to the extensions
+   * auto-discovered in data/files/extensions/.
+   * Useful for whitelisting specific extensions from ~/.pi/agent/extensions/.
+   * Paths support ${ENV_VAR} substitution.
+   */
+  extension_files: string[];
+  /**
+   * Additional SKILL.md files or skill directories to expose to the agent.
+   * Absolute paths or ~ paths. Loaded in addition to the skills in data/skills/.
+   * Useful for whitelisting specific skills from ~/.pi/agent/skills/.
+   * Paths support ${ENV_VAR} substitution.
+   */
+  skill_files: string[];
+}
+
 export interface Config {
   agent: {
     name: string;
@@ -98,7 +227,6 @@ export interface Config {
       brave_api_key?: string;
     };
     fetch_url: { timeout_ms: number };
-    files: { base_dir: string };
     workers: {
       /** Maximum number of workers that may run concurrently. Default: 3. */
       max_concurrent: number;
@@ -126,6 +254,12 @@ export interface Config {
     /** Tools pre-approved for elevated access (skip permission prompts). */
     approved_tools: string[];
   };
+  /**
+   * Agent definition: identity-specific config (tool groups, prompt sections,
+   * tone, memory jobs). Populated from agent.yml if present, otherwise defaults
+   * to the "personal-assistant" preset (all features on).
+   */
+  agent_def: AgentDefinition;
   data_dir: string;
 }
 
@@ -256,15 +390,112 @@ function toolsFromConfig(substituted: Record<string, unknown>, dataDir: string):
       timeout_ms: 10000,
       ...(raw.fetch_url as object | undefined),
     },
-    files: {
-      base_dir: path.join(dataDir, "files"),
-      ...(raw.files as object | undefined),
-    },
     workers: {
       max_concurrent: 3,
       ...(raw.workers as object | undefined),
     },
   };
+}
+
+/**
+ * The personal-assistant preset: all tool groups and prompt sections enabled,
+ * conversational tone, reflection and daily review on. This is the default
+ * for existing deployments that have no agent.yml.
+ */
+export const PERSONAL_ASSISTANT_DEFAULTS: AgentDefinition = {
+  tool_groups: [...ALL_TOOL_GROUPS],
+  prompt_sections: [...ALL_PROMPT_SECTIONS],
+  prompt_tone: "conversational",
+  memory: {
+    reflection: true,
+    daily_review: true,
+    compaction: "conversational",
+  },
+  extension_files: [],
+  skill_files: [],
+};
+
+/**
+ * Parse an agent definition from a raw substituted YAML object.
+ *
+ * Accepts either a top-level agent.yml shape (where agent-def fields are at the
+ * root) or a nested shape from config.yml (where they may appear under a future
+ * "agent_def:" key). Falls back to PERSONAL_ASSISTANT_DEFAULTS for any field
+ * not present in the source.
+ */
+function agentDefinitionFromRaw(raw: Record<string, unknown>): AgentDefinition {
+  const toolGroupsRaw = raw.tool_groups ?? raw.tools;
+  let tool_groups: ToolGroup[];
+  if (Array.isArray(toolGroupsRaw)) {
+    tool_groups = toolGroupsRaw as ToolGroup[];
+  } else if (toolGroupsRaw && typeof toolGroupsRaw === "object") {
+    // Support {groups: [...]} shape from agent.yml
+    const groups = (toolGroupsRaw as Record<string, unknown>).groups;
+    tool_groups = Array.isArray(groups) ? (groups as ToolGroup[]) : [...ALL_TOOL_GROUPS];
+  } else {
+    tool_groups = [...ALL_TOOL_GROUPS];
+  }
+
+  const promptRaw = raw.prompt as Record<string, unknown> | undefined;
+  let prompt_sections: PromptSection[];
+  if (Array.isArray(promptRaw?.sections)) {
+    prompt_sections = promptRaw!.sections as PromptSection[];
+  } else {
+    prompt_sections = [...ALL_PROMPT_SECTIONS];
+  }
+
+  const prompt_tone: PromptTone =
+    (promptRaw?.tone as PromptTone | undefined) ?? "conversational";
+
+  const memRaw = raw.memory as Record<string, unknown> | undefined;
+  const memory: MemoryConfig = {
+    reflection: memRaw?.reflection !== false,
+    daily_review: memRaw?.daily_review !== false,
+    compaction: (memRaw?.compaction as "conversational" | "operational" | undefined) ?? "conversational",
+  };
+
+  const extension_files = Array.isArray(raw.extension_files)
+    ? (raw.extension_files as string[])
+    : [];
+
+  const skill_files = Array.isArray(raw.skill_files)
+    ? (raw.skill_files as string[])
+    : [];
+
+  return { tool_groups, prompt_sections, prompt_tone, memory, extension_files, skill_files };
+}
+
+/**
+ * Resolve the path to an agent definition file.
+ *
+ * Resolution order:
+ * 1. PIBOT_AGENT env var (absolute or relative to cwd)
+ * 2. agent.yml in the data directory
+ * 3. null (fall back to defaults embedded in config.yml)
+ */
+export function resolveAgentFile(dataDir: string): string | null {
+  if (process.env.PIBOT_AGENT) {
+    return path.resolve(process.env.PIBOT_AGENT);
+  }
+  const agentYml = path.join(dataDir, "agent.yml");
+  if (fs.existsSync(agentYml)) {
+    return agentYml;
+  }
+  return null;
+}
+
+/**
+ * Load an agent definition file (agent.yml).
+ * Returns null if the file doesn't exist or path is null.
+ */
+export function loadAgentDefinition(agentFilePath: string | null): AgentDefinition | null {
+  if (!agentFilePath || !fs.existsSync(agentFilePath)) {
+    return null;
+  }
+  const raw = fs.readFileSync(agentFilePath, "utf-8");
+  const parsed = parseYaml(raw);
+  const substituted = substituteDeep(parsed) as Record<string, unknown>;
+  return agentDefinitionFromRaw(substituted);
 }
 
 /**
@@ -333,6 +564,19 @@ export function loadConfig(configPath?: string): Config {
     trust: {
       approved_tools: ((substituted.trust as { approved_tools?: string[] })?.approved_tools) ?? [],
     },
+    // Agent definition: prefer agent.yml if present, then look for agent_def
+    // in config.yml, then fall back to personal-assistant defaults.
+    agent_def: (() => {
+      const agentFile = resolveAgentFile(dataDir);
+      const fromFile = loadAgentDefinition(agentFile);
+      if (fromFile) return fromFile;
+      // Legacy: agent_def key in config.yml
+      if (substituted.agent_def && typeof substituted.agent_def === "object") {
+        return agentDefinitionFromRaw(substituted.agent_def as Record<string, unknown>);
+      }
+      // Default: personal-assistant preset
+      return { ...PERSONAL_ASSISTANT_DEFAULTS };
+    })(),
     data_dir: dataDir,
   };
 
