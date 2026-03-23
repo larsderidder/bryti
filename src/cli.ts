@@ -312,8 +312,14 @@ Usage:
 
 Commands:
   hail [<path>]
-    First-run setup. Walks you through creating a config.
+    Interactive first-run setup. Walks you through creating a config.yml.
     Alias: init
+
+  init --template <name> --data-dir <path>
+    Scaffold a new agent data directory from a built-in template.
+    Non-interactive: writes agent.yml and core-memory.md, then prints next steps.
+    Use --force to overwrite existing files.
+    Use --template list to see available templates.
 
   serve
     Start the bryti server.
@@ -387,6 +393,28 @@ async function main(): Promise<void> {
   }
 
   if (command === "hail" || command === "init") {
+    // `bryti init --template <name>` scaffolds from a template (non-interactive)
+    const templateId = opt("--template");
+    if (templateId) {
+      const { runInitTemplate, listTemplates } = await import("./init-template.js");
+      if (templateId === "list" || templateId === "help") {
+        listTemplates();
+        return;
+      }
+      const targetDir = opt("--data-dir") ?? positional(1);
+      if (!targetDir) {
+        console.error("Usage: bryti init --template <name> --data-dir <path>");
+        console.error("       bryti init --template list   (show available templates)");
+        process.exit(1);
+      }
+      await runInitTemplate({
+        templateId,
+        dataDir: targetDir,
+        force: flag("--force"),
+      });
+      return;
+    }
+    // No --template: fall through to interactive hail setup
     const { runSetup } = await import("./setup.js");
     await runSetup(positional(1));
     return;
