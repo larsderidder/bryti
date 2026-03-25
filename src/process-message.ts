@@ -87,11 +87,6 @@ export interface AppState {
   /** Users whose session was recovered after corruption — notified on next message. */
   recoveredSessions: Set<string>;
   /**
-   * Accumulated scheduler context per userId. Daily reviews are buffered here
-   * and prepended to the next real user message.
-   */
-  pendingSchedulerContext: Map<string, string[]>;
-  /**
    * Signal the supervisor to restart the app. Set by runWithSupervisor().
    * Falls back to process.exit(RESTART_EXIT_CODE) when null.
    */
@@ -418,16 +413,6 @@ export async function processMessage(
     const schedulerType = rawObj?.type as string | undefined;
     const isSchedulerMessage = schedulerType != null;
 
-    if (schedulerType === "projection_daily_review") {
-      const pending = state.pendingSchedulerContext.get(msg.userId) ?? [];
-      pending.push(msg.text);
-      state.pendingSchedulerContext.set(msg.userId, pending);
-      console.log(
-        `[scheduler] Buffered daily review for ${msg.userId} (${pending.length} pending)`,
-      );
-      return;
-    }
-
     if (!isSchedulerMessage) {
       userSession.lastUserMessageAt = Date.now();
 
@@ -440,16 +425,6 @@ export async function processMessage(
           text: `[System: the following extensions failed to load. You wrote these extensions, so diagnose and fix them.\n${errorLines}]\n\n${msg.text}`,
         };
         userSession.extensionErrors = [];
-      }
-
-      const pending = state.pendingSchedulerContext.get(msg.userId);
-      if (pending && pending.length > 0) {
-        const schedulerBlock = pending.join("\n\n---\n\n");
-        msg = {
-          ...msg,
-          text: `${schedulerBlock}\n\n---\n\nUser message:\n${msg.text}`,
-        };
-        state.pendingSchedulerContext.delete(msg.userId);
       }
     }
 

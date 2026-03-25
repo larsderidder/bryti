@@ -139,7 +139,6 @@ async function startApp(onRequestRestart?: () => void): Promise<RunningApp> {
     trustStore,
     lastUserMessages: new Map(),
     recoveredSessions: new Set(),
-    pendingSchedulerContext: new Map(),
     requestRestart: onRequestRestart ?? null,
   };
 

@@ -164,7 +164,6 @@ function makeState(
     trustStore,
     lastUserMessages: new Map(),
     recoveredSessions: new Set(),
-    pendingSchedulerContext: new Map(),
     requestRestart: null,
   };
 
@@ -296,38 +295,6 @@ describe("processMessage pipeline", () => {
 
     const texts = bridge.sent.map((s) => s.text);
     expect(texts.some((t) => t.includes("went wrong"))).toBe(true);
-  });
-
-  it("buffers projection_daily_review messages without prompting", async () => {
-    const session = makeUserSession("12345", []);
-    const promptSpy = vi.spyOn(session.session, "prompt");
-    const state = makeState(config, session, tmpDir);
-
-    await processMessage(state, {
-      ...incomingMsg("Daily review text"),
-      raw: { type: "projection_daily_review" },
-    });
-
-    expect(promptSpy).not.toHaveBeenCalled();
-    expect(state.pendingSchedulerContext.get("12345")).toEqual(["Daily review text"]);
-  });
-
-  it("prepends buffered scheduler context to the next user message", async () => {
-    const capturedPrompts: string[] = [];
-    const session = makeUserSession("12345", [assistantMsg("Got it.")]);
-    vi.spyOn(session.session, "prompt").mockImplementation(async (text: string) => {
-      capturedPrompts.push(text);
-    });
-
-    const state = makeState(config, session, tmpDir);
-    state.pendingSchedulerContext.set("12345", ["Reminder: dentist at 10am"]);
-
-    await processMessage(state, incomingMsg("What's on today?"));
-
-    expect(capturedPrompts[0]).toContain("Reminder: dentist at 10am");
-    expect(capturedPrompts[0]).toContain("What's on today?");
-    // Buffer should be cleared after consumption
-    expect(state.pendingSchedulerContext.has("12345")).toBe(false);
   });
 
   it("catches and reports thrown errors gracefully", async () => {
