@@ -141,6 +141,21 @@ export interface ProjectionStore {
   /** List dependencies, optionally filtered by observer projection id. */
   getDependencies(observerId?: string): ProjectionDependency[];
 
+  /** Get a single projection by id. Returns null if not found. */
+  getById(id: string): Projection | null;
+
+  /**
+   * Update fields on an existing pending projection. Only provided fields are
+   * changed; omitted fields remain untouched. Returns false if id not found
+   * or projection is not pending.
+   */
+  update(id: string, fields: {
+    summary?: string;
+    resolved_when?: string;
+    recurrence?: string;
+    context?: string;
+  }): boolean;
+
   /** Close the database connection. */
   close(): void;
 }
@@ -371,6 +386,9 @@ export function createProjectionStore(userId: string, dataDir: string): Projecti
     SET status = 'pending', resolved_when = ?, resolved_at = NULL
     WHERE id = ?
   `);
+
+  const stmtGetById = db.prepare(`SELECT * FROM projections WHERE id = ?`);
+
 
   // Fetch all pending projections that have a trigger_on_fact set.
   const stmtPendingWithTriggers = db.prepare(`
@@ -743,6 +761,25 @@ export function createProjectionStore(userId: string, dataDir: string): Projecti
         ? (stmtDependenciesListByObserver.all(observerId) as ProjectionDependencyRow[])
         : (stmtDependenciesList.all() as ProjectionDependencyRow[]);
       return rows.map(rowToDependency);
+    },
+
+    getById(id) {
+      const row = stmtGetById.get(id) as ProjectionRow | undefined;
+      return row ? rowToProjection(row) : null;
+    },
+
+    update(id, fields) {
+      const parts: string[] = [];
+      const values: unknown[] = [];
+      if (fields.summary !== undefined) { parts.push("summary = ?"); values.push(fields.summary); }
+      if (fields.resolved_when !== undefined) { parts.push("resolved_when = ?"); values.push(fields.resolved_when); }
+      if (fields.recurrence !== undefined) { parts.push("recurrence = ?"); values.push(fields.recurrence || null); }
+      if (fields.context !== undefined) { parts.push("context = ?"); values.push(fields.context); }
+      if (parts.length === 0) return false;
+      values.push(id);
+      const sql = `UPDATE projections SET ${parts.join(", ")} WHERE id = ? AND status = 'pending'`;
+      const result = db.prepare(sql).run(...values) as { changes: number };
+      return result.changes > 0;
     },
 
     close() {

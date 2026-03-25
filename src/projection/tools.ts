@@ -82,6 +82,20 @@ const resolveProjectionSchema = Type.Object({
   ),
 });
 
+const updateProjectionSchema = Type.Object({
+  id: Type.String({ description: "Projection ID to update" }),
+  summary: Type.Optional(Type.String({ description: "New summary text" })),
+  when: Type.Optional(Type.String({
+    description:
+      "New time. Same format as projection_create: local ISO datetime for exact, " +
+      "date string for day-resolution, 'someday' for no specific time.",
+  })),
+  recurrence: Type.Optional(Type.String({
+    description: "New cron expression (UTC), or empty string to remove recurrence",
+  })),
+  context: Type.Optional(Type.String({ description: "New extended description / notes" })),
+});
+
 const linkProjectionSchema = Type.Object({
   observer_id: Type.String({ description: "Projection that waits for a condition" }),
   subject_id: Type.String({ description: "Projection being observed" }),
@@ -95,6 +109,7 @@ const linkProjectionSchema = Type.Object({
 type ProjectInput = Static<typeof projectSchema>;
 type GetProjectionsInput = Static<typeof getProjectionsSchema>;
 type ResolveProjectionInput = Static<typeof resolveProjectionSchema>;
+type UpdateProjectionInput = Static<typeof updateProjectionSchema>;
 type LinkProjectionInput = Static<typeof linkProjectionSchema>;
 
 // ---------------------------------------------------------------------------
@@ -230,14 +245,27 @@ export function createProjectionTools(store: ProjectionStore, timezone?: string)
     description:
       "Mark a projection as resolved. Use 'done' when something happened as expected, " +
       "'cancelled' when a plan fell through, 'passed' when the time passed without confirmation. " +
-      "Call this when the user tells you an outcome, or when you observe that a projected " +
-      "time has passed.",
+      "WARNING: resolving a recurring projection stops it permanently. " +
+      "Use projection_update to change its schedule or details instead.",
     parameters: resolveProjectionSchema,
     async execute(
       _toolCallId: string,
       { id, outcome }: ResolveProjectionInput,
     ): Promise<AgentToolResult<unknown>> {
       try {
+        // Check if it's recurring before resolving — warn the agent
+        const existing = store.getById(id);
+        if (existing?.recurrence && outcome !== "cancelled") {
+          const text = JSON.stringify({
+            warning: "This is a recurring projection. Resolving it will stop it permanently. " +
+              "Use projection_update to change its schedule instead. " +
+              "Proceeding anyway since you explicitly requested resolve.",
+            resolved: true, id, outcome,
+          }, null, 2);
+          store.resolve(id, outcome);
+          return { content: [{ type: "text", text }], details: { success: true, id, outcome, warning: "recurring" } };
+        }
+
         const found = store.resolve(id, outcome);
         if (!found) {
           const text = JSON.stringify({ error: `Projection not found or already resolved: ${id}` });
@@ -245,6 +273,40 @@ export function createProjectionTools(store: ProjectionStore, timezone?: string)
         }
         const text = JSON.stringify({ success: true, id, outcome }, null, 2);
         return { content: [{ type: "text", text }], details: { success: true, id, outcome } };
+      } catch (error) {
+        const err = error as Error;
+        const text = JSON.stringify({ error: err.message });
+        return { content: [{ type: "text", text }], details: { error: err.message } };
+      }
+    },
+  };
+
+  const updateProjectionTool: AgentTool<typeof updateProjectionSchema> = {
+    name: "projection_update",
+    label: "projection_update",
+    description:
+      "Update fields on an existing pending projection. Use this to change the schedule, " +
+      "summary, recurrence cron, or context of a projection without destroying and recreating it. " +
+      "Especially useful for recurring projections — changing the cron here keeps the same ID.",
+    parameters: updateProjectionSchema,
+    async execute(
+      _toolCallId: string,
+      { id, summary, when, recurrence, context }: UpdateProjectionInput,
+    ): Promise<AgentToolResult<unknown>> {
+      try {
+        const fields: { summary?: string; resolved_when?: string; recurrence?: string; context?: string } = {};
+        if (summary !== undefined) fields.summary = summary;
+        if (when !== undefined) fields.resolved_when = toUtcDatetime(when, timezone);
+        if (recurrence !== undefined) fields.recurrence = recurrence;
+        if (context !== undefined) fields.context = context;
+
+        const found = store.update(id, fields);
+        if (!found) {
+          const text = JSON.stringify({ error: `Projection not found or not pending: ${id}` });
+          return { content: [{ type: "text", text }], details: { error: "not found" } };
+        }
+        const text = JSON.stringify({ success: true, id, updated: Object.keys(fields) }, null, 2);
+        return { content: [{ type: "text", text }], details: { success: true, id, updated: Object.keys(fields) } };
       } catch (error) {
         const err = error as Error;
         const text = JSON.stringify({ error: err.message });
@@ -281,5 +343,5 @@ export function createProjectionTools(store: ProjectionStore, timezone?: string)
     },
   };
 
-  return [projectTool, getProjectionsTool, resolveProjectionTool, linkProjectionTool];
+  return [projectTool, getProjectionsTool, resolveProjectionTool, updateProjectionTool, linkProjectionTool];
 }
