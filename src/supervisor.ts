@@ -111,6 +111,11 @@ export async function runWithSupervisor(
       break;
     }
 
+    if (!fatalError) {
+      // Intentional restart (agent called requestRestart) — no delay, no error log
+      continue;
+    }
+
     console.error("Fatal runtime error:", fatalError);
     if (shutdownRequested) {
       break;

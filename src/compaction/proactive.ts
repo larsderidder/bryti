@@ -19,6 +19,37 @@ const IDLE_THRESHOLD_MS = 30 * 60 * 1000; // 30 minutes
 const IDLE_CONTEXT_THRESHOLD = 30; // percent of context window
 
 /**
+ * Per-user backoff tracking for failed compaction attempts.
+ * On failure (especially 429), skip subsequent attempts with exponential backoff
+ * to avoid hammering the API. Resets on success.
+ */
+const compactionBackoff = new Map<string, { skipUntil: number; failures: number }>();
+
+function shouldSkipCompaction(userId: string): boolean {
+  const entry = compactionBackoff.get(userId);
+  if (!entry) return false;
+  if (Date.now() >= entry.skipUntil) {
+    compactionBackoff.delete(userId);
+    return false;
+  }
+  return true;
+}
+
+function recordCompactionFailure(userId: string): void {
+  const entry = compactionBackoff.get(userId) ?? { skipUntil: 0, failures: 0 };
+  entry.failures++;
+  // Exponential backoff: 10 min, 20 min, 40 min, 80 min, capped at 2 hours
+  const delayMs = Math.min(10 * 60 * 1000 * Math.pow(2, entry.failures - 1), 2 * 60 * 60 * 1000);
+  entry.skipUntil = Date.now() + delayMs;
+  compactionBackoff.set(userId, entry);
+  console.log(`[compaction] Backing off for user ${userId}: ${Math.round(delayMs / 60000)} min (${entry.failures} consecutive failures)`);
+}
+
+function recordCompactionSuccess(userId: string): void {
+  compactionBackoff.delete(userId);
+}
+
+/**
  * Try to compact a session. Skips if already in progress or if the session
  * is too small to bother with.
  *
@@ -47,6 +78,10 @@ export async function tryCompact(
     if (percent < IDLE_CONTEXT_THRESHOLD) {
       return;
     }
+  }
+
+  if (shouldSkipCompaction(userId)) {
+    return;
   }
 
   console.log(`[compaction] proactive ${reason} for user ${userId} (${messageCount} messages)`);
@@ -83,8 +118,10 @@ export async function tryCompact(
     }
 
     await session.compact(`${reasonHint} ${contextHint}`);
+    recordCompactionSuccess(userId);
     console.log(`[compaction] proactive ${reason} done for user ${userId}`);
   } catch (err) {
+    recordCompactionFailure(userId);
     console.error(`[compaction] proactive ${reason} failed for user ${userId}:`, (err as Error).message);
   }
 }
