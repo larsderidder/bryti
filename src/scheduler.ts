@@ -218,7 +218,11 @@ export function createScheduler(
               platform: "telegram",
               raw: { type: "projection_daily_review" },
             };
-            await onMessage(msg);
+            try {
+              await onMessage(msg);
+            } catch (err) {
+              console.error(`[projections] daily review failed for ${userId}:`, (err as Error).message);
+            }
           } finally {
             store.close();
           }
@@ -300,7 +304,11 @@ export function createScheduler(
               platform: "telegram",
               raw: { type: "projection_exact_check" },
             };
-            await onMessage(msg);
+            try {
+              await onMessage(msg);
+            } catch (err) {
+              console.error(`[projections] exact-time check failed for ${userId}:`, (err as Error).message);
+            }
           } finally {
             store.close();
           }
