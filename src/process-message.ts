@@ -456,14 +456,25 @@ export async function processMessage(
     const messageCountBefore = session.messages.length;
 
     const promptStart = Date.now();
-    await promptWithFallback(
-      session,
-      msg.text,
-      state.config,
-      userSession.modelRegistry,
-      msg.userId,
-      msg.images,
-    );
+    // Guard against stuck tool calls (e.g., bash without timeout).
+    // If the prompt takes longer than 5 minutes, abort it.
+    const PROMPT_TIMEOUT_MS = 5 * 60 * 1000;
+    const promptTimeout = setTimeout(() => {
+      console.error(`[agent] Prompt for ${msg.userId} exceeded ${PROMPT_TIMEOUT_MS / 1000}s, aborting`);
+      session.abort();
+    }, PROMPT_TIMEOUT_MS);
+    try {
+      await promptWithFallback(
+        session,
+        msg.text,
+        state.config,
+        userSession.modelRegistry,
+        msg.userId,
+        msg.images,
+      );
+    } finally {
+      clearTimeout(promptTimeout);
+    }
     const latencyMs = Date.now() - promptStart;
 
     const lastAssistant = toAssistantMessage(
