@@ -37,7 +37,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.74.0",
-    "@mariozechner/pi-coding-agent": "^0.52.12",
+    "@mariozechner/pi-coding-agent": "^0.63.1",
     "@mozilla/readability": "^0.6.0",
     "@types/markdown-it": "^14.1.2",
     "@whiskeysockets/baileys": "^7.0.0-rc.9",

@@ -330,9 +330,9 @@ export async function loadUserSession(
   let userSessionRef: UserSession | null = null;
   const toolCallCounts = new Map<string, number>();
   const unsubscribe = session.subscribe((event: AgentSessionEvent) => {
-    if (event.type === "auto_compaction_start") {
+    if (event.type === "compaction_start") {
       console.log(`[compaction] starting (reason: ${event.reason}) for user ${userId}`);
-    } else if (event.type === "auto_compaction_end") {
+    } else if (event.type === "compaction_end") {
       if (event.result) {
         const summary = event.result.summary;
         console.log(

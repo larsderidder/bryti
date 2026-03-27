@@ -167,7 +167,10 @@ export async function evaluateToolCall(
   const userPrompt = buildGuardrailPrompt(input);
 
   try {
-    const apiKey = await modelRegistry.getApiKey(model);
+    const auth = await modelRegistry.getApiKeyAndHeaders(model);
+    if (!auth.ok) {
+      return { verdict: "ASK", reason: `Auth error for guardrail model: ${auth.error}` };
+    }
     const result = await completeSimple(model, {
       systemPrompt: GUARDRAIL_SYSTEM_PROMPT,
       messages: [{
@@ -178,7 +181,8 @@ export async function evaluateToolCall(
     }, {
       maxTokens: 100,
       temperature: 0,
-      apiKey: apiKey ?? undefined,
+      apiKey: auth.apiKey,
+      headers: auth.headers,
     });
 
     if (result.stopReason === "error") {

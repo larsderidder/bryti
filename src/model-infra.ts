@@ -193,7 +193,7 @@ export function createModelInfra(config: Config): ModelInfra {
   // Auth: start with ~/.pi/agent/auth.json (pi CLI OAuth creds), then
   // seed from Claude CLI if no Anthropic credential is present there.
   // AuthStorage uses file-level locking so concurrent token refreshes are safe.
-  const authStorage = new AuthStorage();
+  const authStorage = AuthStorage.create();
 
   // Seed from Claude CLI before applying runtime overrides, so an explicit
   // api_key in config still wins (setRuntimeApiKey takes precedence).

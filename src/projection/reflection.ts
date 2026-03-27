@@ -290,11 +290,15 @@ export async function sdkComplete(
     })),
   };
 
-  const apiKey = await modelRegistry.getApiKey(model);
+  const auth = await modelRegistry.getApiKeyAndHeaders(model);
+  if (!auth.ok) {
+    throw new Error(`Reflection auth error: ${auth.error}`);
+  }
   const result = await completeSimple(model, context, {
     maxTokens: 1024,
     temperature: 0,
-    apiKey: apiKey ?? undefined,
+    apiKey: auth.apiKey,
+    headers: auth.headers,
   });
 
   if (result.stopReason === "error") {
