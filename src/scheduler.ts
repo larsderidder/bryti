@@ -208,6 +208,12 @@ export function createScheduler(
                 `4. If further out: only act if something needs attention now.\n` +
                 `5. If cancelled, resolved, or clearly passed: resolve it and move on.\n` +
                 `6. If nothing needs to happen: say nothing (NOOP is fine).\n\n` +
+                `IMPORTANT:\n` +
+                `- Check your recent conversation. If you already sent a morning check ` +
+                `(email, calendar, etc.) earlier today, do NOT repeat it. Only surface ` +
+                `projections that haven't been covered yet. NOOP if everything was already handled.\n` +
+                `- If you see duplicate projections (same purpose, overlapping schedules), ` +
+                `resolve the extras and keep only one.\n\n` +
                 `Timing rules:\n` +
                 `- If a task has a hard deadline AND an unresolved blocker (waiting on someone, missing info), ` +
                 `surface it EARLY so the user can start unblocking. Don't wait for the blocker to resolve itself.\n` +
