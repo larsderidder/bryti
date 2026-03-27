@@ -52,6 +52,83 @@ function nextCronOccurrence(cronExpr: string, after: Date): string | null {
 }
 
 // ---------------------------------------------------------------------------
+// Daily review bootstrap
+// ---------------------------------------------------------------------------
+
+const DAILY_REVIEW_TAG = "__daily_review__";
+
+/**
+ * Ensure a daily review projection exists for each known user.
+ *
+ * The daily review used to be a hardcoded cron job. Now it's a regular
+ * recurring projection so the user (and the agent) can modify its schedule
+ * with projection_update, just like any other recurring reminder.
+ *
+ * On first boot (or after a migration), this creates the projection if one
+ * doesn't already exist. The tag is used to identify it idempotently.
+ */
+function bootstrapDailyReview(config: Config): void {
+  const mem = config.agent_def.memory;
+  if (!mem.daily_review) return;
+
+  const schedule = typeof mem.daily_review === "string"
+    ? mem.daily_review
+    : "0 8 * * *";
+
+  const knownUsers = getKnownUsers(config);
+  for (const userId of knownUsers) {
+    const store = createProjectionStore(userId, config.data_dir);
+    try {
+      // Check if a daily review projection already exists (tagged), or if there's
+      // already a recurring morning projection the user set up themselves.
+      const pending = store.getUpcoming(365);
+      const hasTaggedReview = pending.some(
+        (p) => p.recurrence && p.context?.includes(DAILY_REVIEW_TAG),
+      );
+      if (hasTaggedReview) continue;
+
+      // If the user already has recurring projections in the morning window,
+      // they've set up their own routine. Don't add a redundant daily review.
+      const hasMorningRecurrence = pending.some((p) => {
+        if (!p.recurrence) return false;
+        // Check if the cron fires between 06:00-10:00 UTC (morning window)
+        const nextRun = nextCronOccurrence(p.recurrence, new Date());
+        if (!nextRun) return false;
+        const hour = parseInt(nextRun.split(" ")[1]?.split(":")[0] ?? "99", 10);
+        return hour >= 6 && hour <= 10;
+      });
+      if (hasMorningRecurrence) {
+        console.log(`[projections] user=${userId} already has morning recurring projections, skipping daily review bootstrap`);
+        continue;
+      }
+
+      const next = nextCronOccurrence(schedule, new Date());
+      if (!next) {
+        console.warn(`[projections] Could not compute next daily review occurrence for schedule: ${schedule}`);
+        continue;
+      }
+
+      const id = store.add({
+        summary: "Daily review — check upcoming events, projections, and anything that needs attention today",
+        resolved_when: next,
+        resolution: "exact",
+        recurrence: schedule,
+        context:
+          `${DAILY_REVIEW_TAG}\n` +
+          `Use projection_list to see what's coming up this week. ` +
+          `Check email and calendar if you have those tools. ` +
+          `Surface anything the user should know about today. ` +
+          `If you already sent a morning check earlier today, NOOP. ` +
+          `Clean up any duplicate projections you spot.`,
+      });
+      console.log(`[projections] Bootstrapped daily review projection ${id} for user ${userId} (${schedule})`);
+    } finally {
+      store.close();
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Scheduler interface
 // ---------------------------------------------------------------------------
 
@@ -141,115 +218,15 @@ export function createScheduler(
   }
 
   /**
-   * Two projection jobs, running for every known user:
+   * Exact-time projection check: every 5 minutes, fires timed projections.
    *
-   * - Daily review at 8am UTC: a broad "what's coming up?" pass. The agent
-   *   receives all projections due in the next 7 days and decides what to
-   *   surface. Outside active hours the job silently skips — the review is
-   *   informational, not time-critical.
-   *
-   * - Exact-time check every 5 min: a precise trigger for projections that
-   *   have a specific datetime (resolution='exact'). Only fires when something
-   *   is actually due; skips silently outside active hours.
+   * This is the single scheduling mechanism for all projections. The daily
+   * review is a regular recurring projection (bootstrapped on first boot),
+   * not a separate cron job.
    *
    * Each user gets their own independent store, message, and onMessage call.
    * Known users are derived from config (telegram.allowed_users +
    * whatsapp.allowed_users) so new users are picked up on the next restart.
-   */
-  function startProjectionJobs(): void {
-    const knownUsers = getKnownUsers(config);
-    if (knownUsers.length === 0) {
-      console.warn("[projections] No users configured — projection jobs not started");
-      return;
-    }
-
-    // Daily review: 8am UTC every day
-    const dailySchedule = typeof config.agent_def.memory.daily_review === "string"
-      ? config.agent_def.memory.daily_review
-      : "0 8 * * *";
-    const dailyJob = new Cron(
-      dailySchedule,
-      async () => {
-        // Projection jobs respect active hours; config-driven jobs do not.
-        // This asymmetry is intentional: config jobs are operator-controlled
-        // and may need to fire at any time (e.g., system maintenance notices),
-        // while projection jobs are conversational and should not wake the user.
-        if (!isActiveNow(config.active_hours)) {
-          console.log("[projections] Daily review skipped (outside active hours)");
-          return;
-        }
-        console.log(`[projections] Daily review triggered for ${knownUsers.length} user(s)`);
-
-        for (const userId of knownUsers) {
-          const store = createProjectionStore(userId, config.data_dir);
-          try {
-            const expired = store.autoExpire(24);
-            if (expired > 0) {
-              console.log(`[projections] user=${userId} auto-expired ${expired} stale projection(s)`);
-            }
-            const activated = store.evaluateDependencies();
-            if (activated > 0) {
-              console.log(`[projections] user=${userId} activated ${activated} projection(s) via dependencies`);
-            }
-            const upcoming = store.getUpcoming(7);
-            if (upcoming.length === 0) {
-              console.log(`[projections] user=${userId} daily review: no upcoming projections, skipping`);
-              continue;
-            }
-            const formatted = formatProjectionsForPrompt(upcoming, 20);
-            // raw.type marks this as a scheduler message so processMessage() can
-            // distinguish it from a real user message and skip crash checkpoints.
-            const msg: IncomingMessage = {
-              channelId: userId,
-              userId,
-              text:
-                `[Daily review]\n\nHere is what's coming up:\n\n${formatted}\n\n` +
-                `Review each item. For each projection, decide whether to surface it TODAY:\n` +
-                `1. Search your memory for related context (use memory_archival_search)\n` +
-                `2. If due today or overdue: compose a message or take action.\n` +
-                `3. If due later this week: surface only if today is the right day for it.\n` +
-                `4. If further out: only act if something needs attention now.\n` +
-                `5. If cancelled, resolved, or clearly passed: resolve it and move on.\n` +
-                `6. If nothing needs to happen: say nothing (NOOP is fine).\n\n` +
-                `IMPORTANT:\n` +
-                `- Check your recent conversation. If you already sent a morning check ` +
-                `(email, calendar, etc.) earlier today, do NOT repeat it. Only surface ` +
-                `projections that haven't been covered yet. NOOP if everything was already handled.\n` +
-                `- If you see duplicate projections (same purpose, overlapping schedules), ` +
-                `resolve the extras and keep only one.\n\n` +
-                `Timing rules:\n` +
-                `- If a task has a hard deadline AND an unresolved blocker (waiting on someone, missing info), ` +
-                `surface it EARLY so the user can start unblocking. Don't wait for the blocker to resolve itself.\n` +
-                `- If today is a light day and a task is due this week, today is probably a good day to surface it. ` +
-                `Don't skip it just because other days look busy.\n` +
-                `- Only defer if today is genuinely a bad day (too busy, user is overwhelmed, or a later day is ` +
-                `clearly better for a specific reason).`,
-              platform: "telegram",
-              raw: { type: "projection_daily_review" },
-            };
-            try {
-              await onMessage(msg);
-            } catch (err) {
-              console.error(`[projections] daily review failed for ${userId}:`, (err as Error).message);
-            }
-          } finally {
-            store.close();
-          }
-        }
-      },
-      { timezone: "UTC" },
-    );
-    cronJobs.set("projection-daily", dailyJob);
-    console.log(`[projections] Daily review scheduled (${dailySchedule}) for ${knownUsers.length} user(s)`);
-
-    startExactTimeCheck();
-  }
-
-  /**
-   * Exact-time projection check: every 5 minutes, fires timed projections.
-   *
-   * Extracted from startProjectionJobs() so it can be started independently
-   * for operational agents that don't need a daily review.
    */
   function startExactTimeCheck(): void {
     const knownUsers = getKnownUsers(config);
@@ -266,6 +243,10 @@ export function createScheduler(
           const store = createProjectionStore(userId, config.data_dir);
           try {
             store.evaluateDependencies();
+            const expired = store.autoExpire(24);
+            if (expired > 0) {
+              console.log(`[projections] user=${userId} auto-expired ${expired} stale projection(s)`);
+            }
             const due = store.getExactDue(5);
             if (due.length === 0) {
               continue;
@@ -437,14 +418,12 @@ export function createScheduler(
       //   and operational agents (learning patterns).
       const mem = config.agent_def.memory;
 
+      // Bootstrap the daily review projection if enabled. The exact-time
+      // check fires it like any other recurring projection.
       if (mem.daily_review) {
-        // Full projection suite: daily review + exact-time check
-        startProjectionJobs();
-      } else {
-        // No daily review, but still run the exact-time check so timed
-        // projections fire correctly for operational agents.
-        startExactTimeCheck();
+        bootstrapDailyReview(config);
       }
+      startExactTimeCheck();
 
       if (mem.reflection) {
         startReflectionJob();

@@ -226,22 +226,17 @@ function buildFirstConversationSection(): string {
 
 function buildSelfConfigSection(config: Config): string {
   const agentYmlPath = path.join(config.data_dir, "agent.yml");
-  const dailyReview = config.agent_def.memory.daily_review;
-  const dailyScheduleInfo = dailyReview === false
-    ? "disabled"
-    : typeof dailyReview === "string"
-      ? `custom schedule: \`${dailyReview}\` (UTC)`
-      : "default: \`0 8 * * *\` (08:00 UTC daily)";
 
   return (
     `## Self-Configuration\n` +
     `Your agent definition is at: ${agentYmlPath}\n` +
     `You can read and modify this YAML file to change your own behavior.\n\n` +
     `Modifiable settings:\n` +
-    `- \`memory.daily_review\`: ${dailyScheduleInfo}. ` +
-    `Set to a cron expression (UTC) to change the schedule, \`true\` for default, or \`false\` to disable.\n` +
     `- \`memory.reflection\`: whether the reflection pass runs (extracts projections from conversation history).\n` +
     `- \`cron\`: list of scheduled messages with \`schedule\` (cron, UTC) and \`message\` fields.\n\n` +
+    `The daily review is a regular recurring projection, not a config setting. ` +
+    `To change its schedule, use projection_update on the daily review projection. ` +
+    `No restart needed.\n\n` +
     `After modifying agent.yml, restart yourself (system_restart) for changes to take effect.\n` +
     `When modifying YAML, preserve the existing structure and comments. Only change the specific field needed.`
   );

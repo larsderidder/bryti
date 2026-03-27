@@ -72,7 +72,7 @@ describe("Scheduler", () => {
     scheduler.start();
 
     const logs = consoleSpy.mock.calls.map((c) => c[0]);
-    expect(logs.some((l: string) => l.includes("Daily review scheduled"))).toBe(true);
+    expect(logs.some((l: string) => l.includes("Bootstrapped daily review projection"))).toBe(true);
     expect(logs.some((l: string) => l.includes("Exact-time check scheduled every 5 minutes"))).toBe(true);
 
     scheduler.stop();
