@@ -164,8 +164,11 @@ export function createScheduler(
     }
 
     // Daily review: 8am UTC every day
+    const dailySchedule = typeof config.agent_def.memory.daily_review === "string"
+      ? config.agent_def.memory.daily_review
+      : "0 8 * * *";
     const dailyJob = new Cron(
-      "0 8 * * *",
+      dailySchedule,
       async () => {
         // Projection jobs respect active hours; config-driven jobs do not.
         // This asymmetry is intentional: config jobs are operator-controlled
@@ -237,7 +240,7 @@ export function createScheduler(
       { timezone: "UTC" },
     );
     cronJobs.set("projection-daily", dailyJob);
-    console.log(`[projections] Daily review scheduled at 08:00 UTC for ${knownUsers.length} user(s)`);
+    console.log(`[projections] Daily review scheduled (${dailySchedule}) for ${knownUsers.length} user(s)`);
 
     startExactTimeCheck();
   }

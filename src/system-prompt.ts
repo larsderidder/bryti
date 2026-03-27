@@ -12,6 +12,7 @@
  * they need and use operational tone to strip out personal-assistant ceremony.
  */
 
+import path from "node:path";
 import type { Config, PromptSection, PromptTone } from "./config.js";
 
 /**
@@ -223,6 +224,29 @@ function buildFirstConversationSection(): string {
   );
 }
 
+function buildSelfConfigSection(config: Config): string {
+  const agentYmlPath = path.join(config.data_dir, "agent.yml");
+  const dailyReview = config.agent_def.memory.daily_review;
+  const dailyScheduleInfo = dailyReview === false
+    ? "disabled"
+    : typeof dailyReview === "string"
+      ? `custom schedule: \`${dailyReview}\` (UTC)`
+      : "default: \`0 8 * * *\` (08:00 UTC daily)";
+
+  return (
+    `## Self-Configuration\n` +
+    `Your agent definition is at: ${agentYmlPath}\n` +
+    `You can read and modify this YAML file to change your own behavior.\n\n` +
+    `Modifiable settings:\n` +
+    `- \`memory.daily_review\`: ${dailyScheduleInfo}. ` +
+    `Set to a cron expression (UTC) to change the schedule, \`true\` for default, or \`false\` to disable.\n` +
+    `- \`memory.reflection\`: whether the reflection pass runs (extracts projections from conversation history).\n` +
+    `- \`cron\`: list of scheduled messages with \`schedule\` (cron, UTC) and \`message\` fields.\n\n` +
+    `After modifying agent.yml, restart yourself (system_restart) for changes to take effect.\n` +
+    `When modifying YAML, preserve the existing structure and comments. Only change the specific field needed.`
+  );
+}
+
 function buildSilentReplySection(): string {
   return (
     `## Silent Replies\n` +
@@ -311,6 +335,11 @@ export function buildSystemPrompt(
   // First conversation greeting (only for new users, only for conversational agents)
   if (sections.has("first_conversation") && opts?.isNewUser) {
     parts.push(buildFirstConversationSection());
+  }
+
+  // Self-configuration (only for agents with file access)
+  if (sections.has("self_config")) {
+    parts.push(buildSelfConfigSection(config));
   }
 
   // Silent reply mechanism (for scheduled/proactive agents)

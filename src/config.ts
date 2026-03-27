@@ -107,7 +107,8 @@ export type PromptSection =
   | "projections"
   | "workers"
   | "first_conversation"
-  | "silent_reply";
+  | "silent_reply"
+  | "self_config";
 
 /** All prompt sections — used as the default when no explicit list is given. */
 export const ALL_PROMPT_SECTIONS: PromptSection[] = [
@@ -122,6 +123,7 @@ export const ALL_PROMPT_SECTIONS: PromptSection[] = [
   "workers",
   "first_conversation",
   "silent_reply",
+  "self_config",
 ];
 
 /**
@@ -140,8 +142,13 @@ export type PromptTone = "conversational" | "operational";
 export interface MemoryConfig {
   /** Run the reflection pass every 30 min (extracts projections from history). Default: true. */
   reflection: boolean;
-  /** Fire the projection daily review at 08:00 UTC. Default: true. */
-  daily_review: boolean;
+  /**
+   * Daily review schedule. Surfaces upcoming projections.
+   * - true: fire at 08:00 UTC (default)
+   * - false: disabled
+   * - string: cron expression in UTC (e.g. "45 7 * * 1-5" for weekdays at 07:45 UTC)
+   */
+  daily_review: boolean | string;
   /**
    * Compaction strategy hint.
    * - "conversational": nightly compaction prompt says "the user is asleep"
@@ -450,7 +457,9 @@ function agentDefinitionFromRaw(raw: Record<string, unknown>): AgentDefinition {
   const memRaw = raw.memory as Record<string, unknown> | undefined;
   const memory: MemoryConfig = {
     reflection: memRaw?.reflection !== false,
-    daily_review: memRaw?.daily_review !== false,
+    daily_review: memRaw?.daily_review === false ? false
+      : typeof memRaw?.daily_review === "string" ? memRaw.daily_review
+      : true,
     compaction: (memRaw?.compaction as "conversational" | "operational" | undefined) ?? "conversational",
   };
 
