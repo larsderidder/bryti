@@ -24,6 +24,7 @@ import type { Config } from "./config.js";
 import type { IncomingMessage } from "./channels/types.js";
 import { createProjectionStore, formatProjectionsForPrompt, runReflection } from "./projection/index.js";
 import { isActiveNow } from "./active-hours.js";
+import { getUserTimezone } from "./time.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -39,12 +40,13 @@ import { isActiveNow } from "./active-hours.js";
  * instance, reads the next run time, then immediately stops it to avoid
  * leaking a running interval.
  */
-function nextCronOccurrence(cronExpr: string, after: Date): string | null {
+function nextCronOccurrence(cronExpr: string, after: Date, timezone = "UTC"): string | null {
   try {
-    const job = new Cron(cronExpr, { timezone: "UTC", startAt: after });
+    const job = new Cron(cronExpr, { timezone, startAt: after });
     const next = job.nextRun(after);
     job.stop();
     if (!next) return null;
+    // Store as UTC datetime string (the projection store always works in UTC)
     return next.toISOString().slice(0, 16).replace("T", " ");
   } catch {
     return null;
@@ -92,7 +94,8 @@ function bootstrapDailyReview(config: Config): void {
       const hasMorningRecurrence = pending.some((p) => {
         if (!p.recurrence) return false;
         // Check if the cron fires between 06:00-10:00 UTC (morning window)
-        const nextRun = nextCronOccurrence(p.recurrence, new Date());
+        const userTz = getUserTimezone(config);
+        const nextRun = nextCronOccurrence(p.recurrence, new Date(), userTz);
         if (!nextRun) return false;
         const hour = parseInt(nextRun.split(" ")[1]?.split(":")[0] ?? "99", 10);
         return hour >= 6 && hour <= 10;
@@ -102,7 +105,8 @@ function bootstrapDailyReview(config: Config): void {
         continue;
       }
 
-      const next = nextCronOccurrence(schedule, new Date());
+      const userTz = getUserTimezone(config);
+      const next = nextCronOccurrence(schedule, new Date(), userTz);
       if (!next) {
         console.warn(`[projections] Could not compute next daily review occurrence for schedule: ${schedule}`);
         continue;
@@ -261,10 +265,11 @@ export function createScheduler(
             // *same* occurrence again (e.g., 08:45 → next cron at 09:00 today →
             // fires again at 08:50).  Using `resolved_when` ensures the next
             // occurrence is always in the future relative to the intended time.
+            const userTz = getUserTimezone(config);
             for (const p of due) {
               if (p.recurrence) {
                 const scheduledTime = p.resolved_when ? new Date(p.resolved_when + "Z") : new Date();
-                const next = nextCronOccurrence(p.recurrence, scheduledTime);
+                const next = nextCronOccurrence(p.recurrence, scheduledTime, userTz);
                 if (next) {
                   store.rearm(p.id, next);
                   console.log(`[projections] Rearmed recurring projection ${p.id} → next: ${next}`);

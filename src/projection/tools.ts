@@ -35,8 +35,10 @@ const projectSchema = Type.Object({
     description:
       "Cron expression for repeating events. " +
       "Use standard 5-field cron syntax (minute hour day month weekday). " +
-      "Examples: '0 9 * * 1' (every Monday at 09:00 UTC), '0 9 1 * *' (first of each month at 09:00 UTC), " +
-      "'0 9 * * 5' (every Friday at 09:00 UTC). " +
+      "IMPORTANT: use the user's LOCAL time, not UTC. The system handles timezone conversion " +
+      "automatically so the projection fires at the right local time regardless of DST changes. " +
+      "Examples: '0 9 * * 1' (every Monday at 09:00 local), '0 9 1 * *' (first of each month at 09:00 local), " +
+      "'45 8 * * *' (every day at 08:45 local). " +
       "Only set this for genuinely recurring events. Leave unset for one-off events.",
   })),
   trigger_on_fact: Type.Optional(Type.String({
@@ -91,7 +93,7 @@ const updateProjectionSchema = Type.Object({
       "date string for day-resolution, 'someday' for no specific time.",
   })),
   recurrence: Type.Optional(Type.String({
-    description: "New cron expression (UTC), or empty string to remove recurrence",
+    description: "New cron expression in LOCAL time (e.g. '45 8 * * *' for 08:45 local), or empty string to remove recurrence",
   })),
   context: Type.Optional(Type.String({ description: "New extended description / notes" })),
 });
