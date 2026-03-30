@@ -53,14 +53,6 @@ function generateModelsJson(config: Config, agentDir: string): void {
   const providers: Record<string, unknown> = {};
 
   for (const provider of config.models.providers) {
-    if (provider.name === "groq") {
-      // Groq's provider format is not currently compatible with the SDK's
-      // openai-completions adapter (auth header shape differs). Skipping
-      // prevents ModelRegistry from producing broken entries.
-      // TODO: revisit once the SDK adds a native Groq adapter.
-      continue;
-    }
-
     // Providers without an api_key use OAuth from ~/.pi/agent/auth.json.
     // We still need to include them in models.json so custom model IDs
     // (not yet in SDK built-ins) are discoverable.
