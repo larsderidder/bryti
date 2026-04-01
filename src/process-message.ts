@@ -459,7 +459,9 @@ export async function processMessage(
     // Guard against stuck tool calls (e.g., bash without timeout).
     // If the prompt takes longer than 5 minutes, abort it.
     const PROMPT_TIMEOUT_MS = 5 * 60 * 1000;
+    let promptTimedOut = false;
     const promptTimeout = setTimeout(() => {
+      promptTimedOut = true;
       console.error(`[agent] Prompt for ${msg.userId} exceeded ${PROMPT_TIMEOUT_MS / 1000}s, aborting`);
       session.abort();
     }, PROMPT_TIMEOUT_MS);
@@ -474,6 +476,16 @@ export async function processMessage(
       );
     } finally {
       clearTimeout(promptTimeout);
+    }
+
+    // If the prompt was aborted due to timeout, the in-memory session state
+    // is unreliable (partially updated). Evict it from the cache so the next
+    // message reloads from the JSONL file (the source of truth).
+    if (promptTimedOut) {
+      console.log(`[agent] Evicting session for ${msg.userId} after timeout abort`);
+      await userSession.session.dispose();
+      state.sessions.delete(msg.userId);
+      return;
     }
     const latencyMs = Date.now() - promptStart;
 
