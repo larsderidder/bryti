@@ -483,6 +483,14 @@ export async function processMessage(
     // message reloads from the JSONL file (the source of truth).
     if (promptTimedOut) {
       console.log(`[agent] Evicting session for ${msg.userId} after timeout abort`);
+      try {
+        await getBridge(state, msg.platform).sendMessage(
+          msg.channelId,
+          "One of my tools took too long and I had to stop. Please resend your message.",
+        );
+      } catch {
+        // Best-effort — don't let a send failure mask the eviction
+      }
       await userSession.session.dispose();
       state.sessions.delete(msg.userId);
       return;
