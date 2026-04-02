@@ -247,6 +247,12 @@ export function createScheduler(
           const store = createProjectionStore(userId, config.data_dir);
           try {
             store.evaluateDependencies();
+            // Rearm missed recurring projections before expiring anything
+            const userTz = getUserTimezone(config);
+            const rearmed = store.rearmMissed(userTz);
+            if (rearmed.length > 0) {
+              console.log(`[projections] user=${userId} rearmed ${rearmed.length} missed recurring projection(s): ${rearmed.join(", ")}`);
+            }
             const expired = store.autoExpire(24);
             if (expired > 0) {
               console.log(`[projections] user=${userId} auto-expired ${expired} stale projection(s)`);
@@ -265,7 +271,6 @@ export function createScheduler(
             // *same* occurrence again (e.g., 08:45 → next cron at 09:00 today →
             // fires again at 08:50).  Using `resolved_when` ensures the next
             // occurrence is always in the future relative to the intended time.
-            const userTz = getUserTimezone(config);
             for (const p of due) {
               if (p.recurrence) {
                 const scheduledTime = p.resolved_when ? new Date(p.resolved_when + "Z") : new Date();

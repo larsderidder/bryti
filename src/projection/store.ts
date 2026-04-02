@@ -117,9 +117,18 @@ export interface ProjectionStore {
    * threshold_hours hours in the past and they are still pending. Exact-resolution
    * projections always expire after 1 hour; other resolutions use threshold_hours.
    * Someday projections are never expired by time.
+   * Recurring projections are never expired — use rearmMissed() for those.
    * Returns the number of rows updated.
    */
   autoExpire(threshold_hours?: number): number;
+
+  /**
+   * Rearm recurring projections whose scheduled time has passed without
+   * firing. Computes the next occurrence from the current time and advances
+   * resolved_when so the projection fires at the correct future time.
+   * Returns the ids of projections that were rearmed.
+   */
+  rearmMissed(timezone: string): string[];
 
   /**
    * Link an existing observer projection to a subject projection.
@@ -411,6 +420,7 @@ export function createProjectionStore(userId: string, dataDir: string): Projecti
     SET status = 'passed', resolved_at = datetime('now')
     WHERE status = 'pending'
       AND resolution != 'someday'
+      AND recurrence IS NULL
       AND resolved_when IS NOT NULL
       AND (
         -- Exact-time items expire after 1 hour (they either fired or were missed)
@@ -691,6 +701,42 @@ export function createProjectionStore(userId: string, dataDir: string): Projecti
     autoExpire(threshold_hours = 24) {
       const result = stmtExpire.run(String(-threshold_hours)) as { changes: number };
       return result.changes;
+    },
+
+    rearmMissed(timezone: string) {
+      // Find recurring projections whose resolved_when has passed (overdue)
+      const overdue = db.prepare(`
+        SELECT * FROM projections
+        WHERE status = 'pending'
+          AND recurrence IS NOT NULL AND recurrence != ''
+          AND resolved_when IS NOT NULL
+          AND resolved_when < datetime('now', '-10 minutes')
+      `).all() as ProjectionRow[];
+
+      const rearmed: string[] = [];
+      for (const row of overdue) {
+        const p = rowToProjection(row);
+        if (!p.recurrence) continue;
+        // Compute next occurrence from now so it fires at the correct future time
+        try {
+          const { Cron } = require("croner") as { Cron: typeof import("croner").Cron };
+          const now = new Date();
+          const job = new Cron(p.recurrence, { timezone, startAt: now });
+          const next = job.nextRun(now);
+          job.stop();
+          if (!next) continue;
+          const nextStr = next.toISOString().slice(0, 16).replace("T", " ");
+          db.prepare(`
+            UPDATE projections
+            SET resolved_when = ?, resolved_at = NULL
+            WHERE id = ? AND status = 'pending'
+          `).run(nextStr, p.id);
+          rearmed.push(p.id);
+        } catch {
+          // Skip if cron parsing fails
+        }
+      }
+      return rearmed;
     },
 
     linkDependency(observerId, subjectId, condition, conditionType) {
