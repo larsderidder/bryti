@@ -197,7 +197,7 @@ export function createModelInfra(config: Config): ModelInfra {
     }
   }
 
-  const modelRegistry = new ModelRegistry(authStorage, path.join(agentDir, "models.json"));
+  const modelRegistry = ModelRegistry.create(authStorage, path.join(agentDir, "models.json"));
   modelRegistry.refresh();
 
   return { authStorage, modelRegistry, agentDir };

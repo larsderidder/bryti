@@ -308,7 +308,7 @@ export async function loadUserSession(
   if (currentMessages.length > 0) {
     const report = repairToolUseResultPairing(currentMessages);
     if (report.changed) {
-      session.agent.replaceMessages(report.messages);
+      session.agent.state.messages = report.messages;
       console.log(
         `Transcript repair on load for user ${userId}: ` +
         `added=${report.added.length} ` +
@@ -403,7 +403,7 @@ export function repairSessionTranscript(session: AgentSession, userId: string): 
 
   const report = repairToolUseResultPairing(messages);
   if (report.changed) {
-    session.agent.replaceMessages(report.messages);
+    session.agent.state.messages = report.messages;
     console.log(
       `Transcript repair pre-prompt for user ${userId}: ` +
       `added=${report.added.length} ` +
