@@ -61,12 +61,61 @@ function generateModelsJson(config: Config, agentDir: string): void {
     // non-empty apiKey field to accept the entry at all.
     const apiKey = provider.api_key || "oauth";
 
-    providers[provider.name] = {
-      baseUrl: provider.base_url || `https://api.${provider.name}.com`,
+    const providerEntry: Record<string, unknown> = {
       api: provider.api || "openai-completions",
       apiKey: apiKey,
       ...(provider.headers && { headers: provider.headers }),
       models: provider.models.map((m) => ({
+        id: m.id,
+        name: m.name || m.id,
+        contextWindow: m.context_window || 200000,
+        maxTokens: m.max_tokens || 32000,
+        input: m.input ?? ["text", "image"],
+        ...(m.api && { api: m.api }),
+        ...(m.cost && { cost: m.cost }),
+        ...(m.compat && { compat: m.compat }),
+      })),
+    };
+
+    // Preserve built-in provider defaults when base_url is empty.
+    // Setting a synthetic fallback URL here breaks providers like
+    // openai-codex and google-antigravity, which have custom transports.
+    if (provider.base_url && provider.base_url.trim().length > 0) {
+      providerEntry.baseUrl = provider.base_url;
+    }
+
+    providers[provider.name] = providerEntry;
+  }
+
+  fs.writeFileSync(
+    modelsJsonPath,
+    JSON.stringify({ providers }, null, 2),
+    "utf-8",
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Claude CLI credential bridge
+// ---------------------------------------------------------------------------
+
+/**
+ * Claude CLI credential shape in ~/.claude/.credentials.json.
+ */
+interface ClaudeCliCredentials {
+  claudeAiOauth?: {
+    accessToken?: string;
+    refreshToken?: string;
+    expiresAt?: number;
+  };
+}
+
+/**
+ * Seed AuthStorage with Anthropic credentials from the Claude CLI credential
+ * file (~/.claude/.credentials.json) if no Anthropic credential is already
+ * present in auth.json.
+ *
+ * Claude CLI is the primary auth source for users who have it installed.
+
         id: m.id,
         name: m.name || m.id,
         contextWindow: m.context_window || 200000,
