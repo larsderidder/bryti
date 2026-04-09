@@ -180,7 +180,6 @@ export async function evaluateToolCall(
       }],
     }, {
       maxTokens: 100,
-      temperature: 0,
       apiKey: auth.apiKey,
       headers: auth.headers,
     });

@@ -296,7 +296,6 @@ export async function sdkComplete(
   }
   const result = await completeSimple(model, context, {
     maxTokens: 1024,
-    temperature: 0,
     apiKey: auth.apiKey,
     headers: auth.headers,
   });
@@ -359,8 +358,8 @@ function buildReflectionPrompt(
 /**
  * Parse the LLM output, tolerating markdown code fences and minor formatting.
  *
- * Even with `temperature: 0` and an explicit "output JSON only" instruction,
- * models occasionally wrap their response in a ```json ... ``` code fence.
+ * Even with an explicit "output JSON only" instruction, models occasionally
+ * wrap their response in a ```json ... ``` code fence.
  * The stripping step removes those fences before calling JSON.parse(), so
  * both bare JSON and fenced JSON are accepted.
  */
