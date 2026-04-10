@@ -15,6 +15,7 @@ import Database from "better-sqlite3";
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
+import { Cron } from "croner";
 import { cosineSimilarity } from "../util/math.js";
 
 // ---------------------------------------------------------------------------
@@ -719,7 +720,6 @@ export function createProjectionStore(userId: string, dataDir: string): Projecti
         if (!p.recurrence) continue;
         // Compute next occurrence from now so it fires at the correct future time
         try {
-          const { Cron } = require("croner") as { Cron: typeof import("croner").Cron };
           const now = new Date();
           const job = new Cron(p.recurrence, { timezone, startAt: now });
           const next = job.nextRun(now);
@@ -732,8 +732,8 @@ export function createProjectionStore(userId: string, dataDir: string): Projecti
             WHERE id = ? AND status = 'pending'
           `).run(nextStr, p.id);
           rearmed.push(p.id);
-        } catch {
-          // Skip if cron parsing fails
+        } catch (error) {
+          console.warn(`[projections] Failed to rearm recurring projection ${p.id}: ${(error as Error).message}`);
         }
       }
       return rearmed;
