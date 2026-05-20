@@ -80,6 +80,19 @@ telegram:
 #   enabled: true
 #   allowed_users: []  # international format without + (e.g., 31612345678)
 
+# Threema Gateway (end-to-end encrypted, text-only in this branch)
+# threema:
+#   enabled: true
+#   gateway_id: "*YOURID"
+#   secret: "${THREEMA_SECRET}"
+#   private_key_path: "${THREEMA_PRIVATE_KEY_PATH}"
+#   allowed_senders: ["ABCDEFGH"]
+#   api_base_url: "https://msgapi.threema.ch"
+#   callback:
+#     host: "127.0.0.1"
+#     port: 8787
+#     path: "/threema/callback"
+
 # ---------------------------------------------------------------------------
 # Model providers
 #

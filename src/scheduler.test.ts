@@ -22,6 +22,7 @@ function makeConfig(cron: Config["cron"] = []): Config {
     },
     telegram: { token: "tok", allowed_users: [12345] },
     whatsapp: { enabled: false, allowed_users: [] },
+    threema: { enabled: false, gateway_id: "", secret: "", private_key_path: "", allowed_senders: [], api_base_url: "https://msgapi.threema.ch", callback: { host: "127.0.0.1", port: 8787, path: "/threema/callback" } },
     models: { providers: [] },
     tools: {
       web_search: { enabled: false, searxng_url: "" },

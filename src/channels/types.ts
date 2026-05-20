@@ -6,7 +6,7 @@
  * Planned: Discord, Slack, Matrix.
  */
 
-export type Platform = "telegram" | "whatsapp" | "discord" | "slack" | "matrix";
+export type Platform = "telegram" | "whatsapp" | "threema" | "discord" | "slack" | "matrix";
 
 export interface AudioAttachment {
   /** Local filesystem path to the downloaded audio file. */

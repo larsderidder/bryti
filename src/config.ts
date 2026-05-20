@@ -239,6 +239,19 @@ export interface Config {
     /** Phone numbers in international format without +, e.g. ["31612345678"] */
     allowed_users: string[];
   };
+  threema: {
+    enabled: boolean;
+    gateway_id: string;
+    secret: string;
+    private_key_path: string;
+    allowed_senders: string[];
+    api_base_url: string;
+    callback: {
+      host: string;
+      port: number;
+      path: string;
+    };
+  };
   models: {
     providers: ProviderConfig[];
   };
@@ -366,6 +379,26 @@ function substituteDeep(obj: unknown): unknown {
  */
 function stringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
+}
+
+function booleanFrom(value: unknown, fallback = false): boolean {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    if (value === "true") return true;
+    if (value === "false") return false;
+  }
+  return fallback;
+}
+
+function stringListFrom(value: unknown): string[] {
+  if (Array.isArray(value)) return value.map(String);
+  if (typeof value === "string") {
+    return value
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+  }
+  return [];
 }
 
 function voiceFromConfig(substituted: Record<string, unknown>): VoiceConfig {
@@ -598,6 +631,23 @@ export function loadConfig(configPath?: string): Config {
       enabled: (substituted.whatsapp as { enabled?: boolean })?.enabled ?? false,
       allowed_users: ((substituted.whatsapp as { allowed_users?: string[] })?.allowed_users ?? []).map(String),
     },
+    threema: (() => {
+      const raw = (substituted.threema ?? {}) as Record<string, unknown>;
+      const callback = (raw.callback ?? {}) as Record<string, unknown>;
+      return {
+        enabled: booleanFrom(raw.enabled, false),
+        gateway_id: (raw.gateway_id as string | undefined) ?? "",
+        secret: (raw.secret as string | undefined) ?? "",
+        private_key_path: (raw.private_key_path as string | undefined) ?? "",
+        allowed_senders: stringListFrom(raw.allowed_senders),
+        api_base_url: (raw.api_base_url as string | undefined) ?? "https://msgapi.threema.ch",
+        callback: {
+          host: (callback.host as string | undefined) ?? "127.0.0.1",
+          port: toFiniteNumber(callback.port) ?? 8787,
+          path: (callback.path as string | undefined) ?? "/threema/callback",
+        },
+      };
+    })(),
     models: {
       providers: [],
       ...(substituted.models as object),
@@ -664,8 +714,8 @@ function validateConfig(config: Config): void {
 
   // --- Required fields ---
 
-  if (!config.telegram.token && !config.whatsapp.enabled) {
-    errors.push("telegram.token is required (or enable whatsapp)");
+  if (!config.telegram.token && !config.whatsapp.enabled && !config.threema.enabled) {
+    errors.push("telegram.token is required (or enable whatsapp or threema)");
   }
   if (!config.agent.model) {
     errors.push("agent.model is required");
@@ -708,6 +758,32 @@ function validateConfig(config: Config): void {
       "whatsapp is enabled but allowed_users is empty. " +
       "Anyone who finds the bot's number can message it.",
     );
+  }
+
+  if (config.threema.enabled) {
+    if (!config.threema.gateway_id) {
+      errors.push("threema.gateway_id is required when threema is enabled");
+    }
+    if (!config.threema.secret) {
+      errors.push("threema.secret is required when threema is enabled");
+    }
+    if (!config.threema.private_key_path) {
+      errors.push("threema.private_key_path is required when threema is enabled");
+    } else if (!fs.existsSync(config.threema.private_key_path)) {
+      errors.push("threema.private_key_path does not exist");
+    }
+    if (!config.threema.callback.path.startsWith("/")) {
+      errors.push("threema.callback.path must start with '/'");
+    }
+    if (config.threema.callback.port <= 0) {
+      errors.push("threema.callback.port must be greater than 0");
+    }
+    if (config.threema.allowed_senders.length === 0) {
+      warnings.push(
+        "threema is enabled but allowed_senders is empty. " +
+        "Anyone who knows the Gateway ID can message it.",
+      );
+    }
   }
 
   // --- Web search needs a URL ---

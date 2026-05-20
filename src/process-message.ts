@@ -288,7 +288,6 @@ export async function getOrLoadSession(
     userId,
     (triggered) => {
       if (!state.enqueue) return;
-      const channelId = String(state.config.telegram.allowed_users[0] ?? userId);
       const summaries = triggered.map((p) => `- ${p.summary} (id: ${p.id})`).join("\n");
       state.enqueue({
         channelId,
@@ -300,7 +299,7 @@ export async function getOrLoadSession(
           `2. Share the key findings with the user FIRST\n` +
           `3. Only THEN suggest next steps or act on them\n` +
           `Never assume the user knows what the worker found. Always present the findings before drawing conclusions or taking action.`,
-        platform: "telegram",
+        platform,
         raw: { type: "worker_trigger" },
       });
     },
@@ -366,11 +365,10 @@ export async function getOrLoadSession(
   }
 
   userSession.onCompactionComplete = () => {
-    const channelId = String(state.config.telegram.allowed_users[0] ?? userId);
     const compactionMsg: IncomingMessage = {
       channelId,
       userId,
-      platform: "telegram",
+      platform,
       text:
         "[System: context was automatically compacted. If you were in the middle of a task " +
         "for the user, continue where you left off. If not, say nothing (NOOP).]",

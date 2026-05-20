@@ -151,7 +151,7 @@ export interface Scheduler {
 /**
  * Return all user IDs that are authorised to use the bot.
  *
- * Combines Telegram and WhatsApp allowed_users into a single deduplicated
+ * Combines Telegram, WhatsApp, and Threema allow-lists into a single deduplicated
  * list of string IDs. This is the canonical source of "known users" for
  * scheduler jobs — more reliable than scanning session directories (which
  * only exist after first contact) and consistent with the auth layer.
@@ -163,6 +163,11 @@ function getKnownUsers(config: Config): string[] {
   }
   if (config.whatsapp.enabled) {
     for (const id of config.whatsapp.allowed_users) {
+      ids.add(String(id));
+    }
+  }
+  if (config.threema.enabled) {
+    for (const id of config.threema.allowed_senders) {
       ids.add(String(id));
     }
   }
@@ -181,9 +186,21 @@ export function createScheduler(
 ): Scheduler {
   const cronJobs = new Map<string, Cron>();
 
+  function defaultPlatform(): IncomingMessage["platform"] {
+    if (config.telegram.allowed_users.length > 0) return "telegram";
+    if (config.whatsapp.enabled && config.whatsapp.allowed_users.length > 0) return "whatsapp";
+    if (config.threema.enabled && config.threema.allowed_senders.length > 0) return "threema";
+    return "telegram";
+  }
+
   function defaultChannelId(): string {
-    const firstUser = config.telegram.allowed_users[0];
-    return firstUser ? String(firstUser) : "cron";
+    const telegramUser = config.telegram.allowed_users[0];
+    if (telegramUser) return String(telegramUser);
+    const whatsappUser = config.whatsapp.allowed_users[0];
+    if (config.whatsapp.enabled && whatsappUser) return String(whatsappUser);
+    const threemaUser = config.threema.allowed_senders[0];
+    if (config.threema.enabled && threemaUser) return String(threemaUser);
+    return "cron";
   }
 
   function startConfigJobs(): void {
@@ -203,7 +220,7 @@ export function createScheduler(
               channelId,
               userId: "cron",
               text: cronJob.message,
-              platform: "telegram",
+              platform: defaultPlatform(),
               raw: { type: "cron", schedule: cronJob.schedule },
             };
             await onMessage(msg);
@@ -301,7 +318,7 @@ export function createScheduler(
                 `2. Execute any actions described in the reminder (check email, check calendar, etc.)\n` +
                 `3. Send the user a helpful, natural message with your findings\n\n` +
                 `Only reply NOOP if the reminder is purely informational and requires no action or message.`,
-              platform: "telegram",
+              platform: defaultPlatform(),
               raw: { type: "projection_exact_check" },
             };
             try {

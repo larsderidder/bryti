@@ -26,6 +26,7 @@ function makeConfig(dataDir: string, allowedUsers: number[] = [123, 456]): Confi
   return {
     telegram: { token: "tok", allowed_users: allowedUsers },
     whatsapp: { enabled: false, allowed_users: [] },
+    threema: { enabled: false, gateway_id: "", secret: "", private_key_path: "", allowed_senders: [], api_base_url: "https://msgapi.threema.ch", callback: { host: "127.0.0.1", port: 8787, path: "/threema/callback" } },
     data_dir: dataDir,
   } as unknown as Config;
 }
@@ -85,6 +86,7 @@ describe("createEventsWatcher", () => {
       const config = {
         telegram: { token: "tok", allowed_users: [111] },
         whatsapp: { enabled: true, allowed_users: ["31612345678"] },
+        threema: { enabled: false, gateway_id: "", secret: "", private_key_path: "", allowed_senders: [], api_base_url: "https://msgapi.threema.ch", callback: { host: "127.0.0.1", port: 8787, path: "/threema/callback" } },
         data_dir: tmpDir,
       } as unknown as Config;
       const watcher = createEventsWatcher(config, enqueue);
@@ -231,6 +233,7 @@ describe("createEventsWatcher", () => {
       const config = {
         telegram: { token: "tok", allowed_users: [] },
         whatsapp: { enabled: true, allowed_users: ["31612345678"] },
+        threema: { enabled: false, gateway_id: "", secret: "", private_key_path: "", allowed_senders: [], api_base_url: "https://msgapi.threema.ch", callback: { host: "127.0.0.1", port: 8787, path: "/threema/callback" } },
         data_dir: tmpDir,
       } as unknown as Config;
 

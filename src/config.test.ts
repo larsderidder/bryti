@@ -13,6 +13,10 @@ describe("Config", () => {
 
   afterEach(() => {
     delete process.env.BRYTI_DATA_DIR;
+    delete process.env.THREEMA_ENABLED;
+    delete process.env.THREEMA_ALLOWED_SENDERS;
+    delete process.env.THREEMA_SECRET;
+    delete process.env.THREEMA_PRIVATE_KEY_PATH;
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
@@ -453,6 +457,41 @@ cron: []
     fs.writeFileSync(path.join(tempDir, "config.yml"), configContent);
 
     expect(() => loadConfig()).toThrow("voice.synthesize_command is required when voice is enabled");
+  });
+
+  it("parses threema config and allowed_senders from env-style strings", () => {
+    const privateKeyPath = path.join(tempDir, "threema-private.key");
+    fs.writeFileSync(privateKeyPath, `private:${"11".repeat(32)}\n`, "utf8");
+    process.env.THREEMA_ENABLED = "true";
+    process.env.THREEMA_ALLOWED_SENDERS = "ABCDEFGH,12345678";
+    process.env.THREEMA_SECRET = "topsecret";
+    process.env.THREEMA_PRIVATE_KEY_PATH = privateKeyPath;
+
+    const configContent = `
+agent:
+  name: TestBot
+  model: test/model
+threema:
+  enabled: \${THREEMA_ENABLED}
+  gateway_id: "*BRYTI01"
+  secret: \${THREEMA_SECRET}
+  private_key_path: \${THREEMA_PRIVATE_KEY_PATH}
+  allowed_senders: \${THREEMA_ALLOWED_SENDERS}
+models:
+  providers:
+    - name: test
+      base_url: https://test.example.com
+      api_key: test-key
+      models: []
+cron: []
+`;
+    fs.writeFileSync(path.join(tempDir, "config.yml"), configContent);
+
+    const config = loadConfig();
+
+    expect(config.threema.enabled).toBe(true);
+    expect(config.threema.allowed_senders).toEqual(["ABCDEFGH", "12345678"]);
+    expect(config.threema.private_key_path).toBe(privateKeyPath);
   });
 });
 
