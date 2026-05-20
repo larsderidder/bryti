@@ -3,13 +3,32 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import * as http from "node:http";
 import type { IncomingMessage as HttpIncomingMessage, ServerResponse } from "node:http";
+import os from "node:os";
+import path from "node:path";
 import nacl from "tweetnacl";
-import type { ApprovalResult, ChannelBridge, IncomingMessage, SendOpts } from "./types.js";
+import type { ApprovalResult, AudioAttachment, ChannelBridge, IncomingMessage, SendOpts } from "./types.js";
 
 const TEXT_MESSAGE_TYPE = 0x01;
+const FILE_MESSAGE_TYPE = 0x17;
 const DELIVERY_RECEIPT_TYPE = 0x80;
 const MAX_TEXT_BYTES = 3500;
 const MAX_CALLBACK_BODY_BYTES = 64 * 1024;
+const MAX_BLOB_BYTES = 20 * 1024 * 1024;
+const DEFAULT_VOICE_MESSAGE_TEXT = "The user sent a voice message.";
+const THREEMA_FILE_BLOB_NONCE = new Uint8Array(24);
+THREEMA_FILE_BLOB_NONCE[23] = 0x01;
+
+const AUDIO_MIME_BY_EXTENSION: Record<string, string> = {
+  ".aac": "audio/aac",
+  ".flac": "audio/flac",
+  ".m4a": "audio/mp4",
+  ".mp3": "audio/mpeg",
+  ".oga": "audio/ogg",
+  ".ogg": "audio/ogg",
+  ".opus": "audio/ogg",
+  ".wav": "audio/wav",
+  ".webm": "audio/webm",
+};
 
 type MessageHandler = (msg: IncomingMessage) => Promise<void>;
 
@@ -35,6 +54,12 @@ interface ThreemaSafeRaw {
   type: "threema_callback";
 }
 
+interface ThreemaBlobDownloadResponse {
+  data: Uint8Array;
+  contentType?: string;
+  contentLength?: number;
+}
+
 interface ThreemaHttpClient {
   sendE2E(params: {
     from: string;
@@ -48,6 +73,12 @@ interface ThreemaHttpClient {
     from: string;
     secret: string;
   }): Promise<string>;
+  downloadBlob(params: {
+    blobId: string;
+    from: string;
+    secret: string;
+    maxBytes: number;
+  }): Promise<ThreemaBlobDownloadResponse>;
 }
 
 interface ThreemaCrypto {
@@ -64,6 +95,11 @@ interface ThreemaCrypto {
     senderPublicKey: Uint8Array;
     privateKey: Uint8Array;
   }): Uint8Array | null;
+  decryptFileBlob(params: {
+    ciphertext: Uint8Array;
+    nonce: Uint8Array;
+    key: Uint8Array;
+  }): Uint8Array | null;
 }
 
 interface ThreemaBridgeDeps {
@@ -77,6 +113,21 @@ interface PendingApproval {
   resolve: (result: ApprovalResult) => void;
   timeout: ReturnType<typeof setTimeout>;
 }
+
+interface ThreemaFileMessagePayload {
+  blobId: string;
+  encryptionKey: Uint8Array;
+  mimeType: string;
+  fileName: string;
+  fileSize: number;
+  caption?: string;
+  thumbnailBlobId?: string;
+}
+
+type DecodedMessagePayload =
+  | { type: typeof TEXT_MESSAGE_TYPE; text: string }
+  | { type: typeof FILE_MESSAGE_TYPE; file: ThreemaFileMessagePayload }
+  | { type: number };
 
 function toUtf8(text: string): Uint8Array {
   return Buffer.from(text, "utf8");
@@ -92,6 +143,12 @@ function toHex(bytes: Uint8Array): string {
 
 function fromHex(hex: string): Uint8Array {
   return new Uint8Array(Buffer.from(hex, "hex"));
+}
+
+function createCodedError(message: string, code: string): Error & { code: string } {
+  const error = new Error(message) as Error & { code: string };
+  error.code = code;
+  return error;
 }
 
 function parseKeyHex(raw: string): string {
@@ -164,7 +221,59 @@ function encodeTextMessage(text: string, randomBytes: Uint8Array): Uint8Array {
   return padMessage(inner, randomBytes);
 }
 
-function decodeMessagePayload(payload: Uint8Array): { type: number; text?: string } {
+function encodeFileMessage(content: Record<string, unknown>, randomBytes: Uint8Array): Uint8Array {
+  const inner = new Uint8Array([FILE_MESSAGE_TYPE, ...toUtf8(JSON.stringify(content))]);
+  return padMessage(inner, randomBytes);
+}
+
+function parseFileMessagePayload(data: Uint8Array): ThreemaFileMessagePayload {
+  let content: unknown;
+  try {
+    content = JSON.parse(fromUtf8(data));
+  } catch {
+    throw createCodedError("Invalid Threema file payload", "THREEMA_INVALID_FILE_PAYLOAD");
+  }
+
+  if (!content || typeof content !== "object") {
+    throw createCodedError("Invalid Threema file payload", "THREEMA_INVALID_FILE_PAYLOAD");
+  }
+
+  const candidate = content as Record<string, unknown>;
+  const blobId = typeof candidate.b === "string" ? candidate.b.trim() : "";
+  const encryptionKeyHex = typeof candidate.k === "string" ? candidate.k.trim() : "";
+  const mimeType = typeof candidate.m === "string" ? candidate.m.trim() : "";
+  const fileName = typeof candidate.n === "string" ? candidate.n.trim() : "";
+  const fileSize = typeof candidate.s === "number" ? candidate.s : NaN;
+  const caption = typeof candidate.d === "string" && candidate.d.trim() ? candidate.d.trim() : undefined;
+  const thumbnailBlobId = typeof candidate.t === "string" && candidate.t.trim() ? candidate.t.trim() : undefined;
+
+  if (
+    !hasValidHex(blobId, 32) ||
+    !hasValidHex(encryptionKeyHex, 64) ||
+    !mimeType ||
+    !fileName ||
+    !Number.isInteger(fileSize) ||
+    fileSize < 0
+  ) {
+    throw createCodedError("Invalid Threema file payload", "THREEMA_INVALID_FILE_PAYLOAD");
+  }
+
+  if (thumbnailBlobId && !hasValidHex(thumbnailBlobId, 32)) {
+    throw createCodedError("Invalid Threema thumbnail blob ID", "THREEMA_INVALID_FILE_PAYLOAD");
+  }
+
+  return {
+    blobId: blobId.toLowerCase(),
+    encryptionKey: fromHex(encryptionKeyHex),
+    mimeType,
+    fileName,
+    fileSize,
+    caption,
+    thumbnailBlobId: thumbnailBlobId?.toLowerCase(),
+  };
+}
+
+function decodeMessagePayload(payload: Uint8Array): DecodedMessagePayload {
   const unpadded = unpadMessage(payload);
   if (unpadded.length === 0) {
     throw new Error("Invalid Threema payload");
@@ -172,6 +281,9 @@ function decodeMessagePayload(payload: Uint8Array): { type: number; text?: strin
   const type = unpadded[0] ?? 0;
   if (type === TEXT_MESSAGE_TYPE) {
     return { type, text: fromUtf8(unpadded.slice(1)) };
+  }
+  if (type === FILE_MESSAGE_TYPE) {
+    return { type, file: parseFileMessagePayload(unpadded.slice(1)) };
   }
   return { type };
 }
@@ -183,6 +295,8 @@ function normalizeThreemaIncomingMessage(params: {
   date: string;
   to: string;
   nickname?: string;
+  audio?: AudioAttachment[];
+  replyMode?: IncomingMessage["replyMode"];
 }): IncomingMessage {
   return {
     channelId: params.senderId,
@@ -198,6 +312,8 @@ function normalizeThreemaIncomingMessage(params: {
       date: params.date,
       ...(params.nickname ? { nickname: params.nickname } : {}),
     } satisfies ThreemaSafeRaw,
+    ...(params.audio ? { audio: params.audio } : {}),
+    ...(params.replyMode ? { replyMode: params.replyMode } : {}),
   };
 }
 
@@ -229,6 +345,52 @@ function verifyCallbackMac(fields: ThreemaCallbackFields, secret: string): boole
   return provided.length === expected.length && crypto.timingSafeEqual(expected, provided);
 }
 
+function sanitizeTempFileName(fileName: string): string {
+  const base = path.basename(fileName).replace(/[^a-zA-Z0-9._-]/g, "_");
+  return base || "audio.bin";
+}
+
+function inferAudioMimeType(fileName: string): string | undefined {
+  const ext = path.extname(fileName).toLowerCase();
+  return AUDIO_MIME_BY_EXTENSION[ext];
+}
+
+function resolveAudioMimeType(declaredMimeType: string, fileName: string, downloadedMimeType?: string): string {
+  const normalizedDeclared = declaredMimeType.trim().toLowerCase();
+  if (normalizedDeclared.startsWith("audio/")) return normalizedDeclared;
+
+  const normalizedDownloaded = downloadedMimeType?.split(";", 1)[0].trim().toLowerCase();
+  if (normalizedDownloaded?.startsWith("audio/")) return normalizedDownloaded;
+
+  return inferAudioMimeType(fileName) ?? (normalizedDeclared || "application/octet-stream");
+}
+
+function isLikelyAudioFileByDeclaredMetadata(declaredMimeType: string, fileName: string): boolean {
+  const normalizedDeclared = declaredMimeType.trim().toLowerCase();
+  if (normalizedDeclared.startsWith("audio/")) return true;
+  return inferAudioMimeType(fileName) != null;
+}
+
+function isSupportedAudioFile(declaredMimeType: string, fileName: string, downloadedMimeType?: string): boolean {
+  const resolved = resolveAudioMimeType(declaredMimeType, fileName, downloadedMimeType);
+  return resolved.startsWith("audio/");
+}
+
+function writeTempAudioAttachment(messageId: string, fileName: string, data: Uint8Array, mimeType: string): AudioAttachment {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bryti-threema-audio-"));
+  const safeName = sanitizeTempFileName(fileName);
+  const filePath = path.join(dir, `${messageId}-${safeName}`);
+  fs.writeFileSync(filePath, Buffer.from(data));
+
+  // TODO: Incoming audio temp files are not cleaned up by the current voice pipeline.
+  // Match the existing Telegram voice behavior for now and add explicit cleanup later.
+  return {
+    path: filePath,
+    mimeType,
+    fileName: safeName,
+  };
+}
+
 function defaultHttpClient(apiBaseUrl: string): ThreemaHttpClient {
   return {
     async sendE2E({ from, to, secret, nonceHex, boxHex }) {
@@ -252,6 +414,29 @@ function defaultHttpClient(apiBaseUrl: string): ThreemaHttpClient {
       }
       return body;
     },
+    async downloadBlob({ blobId, from, secret, maxBytes }) {
+      const params = new URLSearchParams({ from, secret });
+      const response = await fetch(`${apiBaseUrl}/blobs/${encodeURIComponent(blobId)}?${params.toString()}`);
+      if (!response.ok) {
+        throw new Error(`Threema blob download failed with HTTP ${response.status}`);
+      }
+
+      const contentLength = Number(response.headers.get("content-length") ?? "");
+      if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+        throw createCodedError("Threema blob too large", "THREEMA_BLOB_TOO_LARGE");
+      }
+
+      const buffer = new Uint8Array(await response.arrayBuffer());
+      if (buffer.byteLength > maxBytes) {
+        throw createCodedError("Threema blob too large", "THREEMA_BLOB_TOO_LARGE");
+      }
+
+      return {
+        data: buffer,
+        contentType: response.headers.get("content-type") ?? undefined,
+        contentLength: Number.isFinite(contentLength) ? contentLength : undefined,
+      };
+    },
   };
 }
 
@@ -264,6 +449,9 @@ const defaultCryptoOps: ThreemaCrypto = {
   },
   decrypt({ ciphertext, nonce, senderPublicKey, privateKey }) {
     return nacl.box.open(ciphertext, nonce, senderPublicKey, privateKey);
+  },
+  decryptFileBlob({ ciphertext, nonce, key }) {
+    return nacl.secretbox.open(ciphertext, nonce, key);
   },
 };
 
@@ -444,30 +632,63 @@ export class ThreemaBridge implements ChannelBridge {
       return { status: 400, body: "decryption failed" };
     }
 
-    const payload = decodeMessagePayload(decrypted);
+    let payload: DecodedMessagePayload;
+    try {
+      payload = decodeMessagePayload(decrypted);
+    } catch (error) {
+      const err = error as Error & { code?: string };
+      if (err.code === "THREEMA_INVALID_FILE_PAYLOAD") {
+        return { status: 200, body: "ignored" };
+      }
+      return { status: 400, body: "invalid payload" };
+    }
+
     if (payload.type === DELIVERY_RECEIPT_TYPE) {
       return { status: 200, body: "ok" };
     }
-    if (payload.type !== TEXT_MESSAGE_TYPE || !payload.text) {
-      return { status: 200, body: "ignored" };
-    }
 
-    if (this.checkApprovalResponse(fields.from, payload.text)) {
+    if (payload.type === TEXT_MESSAGE_TYPE && "text" in payload) {
+      if (this.checkApprovalResponse(fields.from, payload.text)) {
+        return { status: 200, body: "ok" };
+      }
+
+      if (this.handler) {
+        await this.handler(normalizeThreemaIncomingMessage({
+          senderId: fields.from,
+          messageId: fields.messageId,
+          text: payload.text,
+          date: fields.date,
+          to: fields.to,
+          nickname: fields.nickname,
+        }));
+      }
+
       return { status: 200, body: "ok" };
     }
 
-    if (this.handler) {
-      await this.handler(normalizeThreemaIncomingMessage({
-        senderId: fields.from,
-        messageId: fields.messageId,
-        text: payload.text,
-        date: fields.date,
-        to: fields.to,
-        nickname: fields.nickname,
-      }));
+    if (payload.type === FILE_MESSAGE_TYPE && "file" in payload) {
+      const incoming = await this.normalizeIncomingAudioMessage(fields, payload.file).catch((error: Error & { code?: string }) => {
+        if (error.code === "THREEMA_BLOB_TOO_LARGE") {
+          return null;
+        }
+        if (error.code === "THREEMA_BLOB_DECRYPT_FAILED") {
+          return null;
+        }
+        throw error;
+      });
+
+      if (!incoming) {
+        return { status: 200, body: "ignored" };
+      }
+
+      if (this.handler) {
+        await this.handler(incoming);
+      }
+
+      return { status: 200, body: "ok" };
     }
 
-    return { status: 200, body: "ok" };
+    return { status: 200, body: "ignored" };
   }
 
   private async handleHttpRequest(req: HttpIncomingMessage, res: ServerResponse): Promise<void> {
@@ -499,13 +720,66 @@ export class ThreemaBridge implements ChannelBridge {
       const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
       totalBytes += buffer.length;
       if (totalBytes > MAX_CALLBACK_BODY_BYTES) {
-        const err = new Error("Callback body too large");
-        (err as Error & { code?: string }).code = "THREEMA_BODY_TOO_LARGE";
-        throw err;
+        throw createCodedError("Callback body too large", "THREEMA_BODY_TOO_LARGE");
       }
       chunks.push(buffer);
     }
     return Buffer.concat(chunks).toString("utf8");
+  }
+
+  private async normalizeIncomingAudioMessage(
+    fields: ThreemaCallbackFields,
+    payload: ThreemaFileMessagePayload,
+  ): Promise<IncomingMessage | null> {
+    if (payload.fileSize > MAX_BLOB_BYTES) {
+      throw createCodedError("Threema blob too large", "THREEMA_BLOB_TOO_LARGE");
+    }
+
+    if (!isLikelyAudioFileByDeclaredMetadata(payload.mimeType, payload.fileName)) {
+      return null;
+    }
+
+    const blob = await this.httpClient.downloadBlob({
+      blobId: payload.blobId,
+      from: this.config.gatewayId,
+      secret: this.config.secret,
+      maxBytes: MAX_BLOB_BYTES,
+    });
+
+    if (blob.contentLength != null && blob.contentLength > MAX_BLOB_BYTES) {
+      throw createCodedError("Threema blob too large", "THREEMA_BLOB_TOO_LARGE");
+    }
+
+    if (!isSupportedAudioFile(payload.mimeType, payload.fileName, blob.contentType)) {
+      return null;
+    }
+
+    const decrypted = this.cryptoOps.decryptFileBlob({
+      ciphertext: blob.data,
+      nonce: THREEMA_FILE_BLOB_NONCE,
+      key: payload.encryptionKey,
+    });
+    if (!decrypted) {
+      throw createCodedError("Threema blob decryption failed", "THREEMA_BLOB_DECRYPT_FAILED");
+    }
+
+    if (decrypted.byteLength !== payload.fileSize) {
+      return null;
+    }
+
+    const mimeType = resolveAudioMimeType(payload.mimeType, payload.fileName, blob.contentType);
+    const audio = [writeTempAudioAttachment(fields.messageId, payload.fileName, decrypted, mimeType)];
+
+    return normalizeThreemaIncomingMessage({
+      senderId: fields.from,
+      messageId: fields.messageId,
+      text: payload.caption || DEFAULT_VOICE_MESSAGE_TEXT,
+      date: fields.date,
+      to: fields.to,
+      nickname: fields.nickname,
+      audio,
+      replyMode: "voice",
+    });
   }
 
   private async getPublicKey(id: string): Promise<Uint8Array> {
@@ -541,8 +815,12 @@ export class ThreemaBridge implements ChannelBridge {
 }
 
 export const threemaTestUtils = {
+  MAX_BLOB_BYTES,
+  THREEMA_FILE_BLOB_NONCE,
   chunkTextByUtf8Bytes,
+  padMessage,
   encodeTextMessage,
+  encodeFileMessage,
   decodeMessagePayload,
   verifyCallbackMac,
   normalizeThreemaIncomingMessage,
