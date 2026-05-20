@@ -641,6 +641,199 @@ describe("ThreemaBridge", () => {
     expect(handler).not.toHaveBeenCalled();
   });
 
+  it("sendVoice reads audio, encrypts blob, uploads it, and sends an E2E file message", async () => {
+    tmpDir = makeTmpDir();
+    const gateway = nacl.box.keyPair();
+    const privateKeyPath = writePrivateKey(tmpDir, gateway.secretKey);
+    const audioPath = path.join(tmpDir, "reply.ogg");
+    fs.writeFileSync(audioPath, Buffer.from("fake tts audio", "utf8"));
+
+    const sendE2E = vi.fn(async () => "voice-msg-123");
+    const uploadBlob = vi.fn(async () => "aa".repeat(16));
+    const fetchPublicKey = vi.fn(async () => "11".repeat(32));
+    const encrypt = vi.fn(({ plaintext }: { plaintext: Uint8Array }) => plaintext);
+    const encryptFileBlob = vi.fn(() => new Uint8Array([9, 8, 7]));
+    const randomBytes = vi
+      .fn<(...args: [number]) => Uint8Array>()
+      .mockImplementationOnce(() => new Uint8Array(32).fill(5))
+      .mockImplementationOnce(() => new Uint8Array([9]))
+      .mockImplementationOnce(() => new Uint8Array(24).fill(7));
+
+    const bridge = new ThreemaBridge({
+      gatewayId: "*BRYTI01",
+      secret: "topsecret",
+      privateKeyPath,
+      allowedSenders: ["ABCDEFGH"],
+      apiBaseUrl: "https://msgapi.threema.ch",
+      callbackHost: "127.0.0.1",
+      callbackPort: 8787,
+      callbackPath: "/threema/callback",
+    }, {
+      httpClient: {
+        sendE2E,
+        fetchPublicKey,
+        uploadBlob,
+        downloadBlob: vi.fn(),
+      },
+      cryptoOps: {
+        randomBytes,
+        encrypt,
+        decrypt: vi.fn(),
+        encryptFileBlob,
+        decryptFileBlob: vi.fn(),
+      },
+    });
+
+    const messageId = await bridge.sendVoice!("ABCDEFGH", audioPath, { caption: "Audio reply" });
+
+    expect(messageId).toBe("voice-msg-123");
+    expect(encryptFileBlob).toHaveBeenCalledWith({
+      plaintext: new Uint8Array(fs.readFileSync(audioPath)),
+      nonce: threemaTestUtils.THREEMA_FILE_BLOB_NONCE,
+      key: new Uint8Array(32).fill(5),
+    });
+    expect(uploadBlob).toHaveBeenCalledWith({
+      blob: new Uint8Array([9, 8, 7]),
+      from: "*BRYTI01",
+      secret: "topsecret",
+    });
+    expect(fetchPublicKey).toHaveBeenCalledWith({
+      id: "ABCDEFGH",
+      from: "*BRYTI01",
+      secret: "topsecret",
+    });
+    expect(sendE2E).toHaveBeenCalledWith({
+      from: "*BRYTI01",
+      to: "ABCDEFGH",
+      secret: "topsecret",
+      nonceHex: "07".repeat(24),
+      boxHex: expect.any(String),
+    });
+
+    const outbound = threemaTestUtils.decodeMessagePayload(Buffer.from(sendE2E.mock.calls[0][0].boxHex, "hex"));
+    expect(outbound.type).toBe(0x17);
+    if (outbound.type === 0x17 && "file" in outbound) {
+      expect(outbound.file.blobId).toBe("aa".repeat(16));
+      expect(outbound.file.mimeType).toBe("audio/ogg");
+      expect(outbound.file.fileName).toBe("reply.ogg");
+      expect(outbound.file.fileSize).toBe(fs.statSync(audioPath).size);
+      expect(outbound.file.caption).toBe("Audio reply");
+      expect(Buffer.from(outbound.file.encryptionKey)).toEqual(Buffer.from(new Uint8Array(32).fill(5)));
+    }
+  });
+
+  it("sendVoice rejects oversized local files before upload", async () => {
+    tmpDir = makeTmpDir();
+    const gateway = nacl.box.keyPair();
+    const privateKeyPath = writePrivateKey(tmpDir, gateway.secretKey);
+    const audioPath = path.join(tmpDir, "reply.ogg");
+    fs.writeFileSync(audioPath, Buffer.from("x"));
+    const statSpy = vi.spyOn(fs, "statSync").mockReturnValue({
+      isFile: () => true,
+      size: threemaTestUtils.MAX_BLOB_BYTES + 1,
+    } as fs.Stats);
+
+    try {
+      const uploadBlob = vi.fn();
+      const bridge = new ThreemaBridge({
+        gatewayId: "*BRYTI01",
+        secret: "topsecret",
+        privateKeyPath,
+        allowedSenders: ["ABCDEFGH"],
+        apiBaseUrl: "https://msgapi.threema.ch",
+        callbackHost: "127.0.0.1",
+        callbackPort: 8787,
+        callbackPath: "/threema/callback",
+      }, {
+        httpClient: {
+          sendE2E: vi.fn(),
+          fetchPublicKey: vi.fn(),
+          uploadBlob,
+          downloadBlob: vi.fn(),
+        },
+      });
+
+      await expect(bridge.sendVoice!("ABCDEFGH", audioPath)).rejects.toMatchObject({ code: "THREEMA_BLOB_TOO_LARGE" });
+      expect(uploadBlob).not.toHaveBeenCalled();
+    } finally {
+      statSpy.mockRestore();
+    }
+  });
+
+  it("sendVoice handles missing local files safely", async () => {
+    tmpDir = makeTmpDir();
+    const gateway = nacl.box.keyPair();
+    const privateKeyPath = writePrivateKey(tmpDir, gateway.secretKey);
+    const uploadBlob = vi.fn();
+    const bridge = new ThreemaBridge({
+      gatewayId: "*BRYTI01",
+      secret: "topsecret",
+      privateKeyPath,
+      allowedSenders: ["ABCDEFGH"],
+      apiBaseUrl: "https://msgapi.threema.ch",
+      callbackHost: "127.0.0.1",
+      callbackPort: 8787,
+      callbackPath: "/threema/callback",
+    }, {
+      httpClient: {
+        sendE2E: vi.fn(),
+        fetchPublicKey: vi.fn(),
+        uploadBlob,
+        downloadBlob: vi.fn(),
+      },
+    });
+
+    await expect(bridge.sendVoice!("ABCDEFGH", path.join(tmpDir, "missing.ogg"))).rejects.toThrow("Threema audio file not found");
+    expect(uploadBlob).not.toHaveBeenCalled();
+  });
+
+  it("sendVoice infers mime types for common TTS output extensions", async () => {
+    tmpDir = makeTmpDir();
+    const gateway = nacl.box.keyPair();
+    const privateKeyPath = writePrivateKey(tmpDir, gateway.secretKey);
+    const audioPath = path.join(tmpDir, "reply.mp3");
+    fs.writeFileSync(audioPath, Buffer.from("fake tts audio", "utf8"));
+
+    const sendE2E = vi.fn(async () => "voice-msg-123");
+    const bridge = new ThreemaBridge({
+      gatewayId: "*BRYTI01",
+      secret: "topsecret",
+      privateKeyPath,
+      allowedSenders: ["ABCDEFGH"],
+      apiBaseUrl: "https://msgapi.threema.ch",
+      callbackHost: "127.0.0.1",
+      callbackPort: 8787,
+      callbackPath: "/threema/callback",
+    }, {
+      httpClient: {
+        sendE2E,
+        fetchPublicKey: vi.fn(async () => "11".repeat(32)),
+        uploadBlob: vi.fn(async () => "aa".repeat(16)),
+        downloadBlob: vi.fn(),
+      },
+      cryptoOps: {
+        randomBytes: vi
+          .fn<(...args: [number]) => Uint8Array>()
+          .mockImplementationOnce(() => new Uint8Array(32).fill(1))
+          .mockImplementationOnce(() => new Uint8Array([9]))
+          .mockImplementationOnce(() => new Uint8Array(24).fill(2)),
+        encrypt: ({ plaintext }) => plaintext,
+        decrypt: vi.fn(),
+        encryptFileBlob: ({ plaintext }) => plaintext,
+        decryptFileBlob: vi.fn(),
+      },
+    });
+
+    await bridge.sendVoice!("ABCDEFGH", audioPath);
+
+    const outbound = threemaTestUtils.decodeMessagePayload(Buffer.from(sendE2E.mock.calls[0][0].boxHex, "hex"));
+    expect(outbound.type).toBe(0x17);
+    if (outbound.type === 0x17 && "file" in outbound) {
+      expect(outbound.file.mimeType).toBe("audio/mpeg");
+      expect(outbound.file.fileName).toBe("reply.mp3");
+    }
+  });
+
   it("sendMessage delegates to the E2E API client with encrypted payload", async () => {
     tmpDir = makeTmpDir();
     const gateway = nacl.box.keyPair();
@@ -650,8 +843,8 @@ describe("ThreemaBridge", () => {
     const encrypt = vi.fn(() => new Uint8Array([1, 2, 3]));
     const randomBytes = vi
       .fn<(...args: [number]) => Uint8Array>()
-      .mockImplementationOnce(() => new Uint8Array(24).fill(7))
-      .mockImplementationOnce(() => new Uint8Array([9]));
+      .mockImplementationOnce(() => new Uint8Array([9]))
+      .mockImplementationOnce(() => new Uint8Array(24).fill(7));
 
     const bridge = new ThreemaBridge({
       gatewayId: "*BRYTI01",

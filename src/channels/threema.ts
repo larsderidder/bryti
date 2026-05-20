@@ -73,6 +73,11 @@ interface ThreemaHttpClient {
     from: string;
     secret: string;
   }): Promise<string>;
+  uploadBlob(params: {
+    blob: Uint8Array;
+    from: string;
+    secret: string;
+  }): Promise<string>;
   downloadBlob(params: {
     blobId: string;
     from: string;
@@ -95,6 +100,11 @@ interface ThreemaCrypto {
     senderPublicKey: Uint8Array;
     privateKey: Uint8Array;
   }): Uint8Array | null;
+  encryptFileBlob(params: {
+    plaintext: Uint8Array;
+    nonce: Uint8Array;
+    key: Uint8Array;
+  }): Uint8Array;
   decryptFileBlob(params: {
     ciphertext: Uint8Array;
     nonce: Uint8Array;
@@ -345,9 +355,9 @@ function verifyCallbackMac(fields: ThreemaCallbackFields, secret: string): boole
   return provided.length === expected.length && crypto.timingSafeEqual(expected, provided);
 }
 
-function sanitizeTempFileName(fileName: string): string {
+function sanitizeFileName(fileName: string, fallback = "audio.bin"): string {
   const base = path.basename(fileName).replace(/[^a-zA-Z0-9._-]/g, "_");
-  return base || "audio.bin";
+  return base || fallback;
 }
 
 function inferAudioMimeType(fileName: string): string | undefined {
@@ -378,7 +388,7 @@ function isSupportedAudioFile(declaredMimeType: string, fileName: string, downlo
 
 function writeTempAudioAttachment(messageId: string, fileName: string, data: Uint8Array, mimeType: string): AudioAttachment {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bryti-threema-audio-"));
-  const safeName = sanitizeTempFileName(fileName);
+  const safeName = sanitizeFileName(fileName);
   const filePath = path.join(dir, `${messageId}-${safeName}`);
   fs.writeFileSync(filePath, Buffer.from(data));
 
@@ -411,6 +421,20 @@ function defaultHttpClient(apiBaseUrl: string): ThreemaHttpClient {
       const body = (await response.text()).trim();
       if (!response.ok) {
         throw new Error(`Threema pubkey lookup failed with HTTP ${response.status}`);
+      }
+      return body;
+    },
+    async uploadBlob({ blob, from, secret }) {
+      const params = new URLSearchParams({ from, secret });
+      const form = new FormData();
+      form.set("blob", new Blob([Buffer.from(blob)]), "audio.bin");
+      const response = await fetch(`${apiBaseUrl}/upload_blob?${params.toString()}`, {
+        method: "POST",
+        body: form,
+      });
+      const body = (await response.text()).trim();
+      if (!response.ok) {
+        throw new Error(`Threema blob upload failed with HTTP ${response.status}`);
       }
       return body;
     },
@@ -449,6 +473,9 @@ const defaultCryptoOps: ThreemaCrypto = {
   },
   decrypt({ ciphertext, nonce, senderPublicKey, privateKey }) {
     return nacl.box.open(ciphertext, nonce, senderPublicKey, privateKey);
+  },
+  encryptFileBlob({ plaintext, nonce, key }) {
+    return nacl.secretbox(plaintext, nonce, key);
   },
   decryptFileBlob({ ciphertext, nonce, key }) {
     return nacl.secretbox.open(ciphertext, nonce, key);
@@ -530,24 +557,58 @@ export class ThreemaBridge implements ChannelBridge {
     let lastMessageId = "";
 
     for (const chunk of chunks) {
-      const nonce = this.cryptoOps.randomBytes(24);
-      const padded = encodeTextMessage(chunk, this.cryptoOps.randomBytes(1));
-      const box = this.cryptoOps.encrypt({
-        plaintext: padded,
-        nonce,
-        recipientPublicKey: publicKey,
-        privateKey: this.privateKey,
-      });
-      lastMessageId = await this.httpClient.sendE2E({
-        from: this.config.gatewayId,
-        to: channelId,
-        secret: this.config.secret,
-        nonceHex: toHex(nonce),
-        boxHex: toHex(box),
-      });
+      lastMessageId = await this.sendEncryptedPayload(channelId, publicKey, encodeTextMessage(chunk, this.cryptoOps.randomBytes(1)));
     }
 
     return lastMessageId;
+  }
+
+  async sendVoice(channelId: string, audioPath: string, opts?: { caption?: string }): Promise<string> {
+    let stats: fs.Stats;
+    try {
+      stats = fs.statSync(audioPath);
+    } catch (error) {
+      throw new Error(`Threema audio file not found: ${(error as Error).message}`);
+    }
+
+    if (!stats.isFile()) {
+      throw new Error("Threema audio path is not a file");
+    }
+    if (stats.size > MAX_BLOB_BYTES) {
+      throw createCodedError("Threema blob too large", "THREEMA_BLOB_TOO_LARGE");
+    }
+
+    const fileContent = new Uint8Array(fs.readFileSync(audioPath));
+    const safeFileName = sanitizeFileName(path.basename(audioPath), "voice.ogg");
+    const mimeType = inferAudioMimeType(safeFileName) ?? "application/octet-stream";
+    const blobKey = this.cryptoOps.randomBytes(32);
+    const encryptedBlob = this.cryptoOps.encryptFileBlob({
+      plaintext: fileContent,
+      nonce: THREEMA_FILE_BLOB_NONCE,
+      key: blobKey,
+    });
+    const blobId = (await this.httpClient.uploadBlob({
+      blob: encryptedBlob,
+      from: this.config.gatewayId,
+      secret: this.config.secret,
+    })).trim().toLowerCase();
+
+    if (!hasValidHex(blobId, 32)) {
+      throw new Error("Invalid Threema blob ID");
+    }
+
+    const payload = encodeFileMessage({
+      b: blobId,
+      k: toHex(blobKey),
+      m: mimeType,
+      n: safeFileName,
+      s: fileContent.byteLength,
+      i: 0,
+      ...(opts?.caption ? { d: opts.caption } : {}),
+    }, this.cryptoOps.randomBytes(1));
+
+    const publicKey = await this.getPublicKey(channelId);
+    return this.sendEncryptedPayload(channelId, publicKey, payload);
   }
 
   async editMessage(_channelId: string, _messageId: string, _text: string): Promise<void> {
@@ -725,6 +786,24 @@ export class ThreemaBridge implements ChannelBridge {
       chunks.push(buffer);
     }
     return Buffer.concat(chunks).toString("utf8");
+  }
+
+  private async sendEncryptedPayload(channelId: string, publicKey: Uint8Array, plaintext: Uint8Array): Promise<string> {
+    const nonce = this.cryptoOps.randomBytes(24);
+    const box = this.cryptoOps.encrypt({
+      plaintext,
+      nonce,
+      recipientPublicKey: publicKey,
+      privateKey: this.privateKey,
+    });
+
+    return this.httpClient.sendE2E({
+      from: this.config.gatewayId,
+      to: channelId,
+      secret: this.config.secret,
+      nonceHex: toHex(nonce),
+      boxHex: toHex(box),
+    });
   }
 
   private async normalizeIncomingAudioMessage(
