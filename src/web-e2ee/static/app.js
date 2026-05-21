@@ -20,6 +20,7 @@ const inviteCodeEl = document.getElementById("invite-code");
 const pairButtonEl = document.getElementById("pair-button");
 const chatInputEl = document.getElementById("chat-input");
 const chatSendEl = document.getElementById("chat-send");
+const chatLogEl = document.getElementById("chat-log");
 
 const appState = {
   serverInfo: null,
@@ -97,6 +98,65 @@ function canonicalHeader(frame) {
     ts: frame.ts,
     nonce: frame.nonce,
   });
+}
+
+function appendChatMessage(role, text) {
+  const line = document.createElement("p");
+  line.className = `chat-line chat-line-${role}`;
+  line.textContent = `${role === "user" ? "You" : "Bryti"}: ${text}`;
+  chatLogEl.append(line);
+}
+
+async function decryptTextFrame(s2cKey, frame) {
+  const plaintext = await crypto.subtle.decrypt(
+    {
+      name: "AES-GCM",
+      iv: base64UrlToBytes(frame.nonce),
+      additionalData: new TextEncoder().encode(canonicalHeader(frame)),
+    },
+    s2cKey,
+    base64UrlToBytes(frame.ciphertext),
+  );
+  const payload = JSON.parse(new TextDecoder().decode(plaintext));
+  if (!payload || payload.kind !== "text" || typeof payload.text !== "string") {
+    throw new Error("Invalid encrypted payload");
+  }
+  const trimmed = payload.text.trim();
+  if (!trimmed) {
+    throw new Error("Encrypted text payload is empty");
+  }
+  if (trimmed.length > 10_000) {
+    throw new Error("Encrypted text payload exceeds 10000 characters");
+  }
+  return { kind: "text", text: payload.text };
+}
+
+function assertValidInboundFrame(frame) {
+  if (!frame || typeof frame !== "object" || Array.isArray(frame)) {
+    throw new Error("Invalid encrypted frame");
+  }
+  if (frame.v !== 1 || frame.kind !== "msg") {
+    throw new Error("Invalid encrypted frame");
+  }
+  if (typeof frame.deviceId !== "string" || !frame.deviceId) {
+    throw new Error("Invalid encrypted frame");
+  }
+  if (typeof frame.messageId !== "string" || !frame.messageId) {
+    throw new Error("Invalid encrypted frame");
+  }
+  if (typeof frame.counter !== "number" || !Number.isInteger(frame.counter) || frame.counter <= 0) {
+    throw new Error("Invalid encrypted frame");
+  }
+  if (typeof frame.ts !== "string" || !frame.ts) {
+    throw new Error("Invalid encrypted frame");
+  }
+  if (typeof frame.nonce !== "string" || !frame.nonce) {
+    throw new Error("Invalid encrypted frame");
+  }
+  if (typeof frame.ciphertext !== "string" || !frame.ciphertext) {
+    throw new Error("Invalid encrypted frame");
+  }
+  return frame;
 }
 
 function webSocketUrl(pathPrefix) {
@@ -223,6 +283,29 @@ async function generateDeviceKeyPair() {
   return await crypto.subtle.generateKey({ name: "X25519" }, false, ["deriveBits"]);
 }
 
+async function handleInboundEncryptedFrame(frame) {
+  if (!appState.pairedState || !appState.derivedKeys) {
+    throw new Error("Paired state not available");
+  }
+
+  const validFrame = assertValidInboundFrame(frame);
+  if (validFrame.deviceId !== appState.pairedState.deviceId) {
+    throw new Error("Encrypted frame deviceId mismatch");
+  }
+  if (validFrame.counter <= appState.pairedState.lastInboundCounter) {
+    throw new Error("Encrypted frame replay detected");
+  }
+
+  const payload = await decryptTextFrame(appState.derivedKeys.s2cKey, validFrame);
+  const nextState = {
+    ...appState.pairedState,
+    lastInboundCounter: validFrame.counter,
+  };
+  await savePairedState(nextState);
+  appState.pairedState = nextState;
+  appendChatMessage("assistant", payload.text);
+}
+
 function connectWebSocket(pathPrefix) {
   if (!appState.pairedState) {
     return;
@@ -244,16 +327,27 @@ function connectWebSocket(pathPrefix) {
   });
 
   ws.addEventListener("message", (event) => {
-    try {
-      const payload = JSON.parse(event.data);
-      if (payload.kind === "hello") {
-        wsStatusEl.textContent = "Connected";
-      } else if (payload.kind === "error") {
-        pairingMessageEl.textContent = `Transport error: ${payload.code}`;
+    void (async () => {
+      try {
+        const payload = JSON.parse(event.data);
+        if (payload.kind === "hello") {
+          wsStatusEl.textContent = "Connected";
+          return;
+        }
+        if (payload.kind === "error") {
+          pairingMessageEl.textContent = `Transport error: ${payload.code}`;
+          return;
+        }
+        if (payload.kind === "msg") {
+          await handleInboundEncryptedFrame(payload);
+          pairingMessageEl.textContent = "Encrypted text roundtrip is enabled.";
+          return;
+        }
+      } catch (error) {
+        pairingMessageEl.textContent = error instanceof Error ? error.message : String(error);
       }
-    } catch {
       wsStatusEl.textContent = "Connected";
-    }
+    })();
   });
 
   ws.addEventListener("close", () => {
@@ -373,7 +467,8 @@ async function sendEncryptedText() {
     }, text);
     appState.ws.send(JSON.stringify(frame));
     chatInputEl.value = "";
-    pairingMessageEl.textContent = "Encrypted message sent. Assistant replies are not implemented until Slice 4c.";
+    appendChatMessage("user", text);
+    pairingMessageEl.textContent = "Encrypted text roundtrip is enabled.";
   } catch (error) {
     pairingMessageEl.textContent = error instanceof Error ? error.message : String(error);
   } finally {

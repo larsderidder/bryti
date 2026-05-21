@@ -28,12 +28,12 @@ async function createServer(pathPrefix = "/") {
     serverInfo: {
       channel: "web_e2ee",
       protocolVersion: 1,
-      designVersion: "slice4a-pairing",
+      designVersion: "slice4c-encrypted-text-roundtrip",
       serverPublicFingerprint: serverKeys.fingerprint,
       pathPrefix,
       pairingEnabled: true,
-      encryptedTransport: false,
-      chatEnabled: false,
+      encryptedTransport: true,
+      chatEnabled: true,
     },
     completePairing: async (request: PairingCompleteRequest) => {
       assertValidPublicX25519Jwk(request.publicKeyJwk);
@@ -105,8 +105,8 @@ describe("WebE2EEHttpServer", () => {
     expect(response.status).toBe(200);
     expect(body.channel).toBe("web_e2ee");
     expect(body.serverPublicFingerprint).toBe(created.fingerprint);
-    expect(body.chatEnabled).toBe(false);
-    expect(body.encryptedTransport).toBe(false);
+    expect(body.chatEnabled).toBe(true);
+    expect(body.encryptedTransport).toBe(true);
     expect(body.privateKeyJwk).toBeUndefined();
     expect(body.inviteCodes).toBeUndefined();
   });
@@ -232,7 +232,7 @@ describe("WebE2EEHttpServer", () => {
     expect(await response.text()).toContain("Invalid X25519 public JWK");
   });
 
-  it("server-info still reports chat disabled after pairing support is added", async () => {
+  it("server-info reports encrypted text roundtrip availability", async () => {
     const created = await createServer("/");
     tempDirs.push(created.tempDir);
     servers.push(created.server);
@@ -240,7 +240,7 @@ describe("WebE2EEHttpServer", () => {
     const response = await fetch(`${created.server.getBaseUrl()}/api/server-info`);
     const body = await response.json() as Record<string, unknown>;
 
-    expect(body.chatEnabled).toBe(false);
-    expect(body.encryptedTransport).toBe(false);
+    expect(body.chatEnabled).toBe(true);
+    expect(body.encryptedTransport).toBe(true);
   });
 });

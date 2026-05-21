@@ -10,6 +10,7 @@ import type { ChannelBridge, Platform } from "./types.js";
 import { loadOrCreateServerKeyPair } from "../web-e2ee/server-key-store.js";
 import { createDeviceStore } from "../web-e2ee/device-store.js";
 import {
+  decryptPayload,
   deriveDirectionalAesKeys,
   encryptPayload,
   exportPublicKeyJwk,
@@ -201,13 +202,81 @@ describe("WebE2EEBridge", () => {
     await bridge.stop();
   });
 
-  it("fails loudly for outbound methods until transport exists", async () => {
+  it("sends encrypted replies to the connected paired browser", async () => {
+    const port = await getAvailablePort();
+    const bridge = makeBridge(port);
+    const devicePair = await registerDevice();
+    const handler = vi.fn(async () => {
+      const messageId = await bridge.sendMessage("wed_test", "hello browser");
+      expect(messageId).toMatch(/^msg_/);
+    });
+    bridge.onMessage(handler);
+
+    await bridge.start();
+
+    const ws = await new Promise<WebSocket>((resolve, reject) => {
+      const socket = new WebSocket(`ws://127.0.0.1:${port}/ws`, {
+        headers: { Origin: "https://bryti.tailnet.ts.net" },
+      });
+      socket.once("message", () => resolve(socket));
+      socket.once("error", reject);
+    });
+
+    const replyPromise = new Promise<Record<string, unknown>>((resolve, reject) => {
+      ws.once("message", (data) => {
+        try {
+          resolve(JSON.parse(String(data)) as Record<string, unknown>);
+        } catch (error) {
+          reject(error);
+        }
+      });
+    });
+    ws.send(JSON.stringify(await makeEncryptedFrame(1, "hello bryti", devicePair)));
+    await vi.waitFor(() => {
+      expect(handler).toHaveBeenCalledTimes(1);
+    });
+    const reply = await replyPromise;
+
+    const serverKeys = await loadOrCreateServerKeyPair(tempDir);
+    const serverPublicRaw = await exportRawPublicKey(serverKeys.publicKey);
+    const devicePublicRaw = await exportRawPublicKey(devicePair.publicKey);
+    const { s2cKey } = await deriveDirectionalAesKeys(
+      devicePair.privateKey,
+      serverKeys.publicKey,
+      serverPublicRaw,
+      devicePublicRaw,
+    );
+    const payload = await decryptPayload(s2cKey, {
+      v: reply.v as 1,
+      kind: reply.kind as "msg",
+      deviceId: String(reply.deviceId),
+      messageId: String(reply.messageId),
+      counter: Number(reply.counter),
+      ts: String(reply.ts),
+      nonce: String(reply.nonce),
+    }, String(reply.ciphertext));
+
+    expect(payload).toEqual({ kind: "text", text: "hello browser" });
+    ws.close();
+    await bridge.stop();
+  });
+
+  it("throws a clear error when sendMessage targets an offline device", async () => {
+    const bridge = makeBridge(await getAvailablePort());
+    await registerDevice();
+    await bridge.start();
+
+    await expect(bridge.sendMessage("wed_test", "hello")).rejects.toThrow(
+      "web_e2ee device is offline: wed_test",
+    );
+
+    await bridge.stop();
+  });
+
+  it("keeps edit, typing, and approval requests unimplemented", async () => {
     const bridge = makeBridge(await getAvailablePort());
     await bridge.start();
 
-    await expect(bridge.sendMessage("c1", "hello")).rejects.toThrow(
-      "web_e2ee.sendMessage is not implemented yet (transport shell only)",
-    );
     await expect(bridge.editMessage("c1", "m1", "hello")).rejects.toThrow(
       "web_e2ee.editMessage is not implemented yet (transport shell only)",
     );

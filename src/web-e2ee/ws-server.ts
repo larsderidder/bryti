@@ -1,11 +1,22 @@
 import type http from "node:http";
 import type { Socket } from "node:net";
-import { WebSocketServer, type RawData, type WebSocket } from "ws";
+import { WebSocket, WebSocketServer, type RawData } from "ws";
 import type { DeviceStore } from "./device-store.js";
-import { decryptPayload, deriveDirectionalAesKeys, exportRawPublicKey, importPublicKeyJwk, publicKeyJwkToRawBytes } from "./crypto.js";
+import {
+  decryptPayload,
+  deriveDirectionalAesKeys,
+  encryptPayload,
+  exportRawPublicKey,
+  generateMessageId,
+  generateMessageNonce,
+  importPublicKeyJwk,
+  publicKeyJwkToRawBytes,
+} from "./crypto.js";
+import { bytesToBase64Url } from "./encoding.js";
 import { normalizePathPrefix, prefixedPath } from "./path-utils.js";
 import {
   assertValidEncryptedMessageFrame,
+  assertValidEncryptedTextPayload,
   canonicalFrameHeader,
   type DecryptedTextMessageEvent,
 } from "./protocol.js";
@@ -29,6 +40,8 @@ export class WebE2EEWsServer {
   private readonly allowedOrigins: Set<string>;
   private readonly wss: WebSocketServer;
   private readonly upgradeHandler: (req: http.IncomingMessage, socket: Socket, head: Buffer) => void;
+  private readonly boundSockets = new Map<string, WebSocket>();
+  private readonly socketBindings = new WeakMap<WebSocket, string>();
 
   constructor(server: http.Server, private readonly options: WebE2EEWsServerOptions) {
     this.pathPrefix = normalizePathPrefix(options.pathPrefix);
@@ -41,10 +54,13 @@ export class WebE2EEWsServer {
         kind: "hello",
         channel: "web_e2ee",
         encrypted: true,
-        chat: false,
+        chat: true,
       });
       socket.on("message", (data) => {
         void this.handleMessage(socket, data);
+      });
+      socket.on("close", () => {
+        this.unbindSocket(socket);
       });
     });
 
@@ -112,7 +128,7 @@ export class WebE2EEWsServer {
           kind: "status",
           channel: "web_e2ee",
           encrypted: true,
-          chat: false,
+          chat: true,
         });
         return;
       case "msg":
@@ -122,6 +138,68 @@ export class WebE2EEWsServer {
         this.sendJson(socket, { kind: "error", code: "invalid_frame" });
         return;
     }
+  }
+
+  async sendEncryptedText(deviceId: string, text: string): Promise<string> {
+    const device = this.options.deviceStore.get(deviceId);
+    if (!device) {
+      throw new Error(`Unknown web_e2ee device: ${deviceId}`);
+    }
+    if (device.status !== "active") {
+      throw new Error(`web_e2ee device is not active: ${deviceId}`);
+    }
+
+    const socket = this.boundSockets.get(deviceId);
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      throw new Error(`web_e2ee device is offline: ${deviceId}`);
+    }
+
+    const nextCounter = device.lastOutboundCounter + 1;
+    const ts = new Date().toISOString();
+    this.options.deviceStore.updateLastOutboundCounter(deviceId, nextCounter, ts);
+
+    const devicePublicKey = await importPublicKeyJwk(device.publicKeyJwk);
+    const serverPublicKeyRaw = await exportRawPublicKey(this.options.serverKeys.publicKey);
+    const devicePublicKeyRaw = publicKeyJwkToRawBytes(device.publicKeyJwk);
+    const { s2cKey } = await deriveDirectionalAesKeys(
+      this.options.serverKeys.privateKey,
+      devicePublicKey,
+      serverPublicKeyRaw,
+      devicePublicKeyRaw,
+    );
+    const payload = assertValidEncryptedTextPayload({ kind: "text", text });
+    const frame = {
+      v: 1 as const,
+      kind: "msg" as const,
+      deviceId,
+      messageId: generateMessageId(),
+      counter: nextCounter,
+      ts,
+      nonce: bytesToBase64Url(generateMessageNonce()),
+    };
+    const ciphertext = await encryptPayload(s2cKey, frame, payload);
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        socket.send(JSON.stringify({ ...frame, ciphertext }), (err) => {
+          if (err) {
+            reject(err);
+            return;
+          }
+          resolve();
+        });
+      });
+    } catch {
+      this.unbindSocket(socket);
+      try {
+        socket.close(1011, "send failed");
+      } catch {
+        // ignore close failures
+      }
+      throw new Error(`Failed to deliver web_e2ee message to device: ${deviceId}`);
+    }
+
+    return frame.messageId;
   }
 
   private async handleEncryptedMessage(socket: WebSocket, frameValue: unknown): Promise<void> {
@@ -164,7 +242,14 @@ export class WebE2EEWsServer {
       return;
     }
 
-    this.options.deviceStore.updateLastInboundCounter(frame.deviceId, frame.counter, new Date().toISOString());
+    try {
+      this.bindSocket(frame.deviceId, socket);
+      this.options.deviceStore.updateLastInboundCounter(frame.deviceId, frame.counter, new Date().toISOString());
+    } catch {
+      this.sendJson(socket, { kind: "error", code: "unknown_device" });
+      return;
+    }
+
     try {
       await this.options.onDecryptedMessage?.({
         deviceId: frame.deviceId,
@@ -185,6 +270,30 @@ export class WebE2EEWsServer {
       });
     } catch {
       this.sendJson(socket, { kind: "error", code: "handler_failed" });
+    }
+  }
+
+  private bindSocket(deviceId: string, socket: WebSocket): void {
+    const current = this.boundSockets.get(deviceId);
+    if (current && current !== socket) {
+      this.unbindSocket(current);
+      try {
+        current.close(1008, "replaced by newer session");
+      } catch {
+        // ignore close failures
+      }
+    }
+    this.boundSockets.set(deviceId, socket);
+    this.socketBindings.set(socket, deviceId);
+  }
+
+  private unbindSocket(socket: WebSocket): void {
+    const deviceId = this.socketBindings.get(socket);
+    if (!deviceId) {
+      return;
+    }
+    if (this.boundSockets.get(deviceId) === socket) {
+      this.boundSockets.delete(deviceId);
     }
   }
 

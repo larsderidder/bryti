@@ -72,3 +72,25 @@ button {
   background: #374151;
   color: #f9fafb;
 }
+
+.chat-log {
+  min-height: 4rem;
+  max-height: 18rem;
+  overflow-y: auto;
+  margin-bottom: 0.75rem;
+}
+
+.chat-line {
+  margin: 0 0 0.5rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: 0.5rem;
+  background: #111827;
+}
+
+.chat-line-user {
+  border: 1px solid #2563eb;
+}
+
+.chat-line-assistant {
+  border: 1px solid #059669;
+}

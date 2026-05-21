@@ -57,6 +57,7 @@ export interface DeviceStore {
   add(record: PairedDeviceRecord): Promise<void>;
   markSeen(deviceId: string, at?: string): void;
   updateLastInboundCounter(deviceId: string, counter: number, seenAt?: string): void;
+  updateLastOutboundCounter(deviceId: string, counter: number, seenAt?: string): void;
 }
 
 export function createDeviceStore(dataDir: string): DeviceStore {
@@ -110,6 +111,17 @@ export function createDeviceStore(dataDir: string): DeviceStore {
         throw new Error(`Unknown device: ${deviceId}`);
       }
       device.lastInboundCounter = counter;
+      device.lastSeenAt = seenAt;
+      saveFile(filePath, file);
+    },
+
+    updateLastOutboundCounter(deviceId: string, counter: number, seenAt = new Date().toISOString()): void {
+      const file = loadFile(filePath);
+      const device = file.devices.find((d) => d.deviceId === deviceId);
+      if (!device) {
+        throw new Error(`Unknown device: ${deviceId}`);
+      }
+      device.lastOutboundCounter = counter;
       device.lastSeenAt = seenAt;
       saveFile(filePath, file);
     },

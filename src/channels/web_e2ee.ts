@@ -11,11 +11,10 @@ import type { ApprovalResult, ChannelBridge, IncomingMessage, SendOpts } from ".
 type MessageHandler = (msg: IncomingMessage) => Promise<void>;
 
 /**
- * Minimal plumbing-only bridge for the future self-hosted web_e2ee channel.
+ * Self-hosted web_e2ee channel bridge.
  *
- * Slice 1 intentionally does not implement transport, crypto, pairing, or any
- * browser-facing runtime. Outbound methods fail loudly so startup wiring can be
- * tested without pretending delivery works.
+ * Slice 4c supports encrypted text roundtrips over WebSocket for already paired
+ * devices. Richer outbound semantics remain intentionally unimplemented.
  */
 export class WebE2EEBridge implements ChannelBridge {
   readonly name = "web_e2ee";
@@ -55,12 +54,12 @@ export class WebE2EEBridge implements ChannelBridge {
       serverInfo: {
         channel: "web_e2ee",
         protocolVersion: 1,
-        designVersion: "slice4b-encrypted-inbound",
+        designVersion: "slice4c-encrypted-text-roundtrip",
         serverPublicFingerprint: serverKeys.fingerprint,
         pathPrefix: this.config.path_prefix,
         pairingEnabled: this.config.pairing.invite_ttl_minutes > 0,
-        encryptedTransport: false,
-        chatEnabled: false,
+        encryptedTransport: true,
+        chatEnabled: true,
       },
       completePairing: async (request: PairingCompleteRequest) => {
         assertValidPublicX25519Jwk(request.publicKeyJwk);
@@ -156,9 +155,12 @@ export class WebE2EEBridge implements ChannelBridge {
     this.handler = handler;
   }
 
-  async sendMessage(_channelId: string, _text: string, _opts?: SendOpts): Promise<string> {
+  async sendMessage(channelId: string, text: string, _opts?: SendOpts): Promise<string> {
     this.assertStarted();
-    throw new Error("web_e2ee.sendMessage is not implemented yet (transport shell only)");
+    if (!this.wsServer) {
+      throw new Error("web_e2ee websocket server not started");
+    }
+    return await this.wsServer.sendEncryptedText(channelId, text);
   }
 
   async editMessage(_channelId: string, _messageId: string, _text: string): Promise<void> {

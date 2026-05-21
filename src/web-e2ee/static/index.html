@@ -11,7 +11,7 @@
   <body>
     <main class="app">
       <h1>Bryti web_e2ee</h1>
-      <p class="lede">Slice 4b: encrypted inbound text only. Assistant replies are not implemented yet.</p>
+      <p class="lede">Slice 4c: encrypted text roundtrip is enabled for paired devices.</p>
 
       <section class="card">
         <h2>Status</h2>
@@ -54,8 +54,9 @@
         <p id="pairing-message">Pairing not started.</p>
       </section>
 
-      <section class="card muted">
+      <section class="card">
         <h2>Chat</h2>
+        <div id="chat-log" class="chat-log" aria-live="polite"></div>
         <input id="chat-input" type="text" placeholder="Pair and connect to enable encrypted outbound text" disabled>
         <button id="chat-send" type="button" disabled>Send</button>
       </section>

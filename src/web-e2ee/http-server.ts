@@ -29,8 +29,8 @@ export interface ServerInfoResponse {
   serverPublicFingerprint: string;
   pathPrefix: string;
   pairingEnabled: boolean;
-  encryptedTransport: false;
-  chatEnabled: false;
+  encryptedTransport: boolean;
+  chatEnabled: boolean;
 }
 
 export interface WebE2EEHttpServerOptions {

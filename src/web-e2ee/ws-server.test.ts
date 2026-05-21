@@ -2,6 +2,7 @@ import fs from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 import {
+  decryptPayload,
   deriveDirectionalAesKeys,
   encryptPayload,
   exportPublicKeyJwk,
@@ -29,12 +30,12 @@ async function createServers(pathPrefix = "/") {
     serverInfo: {
       channel: "web_e2ee",
       protocolVersion: 1,
-      designVersion: "slice4b-encrypted-inbound",
+      designVersion: "slice4c-encrypted-text-roundtrip",
       serverPublicFingerprint: serverKeys.fingerprint,
       pathPrefix,
       pairingEnabled: true,
-      encryptedTransport: false,
-      chatEnabled: false,
+      encryptedTransport: true,
+      chatEnabled: true,
     },
   });
   await httpServer.start();
@@ -131,6 +132,26 @@ async function makeEncryptedFrame(counter: number, text: string, devicePair: Cry
   };
 }
 
+async function decryptReplyFrame(frame: Record<string, unknown>, devicePair: CryptoKeyPair, serverPublicKey: CryptoKey) {
+  const serverPublicRaw = await exportRawPublicKey(serverPublicKey);
+  const devicePublicRaw = await exportRawPublicKey(devicePair.publicKey);
+  const { s2cKey } = await deriveDirectionalAesKeys(
+    devicePair.privateKey,
+    serverPublicKey,
+    serverPublicRaw,
+    devicePublicRaw,
+  );
+  return await decryptPayload(s2cKey, {
+    v: frame.v as 1,
+    kind: frame.kind as "msg",
+    deviceId: String(frame.deviceId),
+    messageId: String(frame.messageId),
+    counter: Number(frame.counter),
+    ts: String(frame.ts),
+    nonce: String(frame.nonce),
+  }, String(frame.ciphertext));
+}
+
 describe("WebE2EEWsServer", () => {
   const tempDirs: string[] = [];
   const servers: Array<{ httpServer: WebE2EEHttpServer; wsServer: WebE2EEWsServer }> = [];
@@ -167,7 +188,7 @@ describe("WebE2EEWsServer", () => {
     )).rejects.toThrow();
   });
 
-  it("sends hello and status frames without claiming replies are implemented", async () => {
+  it("sends hello and status frames advertising encrypted text roundtrip", async () => {
     const created = await createServers("/chat");
     tempDirs.push(created.tempDir);
     servers.push(created);
@@ -184,13 +205,13 @@ describe("WebE2EEWsServer", () => {
       kind: "hello",
       channel: "web_e2ee",
       encrypted: true,
-      chat: false,
+      chat: true,
     });
     expect(status).toMatchObject({
       kind: "status",
       channel: "web_e2ee",
       encrypted: true,
-      chat: false,
+      chat: true,
     });
 
     ws.close();
@@ -207,9 +228,10 @@ describe("WebE2EEWsServer", () => {
     );
 
     ws.send(JSON.stringify(await makeEncryptedFrame(1, "hello bryti", devicePair, created.serverKeys.publicKey)));
-    await new Promise((resolve) => setTimeout(resolve, 25));
+    await vi.waitFor(() => {
+      expect(created.onDecryptedMessage).toHaveBeenCalledTimes(1);
+    });
 
-    expect(created.onDecryptedMessage).toHaveBeenCalledTimes(1);
     expect(created.onDecryptedMessage).toHaveBeenCalledWith(expect.objectContaining({
       deviceId: "wed_test",
       messageId: "msg_1",
@@ -283,7 +305,9 @@ describe("WebE2EEWsServer", () => {
     );
 
     ws.send(JSON.stringify(await makeEncryptedFrame(1, "hello", devicePair, created.serverKeys.publicKey)));
-    await new Promise((resolve) => setTimeout(resolve, 25));
+    await vi.waitFor(() => {
+      expect(created.onDecryptedMessage).toHaveBeenCalledTimes(1);
+    });
     ws.send(JSON.stringify(await makeEncryptedFrame(1, "hello again", devicePair, created.serverKeys.publicKey)));
     const error = await nextJsonMessage(ws);
 
@@ -336,5 +360,144 @@ describe("WebE2EEWsServer", () => {
     expect(created.onDecryptedMessage).toHaveBeenCalledTimes(1);
     expect(created.deviceStore.get("wed_test")?.lastInboundCounter).toBe(1);
     ws.close();
+  });
+
+  it("encrypts replies for the bound live socket and returns the generated messageId", async () => {
+    const created = await createServers("/");
+    tempDirs.push(created.tempDir);
+    servers.push(created);
+    const { devicePair } = await registerDevice(created.deviceStore);
+    const { ws } = await connectWebSocketWithHello(
+      `${created.httpServer.getBaseUrl().replace("http", "ws")}/ws`,
+      "https://chat.example.test",
+    );
+
+    ws.send(JSON.stringify(await makeEncryptedFrame(1, "hello bryti", devicePair, created.serverKeys.publicKey)));
+    await vi.waitFor(() => {
+      expect(created.onDecryptedMessage).toHaveBeenCalledTimes(1);
+    });
+
+    const messageId = await created.wsServer.sendEncryptedText("wed_test", "hello browser");
+    const reply = await nextJsonMessage(ws);
+    const payload = await decryptReplyFrame(reply, devicePair, created.serverKeys.publicKey);
+
+    expect(messageId).toMatch(/^msg_/);
+    expect(reply).toMatchObject({
+      v: 1,
+      kind: "msg",
+      deviceId: "wed_test",
+      messageId,
+      counter: 1,
+    });
+    expect(payload).toEqual({ kind: "text", text: "hello browser" });
+    expect(created.deviceStore.get("wed_test")?.lastOutboundCounter).toBe(1);
+    ws.close();
+  });
+
+  it("throws a clear error when sending to an offline device", async () => {
+    const created = await createServers("/");
+    tempDirs.push(created.tempDir);
+    servers.push(created);
+    await registerDevice(created.deviceStore);
+
+    await expect(created.wsServer.sendEncryptedText("wed_test", "hello browser")).rejects.toThrow(
+      "web_e2ee device is offline: wed_test",
+    );
+  });
+
+  it("throws for unknown or revoked outbound targets", async () => {
+    const created = await createServers("/");
+    tempDirs.push(created.tempDir);
+    servers.push(created);
+    await registerDevice(created.deviceStore, "revoked");
+
+    await expect(created.wsServer.sendEncryptedText("wed_missing", "hello")).rejects.toThrow(
+      "Unknown web_e2ee device: wed_missing",
+    );
+    await expect(created.wsServer.sendEncryptedText("wed_test", "hello")).rejects.toThrow(
+      "web_e2ee device is not active: wed_test",
+    );
+  });
+
+  it("persists outbound counter before send and does not reuse it after send failure", async () => {
+    const created = await createServers("/");
+    tempDirs.push(created.tempDir);
+    servers.push(created);
+    const { devicePair } = await registerDevice(created.deviceStore);
+    const { ws } = await connectWebSocketWithHello(
+      `${created.httpServer.getBaseUrl().replace("http", "ws")}/ws`,
+      "https://chat.example.test",
+    );
+
+    ws.send(JSON.stringify(await makeEncryptedFrame(1, "bind me", devicePair, created.serverKeys.publicKey)));
+    await vi.waitFor(() => {
+      expect(created.onDecryptedMessage).toHaveBeenCalledTimes(1);
+    });
+
+    const boundSockets = (created.wsServer as unknown as { boundSockets: Map<string, WebSocket> }).boundSockets;
+    const serverSocket = boundSockets.get("wed_test");
+    expect(serverSocket).toBeTruthy();
+    const originalSend = serverSocket!.send.bind(serverSocket);
+    serverSocket!.send = ((_: unknown, cb?: (err?: Error) => void) => {
+      cb?.(new Error("simulated send failure"));
+      return undefined as never;
+    }) as typeof serverSocket.send;
+
+    await expect(created.wsServer.sendEncryptedText("wed_test", "first reply")).rejects.toThrow(
+      "Failed to deliver web_e2ee message to device: wed_test",
+    );
+    expect(created.deviceStore.get("wed_test")?.lastOutboundCounter).toBe(1);
+
+    const { ws: ws2 } = await connectWebSocketWithHello(
+      `${created.httpServer.getBaseUrl().replace("http", "ws")}/ws`,
+      "https://chat.example.test",
+    );
+    ws2.send(JSON.stringify(await makeEncryptedFrame(2, "rebind me", devicePair, created.serverKeys.publicKey)));
+    await vi.waitFor(() => {
+      expect(created.onDecryptedMessage).toHaveBeenCalledTimes(2);
+    });
+
+    const messageId = await created.wsServer.sendEncryptedText("wed_test", "second reply");
+    const reply = await nextJsonMessage(ws2);
+    expect(messageId).toMatch(/^msg_/);
+    expect(reply.counter).toBe(2);
+    expect(created.deviceStore.get("wed_test")?.lastOutboundCounter).toBe(2);
+
+    serverSocket!.send = originalSend;
+    ws.close();
+    ws2.close();
+  });
+
+  it("routes replies only to the newest bound socket for a device", async () => {
+    const created = await createServers("/");
+    tempDirs.push(created.tempDir);
+    servers.push(created);
+    const { devicePair } = await registerDevice(created.deviceStore);
+    const { ws: ws1 } = await connectWebSocketWithHello(
+      `${created.httpServer.getBaseUrl().replace("http", "ws")}/ws`,
+      "https://chat.example.test",
+    );
+    ws1.send(JSON.stringify(await makeEncryptedFrame(1, "bind one", devicePair, created.serverKeys.publicKey)));
+    await vi.waitFor(() => {
+      expect(created.onDecryptedMessage).toHaveBeenCalledTimes(1);
+    });
+
+    const { ws: ws2 } = await connectWebSocketWithHello(
+      `${created.httpServer.getBaseUrl().replace("http", "ws")}/ws`,
+      "https://chat.example.test",
+    );
+    const closed = new Promise<number>((resolve) => {
+      ws1.once("close", (code) => resolve(code));
+    });
+    ws2.send(JSON.stringify(await makeEncryptedFrame(2, "bind two", devicePair, created.serverKeys.publicKey)));
+    await expect(closed).resolves.toBe(1008);
+
+    const messageId = await created.wsServer.sendEncryptedText("wed_test", "newest session only");
+    const reply = await nextJsonMessage(ws2);
+    const payload = await decryptReplyFrame(reply, devicePair, created.serverKeys.publicKey);
+
+    expect(reply.messageId).toBe(messageId);
+    expect(payload).toEqual({ kind: "text", text: "newest session only" });
+    ws2.close();
   });
 });

@@ -63,7 +63,7 @@ describe("web-e2ee device store", () => {
     await expect(store.add({ ...base, deviceId: "wed_other" })).rejects.toThrow("Device public key already registered");
   });
 
-  it("gets active devices and updates lastSeenAt / lastInboundCounter", async () => {
+  it("gets active devices and updates lastSeenAt / lastInboundCounter / lastOutboundCounter", async () => {
     const pair = await generateX25519KeyPair();
     const publicKeyJwk = await exportPublicKeyJwk(pair.publicKey);
     const publicKeyFingerprint = await fingerprintPublicKey(pair.publicKey);
@@ -85,9 +85,11 @@ describe("web-e2ee device store", () => {
     expect(store.getActive("wed_seen")?.deviceId).toBe("wed_seen");
     store.markSeen("wed_seen", "2026-01-01T00:00:00.000Z");
     store.updateLastInboundCounter("wed_seen", 4, "2026-01-02T00:00:00.000Z");
+    store.updateLastOutboundCounter("wed_seen", 6, "2026-01-03T00:00:00.000Z");
 
     const updated = createDeviceStore(tempDir).get("wed_seen");
-    expect(updated?.lastSeenAt).toBe("2026-01-02T00:00:00.000Z");
+    expect(updated?.lastSeenAt).toBe("2026-01-03T00:00:00.000Z");
     expect(updated?.lastInboundCounter).toBe(4);
+    expect(updated?.lastOutboundCounter).toBe(6);
   });
 });
