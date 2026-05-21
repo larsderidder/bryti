@@ -30,7 +30,14 @@ const appState = {
   ws: null,
   wsConnected: false,
   sendingText: false,
+  reconnectTimer: null,
+  reconnectAttempts: 0,
+  reconnectGeneration: 0,
 };
+
+const RECONNECT_MIN_DELAY_MS = 1_000;
+const RECONNECT_MAX_DELAY_MS = 15_000;
+const BIND_ERROR_CODES = new Set(["invalid_frame", "unknown_device", "revoked_device", "replay_detected", "decrypt_failed"]);
 
 function supportsRequiredCrypto() {
   return !!(
@@ -211,17 +218,17 @@ async function deriveDirectionalKeys(devicePrivateKey, serverPublicKeyJwk, devic
   return { c2sKey, s2cKey };
 }
 
-async function encryptTextFrame(c2sKey, pairedState, text) {
+async function encryptFrame(c2sKey, pairedState, kind, payload) {
   const frame = {
     v: 1,
-    kind: "msg",
+    kind,
     deviceId: pairedState.deviceId,
     messageId: `msg_${randomBase64Url(12)}`,
     counter: pairedState.nextOutboundCounter,
     ts: new Date().toISOString(),
     nonce: randomBase64Url(12),
   };
-  const plaintextBytes = new TextEncoder().encode(JSON.stringify({ kind: "text", text }));
+  const plaintextBytes = new TextEncoder().encode(JSON.stringify(payload));
   const ciphertext = await crypto.subtle.encrypt(
     {
       name: "AES-GCM",
@@ -306,12 +313,71 @@ async function handleInboundEncryptedFrame(frame) {
   appendChatMessage("assistant", payload.text);
 }
 
+function clearReconnectTimer() {
+  if (appState.reconnectTimer) {
+    clearTimeout(appState.reconnectTimer);
+    appState.reconnectTimer = null;
+  }
+}
+
+function scheduleReconnect(pathPrefix) {
+  if (!appState.pairedState || appState.reconnectTimer) {
+    return;
+  }
+  const delayMs = Math.min(
+    RECONNECT_MIN_DELAY_MS * (2 ** Math.min(appState.reconnectAttempts, 4)),
+    RECONNECT_MAX_DELAY_MS,
+  );
+  appState.reconnectAttempts += 1;
+  appState.reconnectTimer = window.setTimeout(() => {
+    appState.reconnectTimer = null;
+    connectWebSocket(pathPrefix);
+  }, delayMs);
+}
+
+async function sendReservedEncryptedFrame(kind, payload) {
+  if (!appState.pairedState || !appState.derivedKeys || !appState.ws || appState.ws.readyState !== WebSocket.OPEN) {
+    throw new Error("WebSocket is not connected");
+  }
+
+  const currentState = await loadPairedState();
+  if (!currentState) {
+    throw new Error("Paired state not found.");
+  }
+
+  const currentCounter = Number.isInteger(currentState.nextOutboundCounter)
+    ? currentState.nextOutboundCounter
+    : 1;
+  const reservedState = {
+    ...currentState,
+    nextOutboundCounter: currentCounter + 1,
+  };
+  await savePairedState(reservedState);
+  appState.pairedState = reservedState;
+
+  const frame = await encryptFrame(appState.derivedKeys.c2sKey, {
+    ...currentState,
+    nextOutboundCounter: currentCounter,
+  }, kind, payload);
+  appState.ws.send(JSON.stringify(frame));
+  return frame;
+}
+
 function connectWebSocket(pathPrefix) {
   if (!appState.pairedState) {
     return;
   }
+
+  appState.reconnectGeneration += 1;
+  const generation = appState.reconnectGeneration;
+  clearReconnectTimer();
+
   if (appState.ws) {
-    appState.ws.close();
+    try {
+      appState.ws.close();
+    } catch {
+      // ignore close failures
+    }
   }
 
   const ws = new WebSocket(webSocketUrl(pathPrefix));
@@ -321,9 +387,26 @@ function connectWebSocket(pathPrefix) {
   updateChatAvailability();
 
   ws.addEventListener("open", () => {
-    appState.wsConnected = true;
-    wsStatusEl.textContent = "Connected";
-    updateChatAvailability();
+    void (async () => {
+      if (generation !== appState.reconnectGeneration || appState.ws !== ws) {
+        return;
+      }
+      appState.wsConnected = true;
+      wsStatusEl.textContent = "Connected";
+      updateChatAvailability();
+      try {
+        await sendReservedEncryptedFrame("bind", { kind: "bind" });
+        appState.reconnectAttempts = 0;
+        pairingMessageEl.textContent = "Encrypted text roundtrip is enabled.";
+      } catch (error) {
+        pairingMessageEl.textContent = error instanceof Error ? error.message : String(error);
+        try {
+          ws.close();
+        } catch {
+          // ignore close failures
+        }
+      }
+    })();
   });
 
   ws.addEventListener("message", (event) => {
@@ -336,6 +419,15 @@ function connectWebSocket(pathPrefix) {
         }
         if (payload.kind === "error") {
           pairingMessageEl.textContent = `Transport error: ${payload.code}`;
+          if (BIND_ERROR_CODES.has(payload.code)) {
+            appState.wsConnected = false;
+            updateChatAvailability();
+            try {
+              ws.close();
+            } catch {
+              // ignore close failures
+            }
+          }
           return;
         }
         if (payload.kind === "msg") {
@@ -351,9 +443,15 @@ function connectWebSocket(pathPrefix) {
   });
 
   ws.addEventListener("close", () => {
+    if (appState.ws === ws) {
+      appState.ws = null;
+    }
     appState.wsConnected = false;
     wsStatusEl.textContent = "Closed";
     updateChatAvailability();
+    if (generation === appState.reconnectGeneration && appState.pairedState) {
+      scheduleReconnect(pathPrefix);
+    }
   });
 
   ws.addEventListener("error", () => {
@@ -445,27 +543,7 @@ async function sendEncryptedText() {
   updateChatAvailability();
 
   try {
-    const currentState = await loadPairedState();
-    if (!currentState) {
-      pairingMessageEl.textContent = "Paired state not found.";
-      return;
-    }
-
-    const currentCounter = Number.isInteger(currentState.nextOutboundCounter)
-      ? currentState.nextOutboundCounter
-      : 1;
-    const reservedState = {
-      ...currentState,
-      nextOutboundCounter: currentCounter + 1,
-    };
-    await savePairedState(reservedState);
-    appState.pairedState = reservedState;
-
-    const frame = await encryptTextFrame(appState.derivedKeys.c2sKey, {
-      ...currentState,
-      nextOutboundCounter: currentCounter,
-    }, text);
-    appState.ws.send(JSON.stringify(frame));
+    await sendReservedEncryptedFrame("msg", { kind: "text", text });
     chatInputEl.value = "";
     appendChatMessage("user", text);
     pairingMessageEl.textContent = "Encrypted text roundtrip is enabled.";

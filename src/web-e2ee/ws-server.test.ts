@@ -108,7 +108,13 @@ async function nextJsonMessage(ws: WebSocket): Promise<Record<string, unknown>> 
   });
 }
 
-async function makeEncryptedFrame(counter: number, text: string, devicePair: CryptoKeyPair, serverPublicKey: CryptoKey) {
+async function makeEncryptedFrame(
+  counter: number,
+  kind: "msg" | "bind",
+  payload: { kind: "text"; text: string } | { kind: "bind" },
+  devicePair: CryptoKeyPair,
+  serverPublicKey: CryptoKey,
+) {
   const serverPublicRaw = await exportRawPublicKey(serverPublicKey);
   const devicePublicRaw = await exportRawPublicKey(devicePair.publicKey);
   const { c2sKey } = await deriveDirectionalAesKeys(
@@ -119,7 +125,7 @@ async function makeEncryptedFrame(counter: number, text: string, devicePair: Cry
   );
   const frame = {
     v: 1 as const,
-    kind: "msg" as const,
+    kind,
     deviceId: "wed_test",
     messageId: `msg_${counter}`,
     counter,
@@ -128,7 +134,7 @@ async function makeEncryptedFrame(counter: number, text: string, devicePair: Cry
   };
   return {
     ...frame,
-    ciphertext: await encryptPayload(c2sKey, frame, { kind: "text", text }),
+    ciphertext: await encryptPayload(c2sKey, frame, payload),
   };
 }
 
@@ -227,7 +233,7 @@ describe("WebE2EEWsServer", () => {
       "https://chat.example.test",
     );
 
-    ws.send(JSON.stringify(await makeEncryptedFrame(1, "hello bryti", devicePair, created.serverKeys.publicKey)));
+    ws.send(JSON.stringify(await makeEncryptedFrame(1, "msg", { kind: "text", text: "hello bryti" }, devicePair, created.serverKeys.publicKey)));
     await vi.waitFor(() => {
       expect(created.onDecryptedMessage).toHaveBeenCalledTimes(1);
     });
@@ -272,7 +278,7 @@ describe("WebE2EEWsServer", () => {
       "https://chat.example.test",
     );
 
-    ws.send(JSON.stringify(await makeEncryptedFrame(1, "hello", devicePair, created.serverKeys.publicKey)));
+    ws.send(JSON.stringify(await makeEncryptedFrame(1, "msg", { kind: "text", text: "hello" }, devicePair, created.serverKeys.publicKey)));
     const error = await nextJsonMessage(ws);
     expect(error).toMatchObject({ kind: "error", code: "unknown_device" });
     ws.close();
@@ -288,7 +294,7 @@ describe("WebE2EEWsServer", () => {
       "https://chat.example.test",
     );
 
-    ws.send(JSON.stringify(await makeEncryptedFrame(1, "hello", devicePair, created.serverKeys.publicKey)));
+    ws.send(JSON.stringify(await makeEncryptedFrame(1, "msg", { kind: "text", text: "hello" }, devicePair, created.serverKeys.publicKey)));
     const error = await nextJsonMessage(ws);
     expect(error).toMatchObject({ kind: "error", code: "revoked_device" });
     ws.close();
@@ -304,11 +310,11 @@ describe("WebE2EEWsServer", () => {
       "https://chat.example.test",
     );
 
-    ws.send(JSON.stringify(await makeEncryptedFrame(1, "hello", devicePair, created.serverKeys.publicKey)));
+    ws.send(JSON.stringify(await makeEncryptedFrame(1, "msg", { kind: "text", text: "hello" }, devicePair, created.serverKeys.publicKey)));
     await vi.waitFor(() => {
       expect(created.onDecryptedMessage).toHaveBeenCalledTimes(1);
     });
-    ws.send(JSON.stringify(await makeEncryptedFrame(1, "hello again", devicePair, created.serverKeys.publicKey)));
+    ws.send(JSON.stringify(await makeEncryptedFrame(1, "msg", { kind: "text", text: "hello again" }, devicePair, created.serverKeys.publicKey)));
     const error = await nextJsonMessage(ws);
 
     expect(error).toMatchObject({ kind: "error", code: "replay_detected" });
@@ -326,18 +332,101 @@ describe("WebE2EEWsServer", () => {
       "https://chat.example.test",
     );
 
-    const frame = await makeEncryptedFrame(1, "hello", devicePair, created.serverKeys.publicKey);
+    const frame = await makeEncryptedFrame(1, "msg", { kind: "text", text: "hello" }, devicePair, created.serverKeys.publicKey);
     ws.send(JSON.stringify({ ...frame, nonce: bytesToBase64Url(generateMessageNonce()) }));
     const decryptError = await nextJsonMessage(ws);
     expect(decryptError).toMatchObject({ kind: "error", code: "decrypt_failed" });
     expect(created.deviceStore.get("wed_test")?.lastInboundCounter).toBe(0);
 
-    const invalidPayloadFrame = await makeEncryptedFrame(2, "   ", devicePair, created.serverKeys.publicKey);
+    const invalidPayloadFrame = await makeEncryptedFrame(
+      2,
+      "msg",
+      { kind: "text", text: "   " },
+      devicePair,
+      created.serverKeys.publicKey,
+    );
     ws.send(JSON.stringify(invalidPayloadFrame));
     const payloadError = await nextJsonMessage(ws);
     expect(payloadError).toMatchObject({ kind: "error", code: "decrypt_failed" });
     expect(created.deviceStore.get("wed_test")?.lastInboundCounter).toBe(0);
     ws.close();
+  });
+
+  it("accepts a valid encrypted bind frame without calling the message handler", async () => {
+    const created = await createServers("/");
+    tempDirs.push(created.tempDir);
+    servers.push(created);
+    const { devicePair } = await registerDevice(created.deviceStore);
+    const { ws } = await connectWebSocketWithHello(
+      `${created.httpServer.getBaseUrl().replace("http", "ws")}/ws`,
+      "https://chat.example.test",
+    );
+
+    ws.send(JSON.stringify(await makeEncryptedFrame(1, "bind", { kind: "bind" }, devicePair, created.serverKeys.publicKey)));
+    await vi.waitFor(() => {
+      expect(created.deviceStore.get("wed_test")?.lastInboundCounter).toBe(1);
+    });
+
+    expect(created.onDecryptedMessage).not.toHaveBeenCalled();
+    ws.close();
+  });
+
+  it("rejects replayed bind counters", async () => {
+    const created = await createServers("/");
+    tempDirs.push(created.tempDir);
+    servers.push(created);
+    const { devicePair } = await registerDevice(created.deviceStore);
+    const { ws } = await connectWebSocketWithHello(
+      `${created.httpServer.getBaseUrl().replace("http", "ws")}/ws`,
+      "https://chat.example.test",
+    );
+
+    ws.send(JSON.stringify(await makeEncryptedFrame(1, "bind", { kind: "bind" }, devicePair, created.serverKeys.publicKey)));
+    await vi.waitFor(() => {
+      expect(created.deviceStore.get("wed_test")?.lastInboundCounter).toBe(1);
+    });
+
+    ws.send(JSON.stringify(await makeEncryptedFrame(1, "bind", { kind: "bind" }, devicePair, created.serverKeys.publicKey)));
+    const error = await nextJsonMessage(ws);
+
+    expect(error).toMatchObject({ kind: "error", code: "replay_detected" });
+    expect(created.onDecryptedMessage).not.toHaveBeenCalled();
+    ws.close();
+  });
+
+  it("restores reply routing after reconnect with bind only", async () => {
+    const created = await createServers("/");
+    tempDirs.push(created.tempDir);
+    servers.push(created);
+    const { devicePair } = await registerDevice(created.deviceStore);
+    const { ws: ws1 } = await connectWebSocketWithHello(
+      `${created.httpServer.getBaseUrl().replace("http", "ws")}/ws`,
+      "https://chat.example.test",
+    );
+
+    ws1.send(JSON.stringify(await makeEncryptedFrame(1, "bind", { kind: "bind" }, devicePair, created.serverKeys.publicKey)));
+    await vi.waitFor(() => {
+      expect(created.deviceStore.get("wed_test")?.lastInboundCounter).toBe(1);
+    });
+    ws1.close();
+
+    const { ws: ws2 } = await connectWebSocketWithHello(
+      `${created.httpServer.getBaseUrl().replace("http", "ws")}/ws`,
+      "https://chat.example.test",
+    );
+    ws2.send(JSON.stringify(await makeEncryptedFrame(2, "bind", { kind: "bind" }, devicePair, created.serverKeys.publicKey)));
+    await vi.waitFor(() => {
+      expect(created.deviceStore.get("wed_test")?.lastInboundCounter).toBe(2);
+    });
+
+    const messageId = await created.wsServer.sendEncryptedText("wed_test", "hello after reconnect");
+    const reply = await nextJsonMessage(ws2);
+    const payload = await decryptReplyFrame(reply, devicePair, created.serverKeys.publicKey);
+
+    expect(reply.messageId).toBe(messageId);
+    expect(payload).toEqual({ kind: "text", text: "hello after reconnect" });
+    expect(created.onDecryptedMessage).not.toHaveBeenCalled();
+    ws2.close();
   });
 
   it("catches bridge handler failures without unhandled rejections", async () => {
@@ -353,7 +442,7 @@ describe("WebE2EEWsServer", () => {
       "https://chat.example.test",
     );
 
-    ws.send(JSON.stringify(await makeEncryptedFrame(1, "hello bryti", devicePair, created.serverKeys.publicKey)));
+    ws.send(JSON.stringify(await makeEncryptedFrame(1, "msg", { kind: "text", text: "hello bryti" }, devicePair, created.serverKeys.publicKey)));
     const error = await nextJsonMessage(ws);
 
     expect(error).toMatchObject({ kind: "error", code: "handler_failed" });
@@ -372,7 +461,7 @@ describe("WebE2EEWsServer", () => {
       "https://chat.example.test",
     );
 
-    ws.send(JSON.stringify(await makeEncryptedFrame(1, "hello bryti", devicePair, created.serverKeys.publicKey)));
+    ws.send(JSON.stringify(await makeEncryptedFrame(1, "msg", { kind: "text", text: "hello bryti" }, devicePair, created.serverKeys.publicKey)));
     await vi.waitFor(() => {
       expect(created.onDecryptedMessage).toHaveBeenCalledTimes(1);
     });
@@ -429,9 +518,9 @@ describe("WebE2EEWsServer", () => {
       "https://chat.example.test",
     );
 
-    ws.send(JSON.stringify(await makeEncryptedFrame(1, "bind me", devicePair, created.serverKeys.publicKey)));
+    ws.send(JSON.stringify(await makeEncryptedFrame(1, "bind", { kind: "bind" }, devicePair, created.serverKeys.publicKey)));
     await vi.waitFor(() => {
-      expect(created.onDecryptedMessage).toHaveBeenCalledTimes(1);
+      expect(created.deviceStore.get("wed_test")?.lastInboundCounter).toBe(1);
     });
 
     const boundSockets = (created.wsServer as unknown as { boundSockets: Map<string, WebSocket> }).boundSockets;
@@ -452,9 +541,9 @@ describe("WebE2EEWsServer", () => {
       `${created.httpServer.getBaseUrl().replace("http", "ws")}/ws`,
       "https://chat.example.test",
     );
-    ws2.send(JSON.stringify(await makeEncryptedFrame(2, "rebind me", devicePair, created.serverKeys.publicKey)));
+    ws2.send(JSON.stringify(await makeEncryptedFrame(2, "bind", { kind: "bind" }, devicePair, created.serverKeys.publicKey)));
     await vi.waitFor(() => {
-      expect(created.onDecryptedMessage).toHaveBeenCalledTimes(2);
+      expect(created.deviceStore.get("wed_test")?.lastInboundCounter).toBe(2);
     });
 
     const messageId = await created.wsServer.sendEncryptedText("wed_test", "second reply");
@@ -477,9 +566,9 @@ describe("WebE2EEWsServer", () => {
       `${created.httpServer.getBaseUrl().replace("http", "ws")}/ws`,
       "https://chat.example.test",
     );
-    ws1.send(JSON.stringify(await makeEncryptedFrame(1, "bind one", devicePair, created.serverKeys.publicKey)));
+    ws1.send(JSON.stringify(await makeEncryptedFrame(1, "bind", { kind: "bind" }, devicePair, created.serverKeys.publicKey)));
     await vi.waitFor(() => {
-      expect(created.onDecryptedMessage).toHaveBeenCalledTimes(1);
+      expect(created.deviceStore.get("wed_test")?.lastInboundCounter).toBe(1);
     });
 
     const { ws: ws2 } = await connectWebSocketWithHello(
@@ -489,7 +578,7 @@ describe("WebE2EEWsServer", () => {
     const closed = new Promise<number>((resolve) => {
       ws1.once("close", (code) => resolve(code));
     });
-    ws2.send(JSON.stringify(await makeEncryptedFrame(2, "bind two", devicePair, created.serverKeys.publicKey)));
+    ws2.send(JSON.stringify(await makeEncryptedFrame(2, "bind", { kind: "bind" }, devicePair, created.serverKeys.publicKey)));
     await expect(closed).resolves.toBe(1008);
 
     const messageId = await created.wsServer.sendEncryptedText("wed_test", "newest session only");

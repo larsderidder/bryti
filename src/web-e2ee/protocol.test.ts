@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  assertValidEncryptedMessageFrame,
+  assertValidEncryptedBindPayload,
+  assertValidEncryptedFrame,
   assertValidEncryptedTextPayload,
   assertValidPairingCompleteRequest,
   canonicalFrameHeaderJson,
@@ -60,8 +61,8 @@ describe("web-e2ee protocol", () => {
     expect(json).not.toContain("ciphertext");
   });
 
-  it("accepts encrypted msg frames and text payloads", () => {
-    expect(assertValidEncryptedMessageFrame({
+  it("accepts encrypted msg/bind frames and payloads", () => {
+    expect(assertValidEncryptedFrame({
       v: 1,
       kind: "msg",
       deviceId: "wed_123",
@@ -72,13 +73,28 @@ describe("web-e2ee protocol", () => {
       ciphertext: "def",
     }).messageId).toBe("msg_123");
 
+    expect(assertValidEncryptedFrame({
+      v: 1,
+      kind: "bind",
+      deviceId: "wed_123",
+      messageId: "msg_124",
+      counter: 2,
+      ts: "2026-01-01T00:00:00.000Z",
+      nonce: "ghi",
+      ciphertext: "jkl",
+    }).kind).toBe("bind");
+
     expect(assertValidEncryptedTextPayload({ kind: "text", text: "hello" }).text).toBe("hello");
+    expect(assertValidEncryptedBindPayload({ kind: "bind" }).kind).toBe("bind");
   });
 
   it("rejects malformed encrypted frames and invalid payloads", () => {
-    expect(() => assertValidEncryptedMessageFrame({ kind: "msg" })).toThrow("Invalid encrypted frame version");
+    expect(() => assertValidEncryptedFrame({ kind: "msg" })).toThrow("Invalid encrypted frame version");
     expect(() => assertValidEncryptedTextPayload({ kind: "text", text: "   " })).toThrow(
       "Encrypted text payload is empty",
+    );
+    expect(() => assertValidEncryptedBindPayload({ kind: "bind", text: "nope" })).toThrow(
+      "Invalid encrypted bind payload",
     );
   });
 });

@@ -15,7 +15,8 @@ import {
 import { bytesToBase64Url } from "./encoding.js";
 import { normalizePathPrefix, prefixedPath } from "./path-utils.js";
 import {
-  assertValidEncryptedMessageFrame,
+  assertValidEncryptedBindPayload,
+  assertValidEncryptedFrame,
   assertValidEncryptedTextPayload,
   canonicalFrameHeader,
   type DecryptedTextMessageEvent,
@@ -132,7 +133,8 @@ export class WebE2EEWsServer {
         });
         return;
       case "msg":
-        await this.handleEncryptedMessage(socket, frame);
+      case "bind":
+        await this.handleEncryptedFrame(socket, frame);
         return;
       default:
         this.sendJson(socket, { kind: "error", code: "invalid_frame" });
@@ -202,10 +204,10 @@ export class WebE2EEWsServer {
     return frame.messageId;
   }
 
-  private async handleEncryptedMessage(socket: WebSocket, frameValue: unknown): Promise<void> {
+  private async handleEncryptedFrame(socket: WebSocket, frameValue: unknown): Promise<void> {
     let frame;
     try {
-      frame = assertValidEncryptedMessageFrame(frameValue);
+      frame = assertValidEncryptedFrame(frameValue);
     } catch {
       this.sendJson(socket, { kind: "error", code: "invalid_frame" });
       return;
@@ -225,7 +227,7 @@ export class WebE2EEWsServer {
       return;
     }
 
-    let payload;
+    let decrypted: unknown;
     try {
       const devicePublicKey = await importPublicKeyJwk(device.publicKeyJwk);
       const serverPublicKeyRaw = await exportRawPublicKey(this.options.serverKeys.publicKey);
@@ -236,17 +238,31 @@ export class WebE2EEWsServer {
         serverPublicKeyRaw,
         devicePublicKeyRaw,
       );
-      payload = await decryptPayload(c2sKey, canonicalFrameHeader(frame), frame.ciphertext);
+      decrypted = await decryptPayload(c2sKey, canonicalFrameHeader(frame), frame.ciphertext);
     } catch {
       this.sendJson(socket, { kind: "error", code: "decrypt_failed" });
       return;
     }
 
+    let payload: ReturnType<typeof assertValidEncryptedTextPayload> | null = null;
     try {
+      if (frame.kind === "bind") {
+        assertValidEncryptedBindPayload(decrypted);
+      } else {
+        payload = assertValidEncryptedTextPayload(decrypted);
+      }
       this.bindSocket(frame.deviceId, socket);
       this.options.deviceStore.updateLastInboundCounter(frame.deviceId, frame.counter, new Date().toISOString());
     } catch {
-      this.sendJson(socket, { kind: "error", code: "unknown_device" });
+      this.sendJson(socket, { kind: "error", code: "decrypt_failed" });
+      return;
+    }
+
+    if (frame.kind === "bind") {
+      return;
+    }
+    if (!payload) {
+      this.sendJson(socket, { kind: "error", code: "decrypt_failed" });
       return;
     }
 

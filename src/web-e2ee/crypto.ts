@@ -1,8 +1,8 @@
 import { base64UrlToBytes, bytesToBase64Url, encodeBase32, normalizeInviteCode, segmentCode, utf8ToBytes } from "./encoding.js";
 import {
-  assertValidEncryptedTextPayload,
   canonicalFrameHeaderBytes,
   type CanonicalFrameHeader,
+  type EncryptedBindPayload,
   type EncryptedTextPayload,
 } from "./protocol.js";
 
@@ -154,7 +154,7 @@ export async function deriveDirectionalAesKeys(
 export async function encryptPayload(
   key: CryptoKey,
   header: CanonicalFrameHeader,
-  payload: EncryptedTextPayload,
+  payload: EncryptedTextPayload | EncryptedBindPayload,
 ): Promise<string> {
   const plaintextBytes = utf8ToBytes(JSON.stringify(payload));
   const ciphertext = await crypto.subtle.encrypt(
@@ -173,7 +173,7 @@ export async function decryptPayload(
   key: CryptoKey,
   header: CanonicalFrameHeader,
   ciphertextBase64Url: string,
-): Promise<EncryptedTextPayload> {
+): Promise<unknown> {
   let plaintext: ArrayBuffer;
   try {
     plaintext = await crypto.subtle.decrypt(
@@ -189,11 +189,9 @@ export async function decryptPayload(
     throw new Error("Failed to decrypt encrypted payload");
   }
 
-  let parsed: unknown;
   try {
-    parsed = JSON.parse(Buffer.from(plaintext).toString("utf-8"));
+    return JSON.parse(Buffer.from(plaintext).toString("utf-8"));
   } catch {
     throw new Error("Failed to parse encrypted payload");
   }
-  return assertValidEncryptedTextPayload(parsed);
 }

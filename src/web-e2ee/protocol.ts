@@ -17,9 +17,9 @@ export interface PairingCompleteResponse {
   pathPrefix: string;
 }
 
-export interface EncryptedMessageFrame {
+export interface EncryptedFrame {
   v: 1;
-  kind: "msg";
+  kind: "msg" | "bind";
   deviceId: string;
   messageId: string;
   counter: number;
@@ -30,7 +30,7 @@ export interface EncryptedMessageFrame {
 
 export interface CanonicalFrameHeader {
   v: 1;
-  kind: "msg";
+  kind: "msg" | "bind";
   deviceId: string;
   messageId: string;
   counter: number;
@@ -41,6 +41,10 @@ export interface CanonicalFrameHeader {
 export interface EncryptedTextPayload {
   kind: "text";
   text: string;
+}
+
+export interface EncryptedBindPayload {
+  kind: "bind";
 }
 
 export interface DecryptedTextMessageEvent {
@@ -94,7 +98,7 @@ export function assertValidPairingCompleteRequest(value: unknown): PairingComple
   };
 }
 
-export function assertValidEncryptedMessageFrame(value: unknown): EncryptedMessageFrame {
+export function assertValidEncryptedFrame(value: unknown): EncryptedFrame {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("Invalid encrypted frame");
   }
@@ -102,7 +106,7 @@ export function assertValidEncryptedMessageFrame(value: unknown): EncryptedMessa
   if (raw.v !== WEB_E2EE_PROTOCOL_VERSION) {
     throw new Error("Invalid encrypted frame version");
   }
-  if (raw.kind !== "msg") {
+  if (raw.kind !== "msg" && raw.kind !== "bind") {
     throw new Error("Invalid encrypted frame kind");
   }
   if (typeof raw.deviceId !== "string" || !raw.deviceId) {
@@ -125,7 +129,7 @@ export function assertValidEncryptedMessageFrame(value: unknown): EncryptedMessa
   }
   return {
     v: WEB_E2EE_PROTOCOL_VERSION,
-    kind: "msg",
+    kind: raw.kind,
     deviceId: raw.deviceId,
     messageId: raw.messageId,
     counter: raw.counter,
@@ -135,10 +139,10 @@ export function assertValidEncryptedMessageFrame(value: unknown): EncryptedMessa
   };
 }
 
-export function canonicalFrameHeader(frame: EncryptedMessageFrame | CanonicalFrameHeader): CanonicalFrameHeader {
+export function canonicalFrameHeader(frame: EncryptedFrame | CanonicalFrameHeader): CanonicalFrameHeader {
   return {
     v: WEB_E2EE_PROTOCOL_VERSION,
-    kind: "msg",
+    kind: frame.kind,
     deviceId: frame.deviceId,
     messageId: frame.messageId,
     counter: frame.counter,
@@ -147,7 +151,7 @@ export function canonicalFrameHeader(frame: EncryptedMessageFrame | CanonicalFra
   };
 }
 
-export function canonicalFrameHeaderJson(frame: EncryptedMessageFrame | CanonicalFrameHeader): string {
+export function canonicalFrameHeaderJson(frame: EncryptedFrame | CanonicalFrameHeader): string {
   const header = canonicalFrameHeader(frame);
   return JSON.stringify({
     v: header.v,
@@ -160,7 +164,7 @@ export function canonicalFrameHeaderJson(frame: EncryptedMessageFrame | Canonica
   });
 }
 
-export function canonicalFrameHeaderBytes(frame: EncryptedMessageFrame | CanonicalFrameHeader): Uint8Array {
+export function canonicalFrameHeaderBytes(frame: EncryptedFrame | CanonicalFrameHeader): Uint8Array {
   return utf8ToBytes(canonicalFrameHeaderJson(frame));
 }
 
@@ -183,4 +187,18 @@ export function assertValidEncryptedTextPayload(value: unknown): EncryptedTextPa
     throw new Error(`Encrypted text payload exceeds ${WEB_E2EE_MAX_TEXT_LENGTH} characters`);
   }
   return { kind: "text", text: raw.text };
+}
+
+export function assertValidEncryptedBindPayload(value: unknown): EncryptedBindPayload {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Invalid encrypted payload");
+  }
+  const raw = value as Record<string, unknown>;
+  if (raw.kind !== "bind") {
+    throw new Error("Invalid encrypted payload kind");
+  }
+  if (Object.keys(raw).length !== 1) {
+    throw new Error("Invalid encrypted bind payload");
+  }
+  return { kind: "bind" };
 }
