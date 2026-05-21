@@ -1,10 +1,15 @@
-
 {
+  "id": ".",
   "name": "Bryti web_e2ee",
   "short_name": "Bryti",
-  "start_url": ".",
+  "start_url": "./",
+  "scope": "./",
   "display": "standalone",
+  "display_override": ["standalone", "minimal-ui"],
+  "orientation": "portrait",
   "background_color": "#111827",
   "theme_color": "#111827",
-  "description": "Bryti web_e2ee transport shell"
+  "lang": "en",
+  "categories": ["productivity", "communication"],
+  "description": "Encrypted Bryti chat shell for paired browser devices."
 }

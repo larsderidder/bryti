@@ -1,6 +1,9 @@
 import {
+  appendLocalMessage,
+  clearLocalMessages,
   loadDevicePrivateKey,
   loadPairedState,
+  loadRecentMessages,
   saveDeviceKeyPair,
   savePairedState,
 } from "./idb.js";
@@ -21,6 +24,7 @@ const pairButtonEl = document.getElementById("pair-button");
 const chatInputEl = document.getElementById("chat-input");
 const chatSendEl = document.getElementById("chat-send");
 const chatLogEl = document.getElementById("chat-log");
+const clearChatButtonEl = document.getElementById("clear-chat-button");
 
 const appState = {
   serverInfo: null,
@@ -47,6 +51,15 @@ function supportsRequiredCrypto() {
   );
 }
 
+function updateAppLayout() {
+  document.body.classList.toggle("app-state-paired", !!appState.pairedState);
+  document.body.classList.toggle("app-state-unpaired", !appState.pairedState);
+}
+
+function updateClearChatAvailability() {
+  clearChatButtonEl.disabled = !appState.pairedState;
+}
+
 function updateChatAvailability() {
   const enabled = !!(
     appState.pairedState &&
@@ -59,7 +72,10 @@ function updateChatAvailability() {
   chatSendEl.disabled = !enabled;
   chatInputEl.placeholder = enabled
     ? "Send encrypted text to Bryti"
-    : "Pair and connect to enable encrypted outbound text";
+    : appState.pairedState
+      ? "Waiting for encrypted transport to reconnect"
+      : "Pair and connect to enable encrypted outbound text";
+  updateClearChatAvailability();
 }
 
 function bytesToBase64Url(bytes) {
@@ -107,11 +123,58 @@ function canonicalHeader(frame) {
   });
 }
 
+function scrollChatToBottom() {
+  chatLogEl.scrollTop = chatLogEl.scrollHeight;
+}
+
+function renderEmptyChatState() {
+  chatLogEl.replaceChildren();
+  const empty = document.createElement("p");
+  empty.className = "chat-log-empty";
+  empty.textContent = appState.pairedState
+    ? "Local chat history will appear here on this device."
+    : "Pair this browser to start encrypted chat.";
+  chatLogEl.append(empty);
+}
+
 function appendChatMessage(role, text) {
-  const line = document.createElement("p");
+  const empty = chatLogEl.querySelector(".chat-log-empty");
+  if (empty) {
+    empty.remove();
+  }
+
+  const line = document.createElement("article");
   line.className = `chat-line chat-line-${role}`;
-  line.textContent = `${role === "user" ? "You" : "Bryti"}: ${text}`;
+
+  const label = document.createElement("span");
+  label.className = "chat-line-label";
+  label.textContent = role === "user" ? "You" : "Bryti";
+
+  const body = document.createElement("p");
+  body.textContent = text;
+  body.style.margin = "0";
+
+  line.append(label, body);
   chatLogEl.append(line);
+  scrollChatToBottom();
+}
+
+async function loadChatHistory() {
+  if (!appState.pairedState) {
+    renderEmptyChatState();
+    return;
+  }
+
+  const messages = await loadRecentMessages();
+  if (!messages.length) {
+    renderEmptyChatState();
+    return;
+  }
+
+  chatLogEl.replaceChildren();
+  for (const message of messages) {
+    appendChatMessage(message.role, message.text);
+  }
 }
 
 async function decryptTextFrame(s2cKey, frame) {
@@ -270,6 +333,8 @@ async function restorePairedState() {
   const privateKey = await loadDevicePrivateKey();
   if (!state || !privateKey) {
     pairingStatusEl.textContent = "Not paired";
+    updateAppLayout();
+    renderEmptyChatState();
     return null;
   }
 
@@ -281,6 +346,8 @@ async function restorePairedState() {
   if (state.label) {
     deviceLabelEl.value = state.label;
   }
+  updateAppLayout();
+  await loadChatHistory();
   return state;
 }
 
@@ -310,6 +377,12 @@ async function handleInboundEncryptedFrame(frame) {
   };
   await savePairedState(nextState);
   appState.pairedState = nextState;
+  await appendLocalMessage({
+    id: validFrame.messageId,
+    role: "assistant",
+    text: payload.text,
+    createdAt: validFrame.ts,
+  });
   appendChatMessage("assistant", payload.text);
 }
 
@@ -512,6 +585,8 @@ async function pairDevice(info) {
     appState.devicePrivateKey = keyPair.privateKey;
     appState.derivedKeys = await deriveDirectionalKeys(keyPair.privateKey, body.serverPublicKeyJwk, publicKeyJwk);
 
+    updateAppLayout();
+    await loadChatHistory();
     pairingStatusEl.textContent = `Paired as ${body.deviceId}`;
     pairingMessageEl.textContent = `Paired successfully. Server fingerprint: ${body.serverPublicFingerprint}`;
     serverFingerprintEl.textContent = body.serverPublicFingerprint || info.serverPublicFingerprint || "Unavailable";
@@ -543,7 +618,13 @@ async function sendEncryptedText() {
   updateChatAvailability();
 
   try {
-    await sendReservedEncryptedFrame("msg", { kind: "text", text });
+    const frame = await sendReservedEncryptedFrame("msg", { kind: "text", text });
+    await appendLocalMessage({
+      id: frame.messageId,
+      role: "user",
+      text,
+      createdAt: frame.ts,
+    });
     chatInputEl.value = "";
     appendChatMessage("user", text);
     pairingMessageEl.textContent = "Encrypted text roundtrip is enabled.";
@@ -571,6 +652,8 @@ async function init() {
   const restored = await restorePairedState();
   if (restored) {
     connectWebSocket(restored.pathPrefix || info.pathPrefix);
+  } else {
+    renderEmptyChatState();
   }
   updateChatAvailability();
 
@@ -585,6 +668,20 @@ async function init() {
       event.preventDefault();
       void sendEncryptedText();
     }
+  });
+  clearChatButtonEl.addEventListener("click", () => {
+    void (async () => {
+      if (!appState.pairedState) {
+        return;
+      }
+      const confirmed = window.confirm("Clear local chat history from this device only?");
+      if (!confirmed) {
+        return;
+      }
+      await clearLocalMessages();
+      renderEmptyChatState();
+      pairingMessageEl.textContent = "Local chat history cleared on this device.";
+    })();
   });
 }
 

@@ -126,6 +126,20 @@ describe("WebE2EEHttpServer", () => {
     expect(apiResponse.status).toBe(200);
   });
 
+  it("serves manifest and service worker assets", async () => {
+    const created = await createServer("/");
+    tempDirs.push(created.tempDir);
+    servers.push(created.server);
+
+    const manifestResponse = await fetch(`${created.server.getBaseUrl()}/manifest.json`);
+    const swResponse = await fetch(`${created.server.getBaseUrl()}/sw.js`);
+
+    expect(manifestResponse.status).toBe(200);
+    expect(manifestResponse.headers.get("content-type")).toContain("application/manifest+json");
+    expect(swResponse.status).toBe(200);
+    expect(swResponse.headers.get("service-worker-allowed")).toBe("/");
+  });
+
   it("returns 404 for unknown static paths", async () => {
     const created = await createServer("/");
     tempDirs.push(created.tempDir);

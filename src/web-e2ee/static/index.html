@@ -2,18 +2,20 @@
 <html lang="en">
   <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <meta name="theme-color" content="#111827">
     <title>Bryti web_e2ee</title>
     <link rel="manifest" href="manifest.json">
     <link rel="stylesheet" href="styles.css">
   </head>
-  <body>
+  <body class="app-state-unpaired">
     <main class="app">
-      <h1>Bryti web_e2ee</h1>
-      <p class="lede">Slice 4c: encrypted text roundtrip is enabled for paired devices.</p>
+      <header class="hero card">
+        <h1>Bryti web_e2ee</h1>
+        <p class="lede">Encrypted Bryti chat for paired browser devices.</p>
+      </header>
 
-      <section class="card">
+      <section id="status-card" class="card card-status">
         <h2>Status</h2>
         <dl>
           <div>
@@ -39,9 +41,13 @@
         </dl>
       </section>
 
-      <section class="card">
-        <h2>Pair device</h2>
-        <p>v1 target browser: current Chromium-based browsers.</p>
+      <section id="pair-card" class="card card-pair">
+        <div class="section-header">
+          <div>
+            <h2>Pair device</h2>
+            <p class="section-copy">Use a current Chromium-based browser.</p>
+          </div>
+        </div>
         <label>
           Device label
           <input id="device-label" type="text" placeholder="June Chromium" autocomplete="off">
@@ -51,14 +57,22 @@
           <input id="invite-code" type="text" placeholder="WEE2-7J4K-P9MX-2QRT" autocomplete="off">
         </label>
         <button id="pair-button" type="button">Pair device</button>
-        <p id="pairing-message">Pairing not started.</p>
+        <p id="pairing-message" class="status-message">Pairing not started.</p>
       </section>
 
-      <section class="card">
-        <h2>Chat</h2>
+      <section id="chat-card" class="card card-chat">
+        <div class="section-header">
+          <div>
+            <h2>Chat</h2>
+            <p class="section-copy">Local history stays only on this device.</p>
+          </div>
+          <button id="clear-chat-button" class="button-secondary button-inline" type="button" disabled>Clear local chat</button>
+        </div>
         <div id="chat-log" class="chat-log" aria-live="polite"></div>
-        <input id="chat-input" type="text" placeholder="Pair and connect to enable encrypted outbound text" disabled>
-        <button id="chat-send" type="button" disabled>Send</button>
+        <div class="chat-composer">
+          <input id="chat-input" type="text" placeholder="Pair and connect to enable encrypted outbound text" disabled>
+          <button id="chat-send" type="button" disabled>Send</button>
+        </div>
       </section>
     </main>
     <script type="module" src="app.js"></script>
