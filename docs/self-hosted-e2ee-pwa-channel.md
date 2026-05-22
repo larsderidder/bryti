@@ -235,6 +235,12 @@ web_e2ee:
 - Key material and paired-device state must not live in this config block.
 - Tailscale/local deployment is the primary initial target.
 - Later VPS deployment should remain possible without redesigning the protocol.
+- `public_origin` and `allowed_origins` must use the exact browser origin only:
+  - scheme + host + optional port
+  - no path
+  - no trailing slash
+- When `allowed_origins` is omitted, runtime config derives it from `public_origin`.
+- If `allowed_origins` is present, it must contain exact origins only.
 
 ## 9. File layout
 
@@ -434,6 +440,97 @@ Some synthetic/internal messages currently assume Telegram defaults in source, f
 - No plaintext transport/channel logs by default.
 - If debugging requires payload visibility later, it must be explicit and opt-in.
 
+## Operator note: Tailscale Serve deployment
+
+A working Tailscale-first setup for `web_e2ee` is:
+
+```yml
+web_e2ee:
+  enabled: true
+  listen_host: "127.0.0.1"
+  listen_port: 8787
+  public_origin: "https://your-machine.your-tailnet.ts.net"
+  allowed_origins:
+    - "https://your-machine.your-tailnet.ts.net"
+  path_prefix: "/"
+  pairing:
+    invite_ttl_minutes: 10
+```
+
+Recommended operator flow:
+
+1. Start Bryti so it listens on `127.0.0.1:8787`.
+2. In another terminal, run:
+
+```bash
+tailscale serve 8787
+```
+
+3. Open the Tailscale Serve HTTPS URL in the browser, without `:8787`, for example:
+
+```text
+https://your-machine.your-tailnet.ts.net/
+```
+
+4. Create a pairing invite:
+
+```bash
+npm run cli -- web-e2ee invite
+```
+
+5. Paste the invite into the PWA and pair.
+
+Important deployment notes:
+- Bryti should listen on `127.0.0.1:8787`.
+- Tailscale Serve provides HTTPS and proxies to Bryti's local HTTP server.
+- Open `https://your-machine.your-tailnet.ts.net/` without `:8787`.
+- Do not use `https://your-machine.your-tailnet.ts.net:8787/`.
+- Do not rely on `http://100.x.y.z:8787` for pairing. The page may load, but browser WebCrypto can fail because it is not a secure context.
+- For Tailscale Serve, `public_origin` and `allowed_origins` usually do not include `:8787`, because the public HTTPS endpoint is the normal browser origin.
+
+## Troubleshooting: `403`, WebSocket closed, or `Waiting for encrypted transport to reconnect`
+
+If the page loads but pairing/chat shows a closed WebSocket or the UI gets stuck on `Waiting for encrypted transport to reconnect`, check origin/proxy setup first.
+
+Common cause:
+- the browser `Origin` header does not exactly match `web_e2ee.allowed_origins`
+
+Checklist:
+- Open the browser app at the exact HTTPS origin you configured, for example:
+
+```text
+https://your-machine.your-tailnet.ts.net/
+```
+
+- Do not open:
+
+```text
+https://your-machine.your-tailnet.ts.net:8787/
+http://100.x.y.z:8787/
+```
+
+- Make sure `public_origin` uses the browser origin exactly:
+  - scheme + host + optional port
+  - no path
+  - no trailing slash
+- Make sure `allowed_origins` contains that same exact origin, or omit it so Bryti derives it from `public_origin`.
+- For Tailscale Serve, Bryti should listen on `127.0.0.1:8787`, but the browser should use the Serve HTTPS URL, which usually does not include `:8787`.
+- Confirm Tailscale Serve is running:
+
+```bash
+tailscale serve 8787
+```
+
+- If you change config, fully restart Bryti before retesting.
+
+What the symptoms usually mean:
+- HTTP page loads, but WebSocket closes immediately:
+  - likely origin mismatch or missing `Origin`
+- Browser works at `http://100.x.y.z:8787` but pairing/chat is unreliable:
+  - likely not a secure context for the required WebCrypto behavior
+- UI shows `Waiting for encrypted transport to reconnect` after pairing:
+  - the app is paired locally, but the WebSocket bind/reconnect path is failing, often because the browser origin does not match the configured allowlist
+
 ## Operator note: creating pairing invites
 
 Current CLI flow:
@@ -445,6 +542,23 @@ node dist/cli.js web-e2ee invite
 ```
 
 This prints the plaintext invite code once plus its expiry timestamp. The persisted invite store at `data/web-e2ee/invites.json` stores hash/state metadata only and does not store the plaintext invite code.
+
+## Smoke-test note on omitted `allowed_origins`
+
+The current config loader does derive `web_e2ee.allowed_origins` from `web_e2ee.public_origin` when `allowed_origins` is omitted, and `src/config.test.ts` covers that case.
+
+No clear runtime bug is visible from the current source.
+
+Most likely causes if omission appeared not to work during a manual smoke test are:
+- the running process was using an older build or older branch state
+- `allowed_origins` was still present in the effective config with an empty or malformed value
+- the configured origin did not exactly match the browser `Origin` header
+  - trailing slash
+  - path included
+  - unexpected port
+  - different hostname than the Tailscale Serve URL
+
+Because WebSocket origin matching is exact by design, the docs and example config should prefer explicit exact origins for Tailscale Serve setups.
 
 ## Summary
 

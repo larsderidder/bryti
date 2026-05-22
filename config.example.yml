@@ -80,17 +80,26 @@ telegram:
 #   enabled: true
 #   allowed_users: []  # international format without + (e.g., 31612345678)
 
-# Self-hosted Bryti-specific encrypted web channel (transport/pairing not yet implemented)
+# Self-hosted Bryti-specific encrypted web channel.
+# Tailscale Serve example:
+# - Bryti listens on 127.0.0.1:8787
+# - run `tailscale serve 8787`
+# - open the HTTPS Serve URL without :8787, e.g.
+#   https://your-machine.your-tailnet.ts.net/
+# - do not use http://100.x.y.z:8787 for pairing; WebCrypto may fail outside a secure context
+# public_origin and allowed_origins must be exact browser origins only:
+# scheme + host + optional port, with no path and no trailing slash.
 # web_e2ee:
 #   enabled: true
 #   listen_host: "127.0.0.1"
 #   listen_port: 8787
-#   public_origin: "https://bryti.tailnet.ts.net"
+#   public_origin: "https://your-machine.your-tailnet.ts.net"
 #   allowed_origins:
-#     - "https://bryti.tailnet.ts.net"
+#     - "https://your-machine.your-tailnet.ts.net"
 #   path_prefix: "/"
 #   pairing:
 #     invite_ttl_minutes: 10
+# If allowed_origins is omitted, Bryti derives it from public_origin.
 
 # ---------------------------------------------------------------------------
 # Model providers
