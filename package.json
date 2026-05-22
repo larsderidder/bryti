@@ -25,6 +25,7 @@
     "build": "tsc && cp -r defaults dist/ && mkdir -p dist/web-e2ee && cp -r src/web-e2ee/static dist/web-e2ee/",
     "dev": "tsx src/cli.ts serve",
     "start": "node dist/cli.js serve",
+    "web-e2ee:tailscale": "bash scripts/web-e2ee-tailscale-serve.sh",
     "cli": "node dist/cli.js",
     "dev-cli": "node dist/dev-cli.js",
     "clean": "rm -rf dist",

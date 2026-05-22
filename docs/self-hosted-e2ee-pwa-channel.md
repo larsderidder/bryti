@@ -464,6 +464,8 @@ Recommended operator flow:
 
 ```bash
 tailscale serve 8787
+# or the helper in this repo
+npm run web-e2ee:tailscale
 ```
 
 3. Open the Tailscale Serve HTTPS URL in the browser, without `:8787`, for example:
@@ -519,8 +521,14 @@ http://100.x.y.z:8787/
 
 ```bash
 tailscale serve 8787
+# or
+npm run web-e2ee:tailscale
 ```
 
+- Check for exact origin mismatch details:
+  - trailing slash in `public_origin` or `allowed_origins`
+  - wrong port in the configured origin
+  - opening `https://...:8787` instead of the Serve HTTPS origin
 - If you change config, fully restart Bryti before retesting.
 
 What the symptoms usually mean:
