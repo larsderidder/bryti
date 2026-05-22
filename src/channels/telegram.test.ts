@@ -1,12 +1,215 @@
 import crypto from "node:crypto";
-import { describe, it, expect } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const grammyMocks = vi.hoisted(() => {
+  class MockInputFile {
+    constructor(public readonly path: string) {}
+  }
+
+  class MockInlineKeyboard {
+    text(): this {
+      return this;
+    }
+
+    row(): this {
+      return this;
+    }
+  }
+
+  class MockBot {
+    static instances: MockBot[] = [];
+
+    readonly handlers = new Map<string, (ctx: any) => Promise<void>>();
+    readonly api = {
+      sendMessage: vi.fn(async () => ({ message_id: 101 })),
+      sendVoice: vi.fn(async () => ({ message_id: 202 })),
+      editMessageText: vi.fn(async () => ({})),
+      sendChatAction: vi.fn(async () => ({})),
+      getFile: vi.fn(async () => ({ file_path: "voice/test.ogg" })),
+    };
+
+    constructor(public readonly token: string) {
+      MockBot.instances.push(this);
+    }
+
+    on(event: string, handler: (ctx: any) => Promise<void>): this {
+      this.handlers.set(event, handler);
+      return this;
+    }
+
+    async init(): Promise<void> {}
+    start(): Promise<void> {
+      return Promise.resolve();
+    }
+    async stop(): Promise<void> {}
+  }
+
+  return { MockBot, MockInlineKeyboard, MockInputFile };
+});
+
+vi.mock("grammy", () => ({
+  Bot: grammyMocks.MockBot,
+  InlineKeyboard: grammyMocks.MockInlineKeyboard,
+  InputFile: grammyMocks.MockInputFile,
+}));
+
 import { TelegramBridge, markdownToHtml, chunkMessage, markdownToTelegramChunks } from "./telegram.js";
 
+function makeVoiceContext(overrides: Partial<any> = {}) {
+  return {
+    chat: { id: 12345 },
+    from: { id: 67890 },
+    message: {
+      message_id: 42,
+      voice: {
+        file_id: "voice-file-id",
+        file_unique_id: "voice-unique-id",
+        duration: 7,
+        mime_type: "audio/ogg",
+      },
+    },
+    reply: vi.fn(async () => ({})),
+    ...overrides,
+  };
+}
+
 describe("TelegramBridge", () => {
+  beforeEach(() => {
+    grammyMocks.MockBot.instances.length = 0;
+    vi.restoreAllMocks();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it("has correct name and platform", () => {
     const bridge = new TelegramBridge("test-token", []);
     expect(bridge.name).toBe("telegram");
     expect(bridge.platform).toBe("telegram");
+  });
+
+  it("normalizes Telegram voice notes into IncomingMessage.audio with replyMode voice", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: true,
+      headers: { get: (name: string) => name === "content-type" ? "audio/ogg" : null },
+      arrayBuffer: async () => Buffer.from("voice-bytes"),
+    })));
+
+    const bridge = new TelegramBridge("test-token", [67890]);
+    const handler = vi.fn(async () => {});
+    bridge.onMessage(handler);
+    await bridge.start();
+
+    const bot = grammyMocks.MockBot.instances[0];
+    const ctx = makeVoiceContext();
+    const voiceHandler = bot.handlers.get("message:voice");
+
+    expect(voiceHandler).toBeTypeOf("function");
+    await voiceHandler?.(ctx);
+
+    expect(handler).toHaveBeenCalledTimes(1);
+    const msg = handler.mock.calls[0][0];
+    expect(msg.channelId).toBe("12345");
+    expect(msg.userId).toBe("67890");
+    expect(msg.messageId).toBe("42");
+    expect(msg.platform).toBe("telegram");
+    expect(msg.raw).toBe(ctx.message);
+    expect(msg.text).toBe("The user sent a voice message.");
+    expect(msg.replyMode).toBe("voice");
+    expect(msg.audio).toHaveLength(1);
+    expect(msg.audio[0].mimeType).toBe("audio/ogg");
+    expect(msg.audio[0].durationSeconds).toBe(7);
+    expect(fs.existsSync(msg.audio[0].path)).toBe(true);
+    expect(path.basename(msg.audio[0].path)).toBe("test.ogg");
+
+    fs.rmSync(path.dirname(msg.audio[0].path), { recursive: true, force: true });
+    await bridge.stop();
+  });
+
+  it("preserves durationSeconds when available", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: true,
+      headers: { get: () => "audio/ogg" },
+      arrayBuffer: async () => Buffer.from("voice-bytes"),
+    })));
+
+    const bridge = new TelegramBridge("test-token", [67890]);
+    const handler = vi.fn(async () => {});
+    bridge.onMessage(handler);
+    await bridge.start();
+
+    const bot = grammyMocks.MockBot.instances[0];
+    const voiceHandler = bot.handlers.get("message:voice");
+    const ctx = makeVoiceContext({
+      message: {
+        message_id: 42,
+        voice: {
+          file_id: "voice-file-id",
+          file_unique_id: "voice-unique-id",
+          duration: 19,
+          mime_type: "audio/ogg",
+        },
+      },
+    });
+
+    await voiceHandler?.(ctx);
+
+    const msg = handler.mock.calls[0][0];
+    expect(msg.audio[0].durationSeconds).toBe(19);
+    fs.rmSync(path.dirname(msg.audio[0].path), { recursive: true, force: true });
+    await bridge.stop();
+  });
+
+  it("does not call handler if voice download fails", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: false,
+      status: 500,
+      headers: { get: () => null },
+      arrayBuffer: async () => new ArrayBuffer(0),
+    })));
+
+    const bridge = new TelegramBridge("test-token", [67890]);
+    const handler = vi.fn(async () => {});
+    bridge.onMessage(handler);
+    await bridge.start();
+
+    const bot = grammyMocks.MockBot.instances[0];
+    const voiceHandler = bot.handlers.get("message:voice");
+    const ctx = makeVoiceContext();
+
+    await voiceHandler?.(ctx);
+
+    expect(handler).not.toHaveBeenCalled();
+    expect(ctx.reply).toHaveBeenCalledWith("Sorry, I couldn't download that voice message.");
+    await bridge.stop();
+  });
+
+  it("sends voice replies through Telegram sendVoice without deleting the file", async () => {
+    const bridge = new TelegramBridge("test-token", [67890]);
+    await bridge.start();
+
+    const bot = grammyMocks.MockBot.instances[0];
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "telegram-send-voice-test-"));
+    const audioPath = path.join(tempDir, "reply.ogg");
+    fs.writeFileSync(audioPath, "voice");
+
+    const messageId = await bridge.sendVoice!("12345", audioPath, { caption: "Reply" });
+
+    expect(messageId).toBe("202");
+    expect(bot.api.sendVoice).toHaveBeenCalledTimes(1);
+    const [chatId, inputFile, options] = bot.api.sendVoice.mock.calls[0];
+    expect(chatId).toBe(12345);
+    expect(inputFile).toBeInstanceOf(grammyMocks.MockInputFile);
+    expect(inputFile.path).toBe(audioPath);
+    expect(options).toEqual({ caption: "Reply" });
+    expect(fs.existsSync(audioPath)).toBe(true);
+
+    fs.rmSync(tempDir, { recursive: true, force: true });
+    await bridge.stop();
   });
 });
 

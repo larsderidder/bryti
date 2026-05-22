@@ -150,7 +150,10 @@ describe("WebE2EEBridge", () => {
     });
 
     ws.send(JSON.stringify(await makeEncryptedFrame(1, "hello bryti", devicePair)));
-    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    await vi.waitUntil(
+      () => handler.mock.calls.length === 1,
+      { timeout: 1000, interval: 10 },
+    );
 
     expect(handler).toHaveBeenCalledTimes(1);
     expect(handler).toHaveBeenCalledWith(expect.objectContaining({

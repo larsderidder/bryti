@@ -26,6 +26,8 @@ export interface IncomingMessage {
   channelId: string;
   /** Platform-specific user ID */
   userId: string;
+  /** Platform-specific message ID when available. */
+  messageId?: string;
   /** Message text content */
   text: string;
   /** Which platform this came from */
