@@ -9,6 +9,7 @@ const HKDF_CONTEXT_LABEL = new TextEncoder().encode("bryti/web_e2ee/v1");
 const HKDF_INFO_C2S = new TextEncoder().encode("bryti/web_e2ee/v1/c2s");
 const HKDF_INFO_S2C = new TextEncoder().encode("bryti/web_e2ee/v1/s2c");
 
+const appShellEl = document.getElementById("app-shell");
 const httpStatusEl = document.getElementById("http-status");
 const wsStatusEl = document.getElementById("ws-status");
 const serverFingerprintEl = document.getElementById("server-fingerprint");
@@ -56,6 +57,10 @@ const WEB_E2EE_AUDIO_MIME_TYPES = [
   "audio/opus",
 ];
 const BIND_ERROR_CODES = new Set(["invalid_frame", "unknown_device", "revoked_device", "replay_detected", "decrypt_failed"]);
+
+function syncPairedLayout() {
+  appShellEl.classList.toggle("paired", !!appState.pairedState);
+}
 
 function supportsRequiredCrypto() {
   return !!(
@@ -106,6 +111,7 @@ function updateChatAvailability() {
   if (!audioSupported) {
     recordingStatusEl.textContent = "Browser audio input is unavailable in this browser.";
   }
+  syncPairedLayout();
 }
 
 function bytesToBase64(bytes) {
@@ -345,6 +351,7 @@ async function restorePairedState() {
   const privateKey = await loadDevicePrivateKey();
   if (!state || !privateKey) {
     pairingStatusEl.textContent = "Not paired";
+    syncPairedLayout();
     return null;
   }
 
@@ -356,6 +363,7 @@ async function restorePairedState() {
   if (state.label) {
     deviceLabelEl.value = state.label;
   }
+  syncPairedLayout();
   return state;
 }
 
@@ -590,6 +598,7 @@ async function pairDevice(info) {
     pairingStatusEl.textContent = `Paired as ${body.deviceId}`;
     pairingMessageEl.textContent = `Paired successfully. Server fingerprint: ${body.serverPublicFingerprint}`;
     serverFingerprintEl.textContent = body.serverPublicFingerprint || info.serverPublicFingerprint || "Unavailable";
+    syncPairedLayout();
     connectWebSocket(body.pathPrefix || info.pathPrefix);
   } catch (error) {
     pairingMessageEl.textContent = error instanceof Error ? error.message : String(error);
@@ -752,6 +761,7 @@ async function stopRecording() {
 }
 
 async function init() {
+  syncPairedLayout();
   if (!supportsRequiredCrypto()) {
     pairingMessageEl.textContent = "This browser is not supported. Use a current Chromium-based browser.";
     pairButtonEl.disabled = true;

@@ -1,6 +1,6 @@
 // src/web-e2ee/static/sw.js         
 // Bump CACHE_NAME when shell assets or transport protocol expectations change.
-const CACHE_NAME = "bryti-web-e2ee-shell-v7b";
+const CACHE_NAME = "bryti-web-e2ee-shell-v7b-ui1";
 const ASSETS = ["./", "./app.js", "./idb.js", "./styles.css", "./manifest.json"];
 
 self.addEventListener("install", (event) => {

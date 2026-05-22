@@ -12,6 +12,8 @@ body {
 }
 
 .app {
+  display: flex;
+  flex-direction: column;
   max-width: 44rem;
   margin: 0 auto;
   padding: 2rem 1rem 4rem;
@@ -31,6 +33,18 @@ h1, h2, p {
   border-radius: 0.75rem;
   padding: 1rem;
   margin-top: 1rem;
+}
+
+.app.paired .card-chat {
+  order: -3;
+}
+
+.app.paired .card-status {
+  order: -2;
+}
+
+.app.paired .card-pair-device {
+  order: -1;
 }
 
 .card.muted {

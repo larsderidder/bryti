@@ -9,11 +9,11 @@
     <link rel="stylesheet" href="styles.css">
   </head>
   <body>
-    <main class="app">
+    <main id="app-shell" class="app">
       <h1>Bryti web_e2ee</h1>
       <p class="lede">Slice 7b: encrypted text roundtrip plus browser audio input is enabled for paired devices.</p>
 
-      <section class="card">
+      <section class="card card-status">
         <h2>Status</h2>
         <dl>
           <div>
@@ -39,7 +39,7 @@
         </dl>
       </section>
 
-      <section class="card">
+      <section class="card card-pair-device">
         <h2>Pair device</h2>
         <p>v1 target browser: current Chromium-based browsers.</p>
         <label>
@@ -54,7 +54,7 @@
         <p id="pairing-message">Pairing not started.</p>
       </section>
 
-      <section class="card">
+      <section class="card card-chat">
         <h2>Chat</h2>
         <div id="chat-log" class="chat-log" aria-live="polite"></div>
         <input id="chat-input" type="text" placeholder="Pair and connect to enable encrypted outbound text" disabled>
