@@ -53,6 +53,25 @@ export interface CronJob {
   message: string;
 }
 
+export interface VoiceConfig {
+  /** Optional speech-to-text/text-to-speech integration. Disabled by default. */
+  enabled: boolean;
+  /** Command argv used for STT. Must include {input} and {output} when enabled. */
+  transcribe_command: string[];
+  /** Command argv used for TTS. Must include {input} and {output} when voice replies are enabled. */
+  synthesize_command: string[];
+  /** Reply to voice messages with synthesized voice when possible. */
+  reply_with_voice: boolean;
+  /** Keep temporary audio files for debugging instead of deleting them after use. */
+  keep_temp_files: boolean;
+  /** Timeout for each STT/TTS command invocation. */
+  command_timeout_ms: number;
+  /** Extension for synthesized audio files, e.g. .ogg. */
+  synthesized_audio_extension: string;
+  /** Maximum assistant response characters to pass to TTS. */
+  max_tts_chars: number;
+}
+
 // ---------------------------------------------------------------------------
 // Agent definition types
 //
@@ -222,6 +241,19 @@ export interface Config {
     /** Phone numbers in international format without +, e.g. ["31612345678"] */
     allowed_users: string[];
   };
+  threema: {
+    enabled: boolean;
+    gateway_id: string;
+    secret: string;
+    private_key_path: string;
+    allowed_senders: string[];
+    api_base_url: string;
+    callback: {
+      host: string;
+      port: number;
+      path: string;
+    };
+  };
   models: {
     providers: ProviderConfig[];
   };
@@ -254,6 +286,8 @@ export interface Config {
    */
   integrations: Record<string, Record<string, string>>;
   cron: CronJob[];
+  /** Optional voice support via configurable STT/TTS commands. */
+  voice?: VoiceConfig;
   /** Optional active hours window. Scheduler callbacks skip firing outside it. */
   active_hours?: ActiveHoursConfig;
   /** Trust and permission settings. */
@@ -345,6 +379,44 @@ function substituteDeep(obj: unknown): unknown {
  * ignored. Each entry's values can use ${ENV_VAR} substitution (already
  * applied by substituteDeep before this is called).
  */
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
+}
+
+function booleanFrom(value: unknown, fallback = false): boolean {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    if (value === "true") return true;
+    if (value === "false") return false;
+  }
+  return fallback;
+}
+
+function stringListFrom(value: unknown): string[] {
+  if (Array.isArray(value)) return value.map(String);
+  if (typeof value === "string") {
+    return value
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+  }
+  return [];
+}
+
+function voiceFromConfig(substituted: Record<string, unknown>): VoiceConfig {
+  const raw = (substituted.voice ?? {}) as Record<string, unknown>;
+  return {
+    enabled: raw.enabled === true,
+    transcribe_command: stringArray(raw.transcribe_command),
+    synthesize_command: stringArray(raw.synthesize_command),
+    reply_with_voice: raw.reply_with_voice !== false,
+    keep_temp_files: booleanFrom(raw.keep_temp_files, false),
+    command_timeout_ms: toFiniteNumber(raw.command_timeout_ms) ?? 120000,
+    synthesized_audio_extension: (raw.synthesized_audio_extension as string | undefined) ?? ".ogg",
+    max_tts_chars: toFiniteNumber(raw.max_tts_chars) ?? 2500,
+  };
+}
+
 function integrationsFromConfig(substituted: Record<string, unknown>): Config["integrations"] {
   const raw = (substituted.integrations ?? {}) as Record<string, unknown>;
   const result: Record<string, Record<string, string>> = {};
@@ -562,6 +634,23 @@ export function loadConfig(configPath?: string): Config {
       enabled: (substituted.whatsapp as { enabled?: boolean })?.enabled ?? false,
       allowed_users: ((substituted.whatsapp as { allowed_users?: string[] })?.allowed_users ?? []).map(String),
     },
+    threema: (() => {
+      const raw = (substituted.threema ?? {}) as Record<string, unknown>;
+      const callback = (raw.callback ?? {}) as Record<string, unknown>;
+      return {
+        enabled: booleanFrom(raw.enabled, false),
+        gateway_id: (raw.gateway_id as string | undefined) ?? "",
+        secret: (raw.secret as string | undefined) ?? "",
+        private_key_path: (raw.private_key_path as string | undefined) ?? "",
+        allowed_senders: stringListFrom(raw.allowed_senders),
+        api_base_url: (raw.api_base_url as string | undefined) ?? "https://msgapi.threema.ch",
+        callback: {
+          host: (callback.host as string | undefined) ?? "127.0.0.1",
+          port: toFiniteNumber(callback.port) ?? 8787,
+          path: (callback.path as string | undefined) ?? "/threema/callback",
+        },
+      };
+    })(),
     models: {
       providers: [],
       ...(substituted.models as object),
@@ -569,6 +658,7 @@ export function loadConfig(configPath?: string): Config {
     tools: toolsFromConfig(substituted, dataDir),
     integrations: integrationsFromConfig(substituted),
     cron: (substituted.cron as CronJob[]) || [],
+    voice: voiceFromConfig(substituted),
     active_hours: (substituted.active_hours as ActiveHoursConfig | undefined) ?? undefined,
     trust: {
       approved_tools: ((substituted.trust as { approved_tools?: string[] })?.approved_tools) ?? [],
@@ -602,6 +692,21 @@ export function loadConfig(configPath?: string): Config {
   return config;
 }
 
+function validateVoiceCommand(name: string, command: string[]): string[] {
+  const errors: string[] = [];
+  if (command.length === 0) {
+    errors.push(`${name} is required when voice is enabled`);
+    return errors;
+  }
+  if (!command.some(part => part.includes("{input}"))) {
+    errors.push(`${name} must include {input}`);
+  }
+  if (!command.some(part => part.includes("{output}"))) {
+    errors.push(`${name} must include {output}`);
+  }
+  return errors;
+}
+
 /**
  * Validate config at startup so bad config doesn't surface 30 minutes later
  * when a cron job fires.
@@ -612,8 +717,8 @@ function validateConfig(config: Config): void {
 
   // --- Required fields ---
 
-  if (!config.telegram.token && !config.whatsapp.enabled) {
-    errors.push("telegram.token is required (or enable whatsapp)");
+  if (!config.telegram.token && !config.whatsapp.enabled && !config.threema.enabled) {
+    errors.push("telegram.token is required (or enable whatsapp or threema)");
   }
   if (!config.agent.model) {
     errors.push("agent.model is required");
@@ -658,10 +763,58 @@ function validateConfig(config: Config): void {
     );
   }
 
+  if (config.threema.enabled) {
+    if (!config.threema.gateway_id) {
+      errors.push("threema.gateway_id is required when threema is enabled");
+    }
+    if (!config.threema.secret) {
+      errors.push("threema.secret is required when threema is enabled");
+    }
+    if (!config.threema.private_key_path) {
+      errors.push("threema.private_key_path is required when threema is enabled");
+    } else if (!fs.existsSync(config.threema.private_key_path)) {
+      errors.push("threema.private_key_path does not exist");
+    }
+    if (!config.threema.callback.path.startsWith("/")) {
+      errors.push("threema.callback.path must start with '/'");
+    }
+    if (config.threema.callback.port <= 0) {
+      errors.push("threema.callback.port must be greater than 0");
+    }
+    if (config.threema.allowed_senders.length === 0) {
+      warnings.push(
+        "threema is enabled but allowed_senders is empty. " +
+        "Anyone who knows the Gateway ID can message it.",
+      );
+    }
+  }
+
   // --- Web search needs a URL ---
 
   if (config.tools.web_search.enabled && !config.tools.web_search.searxng_url) {
     warnings.push("web_search is enabled but searxng_url is empty. Workers won't be able to search.");
+  }
+
+  // --- Voice command configuration ---
+
+  if (config.voice?.enabled) {
+    const transcribeErrors = validateVoiceCommand("voice.transcribe_command", config.voice.transcribe_command);
+    errors.push(...transcribeErrors);
+
+    if (config.voice.reply_with_voice) {
+      const synthesizeErrors = validateVoiceCommand("voice.synthesize_command", config.voice.synthesize_command);
+      errors.push(...synthesizeErrors);
+    }
+
+    if (!config.voice.synthesized_audio_extension.startsWith(".")) {
+      errors.push("voice.synthesized_audio_extension must start with '.'");
+    }
+    if (config.voice.command_timeout_ms <= 0) {
+      errors.push("voice.command_timeout_ms must be greater than 0");
+    }
+    if (config.voice.max_tts_chars < 0) {
+      errors.push("voice.max_tts_chars must be 0 or greater");
+    }
   }
 
   // --- Emit ---

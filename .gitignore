@@ -1,6 +1,7 @@
 node_modules/
 dist/
 data/
+data/private/threema/
 *.log
 .env
 
@@ -29,3 +30,6 @@ out2.txt
 
 # Planning documents (in gitignored dirs)
 plans/
+
+# Node version manager
+.nvmrc

@@ -3,7 +3,7 @@ import { MessageQueue } from "./message-queue.js";
 import type { IncomingMessage } from "./channels/types.js";
 
 function makeMsg(text: string, channelId = "chan1"): IncomingMessage {
-  return { text, channelId, userId: "user1" };
+  return { text, channelId, userId: "user1", platform: "telegram", raw: null };
 }
 
 describe("MessageQueue", () => {
@@ -114,6 +114,36 @@ describe("MessageQueue", () => {
 
     expect(processed[0].text).toBe("alpha");
     expect(processed[1].text).toBe("beta");
+  });
+
+  it("preserves audio attachments when merging messages", () => {
+    const q = new MessageQueue(processFn, rejectFn, MAX_DEPTH_DEFAULT, 5000);
+    const merged = (q as any).mergeEntries([
+      {
+        msg: {
+          ...makeMsg("voice"),
+          audio: [{ path: "/tmp/voice.ogg", mimeType: "audio/ogg", durationSeconds: 3 }],
+          replyMode: "voice",
+        },
+        arrivedAt: 0,
+      },
+      { msg: makeMsg("caption"), arrivedAt: 1 },
+    ]) as IncomingMessage;
+
+    expect(merged.audio).toEqual([
+      { path: "/tmp/voice.ogg", mimeType: "audio/ogg", durationSeconds: 3 },
+    ]);
+    expect(merged.text).toBe("voice\ncaption");
+  });
+
+  it("preserves voice reply mode when merging messages", () => {
+    const q = new MessageQueue(processFn, rejectFn, MAX_DEPTH_DEFAULT, 5000);
+    const merged = (q as any).mergeEntries([
+      { msg: makeMsg("text"), arrivedAt: 0 },
+      { msg: { ...makeMsg("voice"), replyMode: "voice" }, arrivedAt: 1 },
+    ]) as IncomingMessage;
+
+    expect(merged.replyMode).toBe("voice");
   });
 
   it("tracks queue depth correctly", async () => {

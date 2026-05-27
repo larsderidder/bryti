@@ -46,6 +46,7 @@ import { createHistoryManager } from "./history.js";
 import { warmupEmbeddings, disposeEmbeddings } from "./memory/embeddings.js";
 import { TelegramBridge } from "./channels/telegram.js";
 import { WhatsAppBridge } from "./channels/whatsapp.js";
+import { ThreemaBridge } from "./channels/threema.js";
 import { createScheduler } from "./scheduler.js";
 import { MessageQueue } from "./message-queue.js";
 import type { IncomingMessage, ChannelBridge } from "./channels/types.js";
@@ -56,6 +57,7 @@ import { recoverPendingCheckpoints } from "./crash-recovery.js";
 import { startProactiveCompaction } from "./compaction/proactive.js";
 import { createEventsWatcher } from "./events-watcher.js";
 import { checkForUpdate } from "./update-check.js";
+import { createVoiceService } from "./voice.js";
 import { createRequire } from "node:module";
 const _require = createRequire(import.meta.url);
 const { version: BRYTI_VERSION } = _require("../package.json") as { version: string };
@@ -101,9 +103,10 @@ async function startApp(onRequestRestart?: () => void): Promise<RunningApp> {
   const historyManager = createHistoryManager(config.data_dir);
   const usageTracker = createUsageTracker(config.data_dir);
   const trustStore = createTrustStore(config.data_dir, config.trust.approved_tools);
+  const voiceService = createVoiceService(config);
 
   // ---------------------------------------------------------------------------
-  // Bridge setup: Telegram, WhatsApp
+  // Bridge setup: Telegram, WhatsApp, Threema
   // ---------------------------------------------------------------------------
   const bridges: ChannelBridge[] = [];
 
@@ -120,8 +123,22 @@ async function startApp(onRequestRestart?: () => void): Promise<RunningApp> {
     bridges.push(whatsapp);
   }
 
+  if (config.threema.enabled) {
+    const threema = new ThreemaBridge({
+      gatewayId: config.threema.gateway_id,
+      secret: config.threema.secret,
+      privateKeyPath: config.threema.private_key_path,
+      allowedSenders: config.threema.allowed_senders,
+      apiBaseUrl: config.threema.api_base_url,
+      callbackHost: config.threema.callback.host,
+      callbackPort: config.threema.callback.port,
+      callbackPath: config.threema.callback.path,
+    });
+    bridges.push(threema);
+  }
+
   if (bridges.length === 0) {
-    throw new Error("No channel bridges configured. Enable Telegram and/or WhatsApp.");
+    throw new Error("No channel bridges configured. Enable Telegram, WhatsApp, and/or Threema.");
   }
 
   // ---------------------------------------------------------------------------
@@ -139,6 +156,7 @@ async function startApp(onRequestRestart?: () => void): Promise<RunningApp> {
     trustStore,
     lastUserMessages: new Map(),
     recoveredSessions: new Set(),
+    voiceService,
     requestRestart: onRequestRestart ?? null,
   };
 
@@ -217,7 +235,7 @@ async function startApp(onRequestRestart?: () => void): Promise<RunningApp> {
       const restartMsg: IncomingMessage = {
         channelId: marker.channelId,
         userId: marker.userId,
-        platform: marker.platform as "telegram" | "whatsapp",
+        platform: marker.platform as "telegram" | "whatsapp" | "threema",
         text: `[System: you just restarted. Reason: "${marker.reason}". ` +
           `Verify the restart achieved its goal (check that new tools/extensions loaded, ` +
           `config changes took effect, etc.) and briefly confirm to the user.]`,

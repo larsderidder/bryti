@@ -15,10 +15,29 @@
  */
 
 // node-llama-cpp is an optional dependency. Dynamically imported on first use
-// so bryti can start without it (embeddings will be unavailable).
+// so bryti can start without it (embeddings will be unavailable). Keep this
+// typed locally so TypeScript builds do not require the optional package to be
+// installed.
 type Llama = any;
 type LlamaEmbeddingContext = any;
 type LlamaModel = any;
+
+interface NodeLlamaCppModule {
+  getLlama(options: {
+    gpu: "auto";
+    logger: (level: unknown, message: string) => void;
+  }): Promise<Llama>;
+  LlamaLogLevel: {
+    warn: unknown;
+    error: unknown;
+    fatal: unknown;
+  };
+  resolveModelFile(uri: string, options: {
+    directory?: string;
+    cli: boolean;
+    onProgress: (progress: { totalSize: number; downloadedSize: number }) => void;
+  }): Promise<string>;
+}
 
 // Hugging Face URI in node-llama-cpp's "hf:<owner>/<repo>/<file>" format.
 // On first use, node-llama-cpp resolves this automatically: it locates (or
@@ -64,9 +83,12 @@ async function getEmbeddingContext(modelsDir?: string): Promise<LlamaEmbeddingCo
   }
 
   initPromise = (async () => {
-    let nodeLlamaCpp: typeof import("node-llama-cpp");
+    let nodeLlamaCpp: NodeLlamaCppModule;
     try {
-      nodeLlamaCpp = await import("node-llama-cpp");
+      // Use a non-literal import specifier so TypeScript does not resolve the
+      // optional dependency at compile time. Runtime behavior is unchanged.
+      const moduleName = "node-llama-cpp";
+      nodeLlamaCpp = await import(moduleName) as unknown as NodeLlamaCppModule;
     } catch {
       llmAvailable = false;
       console.warn(

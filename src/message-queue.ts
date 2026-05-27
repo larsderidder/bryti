@@ -205,14 +205,18 @@ export class MessageQueue {
 
     const texts = entries.map((e) => e.msg.text).filter(Boolean);
 
-    // Collect images from every entry so a photo followed by a caption (or
+    // Collect attachments from every entry so media followed by a caption (or
     // vice versa) within the merge window is not silently dropped.
     const allImages = entries.flatMap((e) => e.msg.images ?? []);
+    const allAudio = entries.flatMap((e) => e.msg.audio ?? []);
+    const replyMode = entries.some((e) => e.msg.replyMode === "voice") ? "voice" : entries[0].msg.replyMode;
 
     return {
       ...entries[0].msg,
       text: texts.join("\n"),
       ...(allImages.length > 0 ? { images: allImages } : {}),
+      ...(allAudio.length > 0 ? { audio: allAudio } : {}),
+      ...(replyMode ? { replyMode } : {}),
     };
   }
 

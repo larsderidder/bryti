@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { TelegramBridge, markdownToHtml, chunkMessage, markdownToTelegramChunks } from "./telegram.js";
 
 describe("TelegramBridge", () => {
@@ -7,6 +7,27 @@ describe("TelegramBridge", () => {
     const bridge = new TelegramBridge("test-token", []);
     expect(bridge.name).toBe("telegram");
     expect(bridge.platform).toBe("telegram");
+  });
+
+  it("exposes voice sending support", () => {
+    const bridge = new TelegramBridge("test-token", []);
+    expect(typeof bridge.sendVoice).toBe("function");
+  });
+
+  it("delegates sendMessage to the Telegram bot API", async () => {
+    const bridge = new TelegramBridge("test-token", []);
+    const sendMessage = vi.fn(async () => ({ message_id: 42 }));
+
+    (bridge as any).bot = {
+      api: {
+        sendMessage,
+      },
+    };
+
+    const messageId = await bridge.sendMessage("123", "hello");
+
+    expect(sendMessage).toHaveBeenCalledWith(123, "hello", { parse_mode: "HTML" });
+    expect(messageId).toBe("42");
   });
 });
 

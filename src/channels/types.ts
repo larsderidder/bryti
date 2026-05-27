@@ -6,13 +6,28 @@
  * Planned: Discord, Slack, Matrix.
  */
 
-export type Platform = "telegram" | "whatsapp" | "discord" | "slack" | "matrix";
+export type Platform = "telegram" | "whatsapp" | "threema" | "discord" | "slack" | "matrix";
+
+export interface AudioAttachment {
+  /** Local filesystem path to the downloaded audio file. */
+  path: string;
+  /** MIME type, e.g. audio/ogg. */
+  mimeType: string;
+  /** Original platform filename when available. */
+  fileName?: string;
+  /** Audio duration when provided by the platform. */
+  durationSeconds?: number;
+}
+
+export type ReplyMode = "text" | "voice";
 
 export interface IncomingMessage {
   /** Platform-specific chat/channel/room ID */
   channelId: string;
   /** Platform-specific user ID */
   userId: string;
+  /** Optional platform-specific message ID */
+  messageId?: string;
   /** Message text content */
   text: string;
   /** Which platform this came from */
@@ -21,6 +36,10 @@ export interface IncomingMessage {
   raw: unknown;
   /** Image attachments (base64-encoded, vision-capable models only). */
   images?: Array<{ data: string; mimeType: string }>;
+  /** Audio attachments downloaded to local temporary files. */
+  audio?: AudioAttachment[];
+  /** Preferred response mode for this message. */
+  replyMode?: ReplyMode;
 }
 
 export interface SendOpts {
@@ -47,6 +66,9 @@ export interface ChannelBridge {
 
   /** Edit a previously sent message (for streaming updates). */
   editMessage(channelId: string, messageId: string, text: string): Promise<void>;
+
+  /** Send a voice/audio message when the channel supports it. */
+  sendVoice?(channelId: string, audioPath: string, opts?: { caption?: string }): Promise<string>;
 
   /** Show typing indicator. */
   sendTyping(channelId: string): Promise<void>;

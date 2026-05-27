@@ -14,8 +14,16 @@
 // ---------------------------------------------------------------------------
 
 import crypto from "node:crypto";
-import { Bot, InlineKeyboard, type Context } from "grammy";
-import type { ApprovalResult, ChannelBridge, IncomingMessage, SendOpts } from "./types.js";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { Bot, InlineKeyboard, InputFile, type Context } from "grammy";
+import type { ApprovalResult, AudioAttachment, ChannelBridge, IncomingMessage, SendOpts } from "./types.js";
+import {
+  normalizeTelegramImageMessage,
+  normalizeTelegramTextMessage,
+  normalizeTelegramVoiceMessage,
+} from "./telegram-normalize.js";
 import { markdownToIR, chunkMarkdownIR, type MarkdownLinkSpan } from "./markdown/ir.js";
 import { renderMarkdownWithMarkers } from "./markdown/render.js";
 import {
@@ -346,15 +354,17 @@ export class TelegramBridge implements ChannelBridge {
       const text = ctx.message.text;
       if (!text) return;
 
+      const fromId = ctx.from?.id;
+      if (fromId == null) return;
+
       if (this.handler) {
-        const msg: IncomingMessage = {
-          channelId: String(ctx.chat.id),
-          userId: String(ctx.from?.id),
+        await this.handler(normalizeTelegramTextMessage({
+          chatId: ctx.chat.id,
+          fromId,
+          messageId: ctx.message.message_id,
           text,
-          platform: "telegram",
           raw: ctx.message,
-        };
-        await this.handler(msg);
+        }));
       }
     });
 
@@ -414,15 +424,42 @@ export class TelegramBridge implements ChannelBridge {
 
       // Single photo (no album)
       const text = caption || "The user sent this image.";
-      const msg: IncomingMessage = {
-        channelId,
-        userId,
+      await this.handler(normalizeTelegramImageMessage({
+        chatId: channelId,
+        fromId: userId,
+        messageId: ctx.message.message_id,
         text,
-        platform: "telegram",
         raw: ctx.message,
         images: image,
-      };
-      await this.handler(msg);
+      }));
+    });
+
+    // Handle Telegram voice notes. Audio is downloaded to a temporary local
+    // file and transcribed later by the generic voice service.
+    this.bot.on("message:voice", async (ctx) => {
+      if (!this.isAllowed(ctx)) {
+        await ctx.reply("Sorry, you're not authorized to use this bot.");
+        return;
+      }
+
+      if (!this.handler) return;
+
+      const audio = await this.downloadVoice(ctx);
+      if (!audio) {
+        await ctx.reply("Sorry, I couldn't download that voice message.");
+        return;
+      }
+
+      const fromId = ctx.from?.id;
+      if (fromId == null) return;
+
+      await this.handler(normalizeTelegramVoiceMessage({
+        chatId: ctx.chat.id,
+        fromId,
+        messageId: ctx.message.message_id,
+        raw: ctx.message,
+        audio,
+      }));
     });
 
     // Handle document messages that are images (sent as files instead of photos)
@@ -448,15 +485,17 @@ export class TelegramBridge implements ChannelBridge {
       }
 
       const text = ctx.message.caption?.trim() || "The user sent this image.";
-      const msg: IncomingMessage = {
-        channelId: String(ctx.chat.id),
-        userId: String(ctx.from?.id),
+      const fromId = ctx.from?.id;
+      if (fromId == null) return;
+
+      await this.handler(normalizeTelegramImageMessage({
+        chatId: ctx.chat.id,
+        fromId,
+        messageId: ctx.message.message_id,
         text,
-        platform: "telegram",
         raw: ctx.message,
         images,
-      };
-      await this.handler(msg);
+      }));
     });
 
     // Handle non-text messages
@@ -588,6 +627,20 @@ export class TelegramBridge implements ChannelBridge {
     }
 
     return lastMessageId;
+  }
+
+  async sendVoice(channelId: string, audioPath: string, opts?: { caption?: string }): Promise<string> {
+    const bot = await this.requireBot();
+    const chatId = parseInt(channelId, 10);
+
+    this.stopTyping(channelId);
+
+    const message = await withRetry(() =>
+      bot.api.sendVoice(chatId, new InputFile(audioPath), {
+        ...(opts?.caption ? { caption: opts.caption } : {}),
+      }),
+    );
+    return String(message.message_id);
   }
 
   async editMessage(channelId: string, messageId: string, text: string): Promise<void> {
@@ -741,18 +794,16 @@ export class TelegramBridge implements ChannelBridge {
     if (!this.handler || entry.images.length === 0) return;
 
     const text = entry.caption || "The user sent this image.";
-    const msg: IncomingMessage = {
-      channelId: entry.channelId,
-      userId: entry.userId,
-      text,
-      platform: "telegram",
-      raw: entry.raw,
-      images: entry.images,
-    };
 
     console.log(`[telegram] Flushing media group ${mediaGroupId}: ${entry.images.length} image(s)`);
     try {
-      await this.handler(msg);
+      await this.handler(normalizeTelegramImageMessage({
+        chatId: entry.channelId,
+        fromId: entry.userId,
+        text,
+        raw: entry.raw,
+        images: entry.images,
+      }));
     } catch (err) {
       console.error("[telegram] Media group handler error:", (err as Error).message);
     }
@@ -808,6 +859,59 @@ export class TelegramBridge implements ChannelBridge {
       return [{ data, mimeType }];
     } catch (err) {
       console.error("[telegram] Photo fetch failed:", (err as Error).message);
+      return null;
+    }
+  }
+
+  /**
+   * Download a Telegram voice note to a local temporary file.
+   */
+  private async downloadVoice(
+    ctx: Context & { message: NonNullable<Context["message"]> & { voice: NonNullable<NonNullable<Context["message"]>["voice"]> } },
+  ): Promise<AudioAttachment[] | null> {
+    if (!this.bot) return null;
+
+    const voice = ctx.message.voice;
+    let filePath: string;
+    try {
+      const file = await retryGetFile(() => this.bot!.api.getFile(voice.file_id));
+      if (!file.file_path) return null;
+      filePath = file.file_path;
+    } catch (err) {
+      if (isFileTooBigError(err)) {
+        console.warn("[telegram] Voice message too large to download (>20 MB), skipping");
+      } else {
+        console.error("[telegram] getFile failed for voice:", (err as Error).message);
+      }
+      return null;
+    }
+
+    try {
+      const url = `https://api.telegram.org/file/bot${this.botToken}/${filePath}`;
+      const response = await fetch(url);
+      if (!response.ok) {
+        console.error(`[telegram] Voice download failed: HTTP ${response.status}`);
+        return null;
+      }
+
+      const buffer = Buffer.from(await response.arrayBuffer());
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bryti-telegram-voice-"));
+      const remoteName = path.basename(filePath) || `${voice.file_unique_id}.ogg`;
+      const localName = path.extname(remoteName) ? remoteName : `${remoteName}.ogg`;
+      const localPath = path.join(dir, localName);
+      fs.writeFileSync(localPath, buffer);
+
+      const rawMime = response.headers.get("content-type")?.split(";")[0].trim();
+      const mimeType = voice.mime_type || rawMime || "audio/ogg";
+      console.log(`[telegram] Downloaded voice message: ${buffer.byteLength} bytes, mime=${mimeType}`);
+      return [{
+        path: localPath,
+        mimeType,
+        fileName: localName,
+        durationSeconds: voice.duration,
+      }];
+    } catch (err) {
+      console.error("[telegram] Voice fetch failed:", (err as Error).message);
       return null;
     }
   }

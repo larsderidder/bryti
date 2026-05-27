@@ -105,6 +105,7 @@ describe("usage cost helpers", () => {
       enabled: false,
       allowed_users: [],
     },
+    threema: { enabled: false, gateway_id: "", secret: "", private_key_path: "", allowed_senders: [], api_base_url: "https://msgapi.threema.ch", callback: { host: "127.0.0.1", port: 8787, path: "/threema/callback" } },
     models: {
       providers: [
         {
