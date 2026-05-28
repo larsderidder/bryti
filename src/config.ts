@@ -37,6 +37,24 @@ export interface ModelEntry {
   compat?: Record<string, unknown>;
 }
 
+export interface EmbeddingsConfig {
+  /** local uses node-llama-cpp; openai-compatible calls /v1/embeddings. */
+  provider: "local" | "openai-compatible";
+  /** Base URL for OpenAI-compatible providers, for example http://127.0.0.1:11434/v1. */
+  base_url?: string;
+  api_key?: string;
+  headers?: Record<string, string>;
+  model?: string;
+  dimensions?: number;
+  /** Optional provider-specific input_type for all embedding requests. */
+  input_type?: string;
+  /** Optional input_type used for search queries. */
+  query_input_type?: string;
+  /** Optional input_type used for stored facts/documents. */
+  document_input_type?: string;
+  timeout_ms: number;
+}
+
 export interface WorkerTypeConfig {
   /** Description shown in the system prompt so the agent knows when to use this type. */
   description?: string;
@@ -270,6 +288,9 @@ export interface Config {
   models: {
     providers: ProviderConfig[];
   };
+  memory: {
+    embeddings: EmbeddingsConfig;
+  };
   tools: {
     web_search: {
       enabled: boolean;
@@ -448,6 +469,40 @@ function integrationsFromConfig(substituted: Record<string, unknown>): Config["i
   }
 
   return result;
+}
+
+function optionalString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function stringRecord(value: unknown): Record<string, string> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const result: Record<string, string> = {};
+  for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof raw === "string") result[key] = raw;
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
+function memoryFromConfig(substituted: Record<string, unknown>): Config["memory"] {
+  const raw = (substituted.memory ?? {}) as Record<string, unknown>;
+  const embeddingsRaw = (raw.embeddings ?? {}) as Record<string, unknown>;
+  const provider = embeddingsRaw.provider === "openai-compatible" ? "openai-compatible" : "local";
+
+  return {
+    embeddings: {
+      provider,
+      base_url: optionalString(embeddingsRaw.base_url),
+      api_key: optionalString(embeddingsRaw.api_key),
+      headers: stringRecord(embeddingsRaw.headers),
+      model: optionalString(embeddingsRaw.model),
+      dimensions: typeof embeddingsRaw.dimensions === "number" ? embeddingsRaw.dimensions : undefined,
+      input_type: optionalString(embeddingsRaw.input_type),
+      query_input_type: optionalString(embeddingsRaw.query_input_type),
+      document_input_type: optionalString(embeddingsRaw.document_input_type),
+      timeout_ms: typeof embeddingsRaw.timeout_ms === "number" ? embeddingsRaw.timeout_ms : 10000,
+    },
+  };
 }
 
 /**
@@ -696,6 +751,7 @@ export function loadConfig(configPath?: string): Config {
       providers: [],
       ...(substituted.models as object),
     },
+    memory: memoryFromConfig(substituted),
     tools: toolsFromConfig(substituted, dataDir),
     integrations: integrationsFromConfig(substituted),
     cron: (substituted.cron as CronJob[]) || [],
@@ -792,6 +848,24 @@ function validateConfig(config: Config): void {
       warnings.push(
         `fallback_model "${fb}" references unknown provider "${providerName}"`,
       );
+    }
+  }
+
+  // --- Embeddings config ---
+
+  const embeddings = config.memory.embeddings;
+  if (embeddings.provider === "openai-compatible") {
+    if (!embeddings.base_url) {
+      errors.push("memory.embeddings.base_url is required when provider is openai-compatible");
+    }
+    if (!embeddings.model) {
+      errors.push("memory.embeddings.model is required when provider is openai-compatible");
+    }
+    if (embeddings.dimensions !== undefined && (!Number.isInteger(embeddings.dimensions) || embeddings.dimensions <= 0)) {
+      errors.push("memory.embeddings.dimensions must be a positive integer");
+    }
+    if (!Number.isInteger(embeddings.timeout_ms) || embeddings.timeout_ms <= 0) {
+      errors.push("memory.embeddings.timeout_ms must be a positive integer");
     }
   }
 
@@ -906,6 +980,7 @@ export function ensureDataDirs(config: Config): void {
     path.join(config.data_dir, "logs"),
     path.join(config.data_dir, ".pi"),
     path.join(config.data_dir, "pending"),
+    path.join(config.data_dir, "pending", "outbound"),
     path.join(config.data_dir, "skills"),
   ];
 

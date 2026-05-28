@@ -150,6 +150,23 @@ models:
             maxTokensField: max_tokens
 
 # ---------------------------------------------------------------------------
+# Memory
+# ---------------------------------------------------------------------------
+
+# Default: local node-llama-cpp embeddings. To avoid the local model download
+# and use any OpenAI-compatible /v1/embeddings endpoint instead, uncomment:
+# memory:
+#   embeddings:
+#     provider: openai-compatible
+#     base_url: http://127.0.0.1:11434/v1
+#     model: nomic-embed-text
+#     api_key: ${EMBEDDINGS_API_KEY}
+#     timeout_ms: 10000
+#     # Optional for asymmetric embedding models:
+#     # query_input_type: query
+#     # document_input_type: document
+
+# ---------------------------------------------------------------------------
 # Tools
 # ---------------------------------------------------------------------------
 

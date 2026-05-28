@@ -31,7 +31,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import Database from "better-sqlite3";
-import { loadConfig, resolveDataDir as defaultDataDir } from "./config.js";
+import { loadConfig, resolveDataDir as defaultDataDir, type Config } from "./config.js";
 import { runReflection } from "./projection/index.js";
 import { createInviteStore } from "./web-e2ee/invite-store.js";
 
@@ -264,10 +264,12 @@ async function cmdArchiveFact(dataDir: string, userId: string, content: string):
   console.log(`Archiving fact for user ${userId}...`);
   console.log(`Content: "${content}"\n`);
 
-  const { embed } = await import("./memory/embeddings.js");
+  const { configureEmbeddings, embed } = await import("./memory/embeddings.js");
   const { createMemoryStore } = await import("./memory/store.js");
   const { createProjectionStore } = await import("./projection/index.js");
 
+  const config = loadConfig(path.join(dataDir, "config.yml"));
+  configureEmbeddings(config.memory.embeddings);
   const modelsDir = path.join(dataDir, ".models");
   const memoryStore = createMemoryStore(userId, dataDir);
   const projStore = createProjectionStore(userId, dataDir);
@@ -313,6 +315,58 @@ export async function cmdWebE2EEInvite(dataDir: string): Promise<{ code: string;
   console.log(`expires at: ${created.expiresAt}`);
 
   return created;
+}
+
+// ---------------------------------------------------------------------------
+// Command: models status
+// ---------------------------------------------------------------------------
+
+function providerForModel(modelRef: string): string {
+  return modelRef.includes("/") ? modelRef.split("/", 2)[0] : modelRef;
+}
+
+function configuredAuthLabel(config: Config, providerName: string): string {
+  const provider = config.models.providers.find((p) => p.name === providerName);
+  if (!provider) return "missing provider";
+  if (provider.api_key) return "configured api_key";
+  return "no api_key in config, OAuth or external auth may be used";
+}
+
+async function cmdModelsStatus(dataDir: string): Promise<void> {
+  const config = loadConfig(path.join(dataDir, "config.yml"));
+  config.data_dir = dataDir;
+  const { createModelInfra, resolveModel } = await import("./model-infra.js");
+  const infra = createModelInfra(config);
+  const candidates = [config.agent.model, ...(config.agent.fallback_models ?? [])];
+
+  section("MODELS");
+  console.log(`Primary:   ${config.agent.model}`);
+  if (config.agent.fallback_models.length > 0) {
+    console.log("Fallbacks:");
+    config.agent.fallback_models.forEach((model, index) => {
+      console.log(`  ${index + 1}. ${model}`);
+    });
+  } else {
+    console.log("Fallbacks: (none)");
+  }
+
+  console.log(`\nEmbedding provider: ${config.memory.embeddings.provider}`);
+  if (config.memory.embeddings.provider === "openai-compatible") {
+    console.log(`Embedding model:    ${config.memory.embeddings.model ?? "(missing)"}`);
+    console.log(`Embedding base URL: ${config.memory.embeddings.base_url ?? "(missing)"}`);
+  }
+
+  section("RESOLUTION");
+  for (const modelRef of candidates) {
+    const resolved = resolveModel(modelRef, infra.modelRegistry);
+    const providerName = providerForModel(modelRef);
+    const provider = config.models.providers.find((p) => p.name === providerName);
+    const status = resolved ? "ok" : "not found in registry";
+    console.log(`- ${modelRef}: ${status}`);
+    console.log(`  provider api: ${provider?.api || "openai-completions"}`);
+    console.log(`  context:      ${resolved?.contextWindow ?? "unknown"}`);
+    console.log(`  auth:         ${configuredAuthLabel(config, providerName)}`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -363,6 +417,9 @@ Commands:
     Examples:
       npm run cli -- web-e2ee invite
       node dist/cli.js web-e2ee invite
+
+  models status
+    Show resolved primary/fallback models, provider API modes, auth hints, and embeddings config.
 
   version
     Show version number.
@@ -496,6 +553,17 @@ async function main(): Promise<void> {
         process.exit(1);
       }
       await cmdWebE2EEInvite(dataDir);
+      break;
+    }
+
+    case "models": {
+      const sub = positional(1) ?? "status";
+      if (sub !== "status") {
+        console.error(`Unknown models subcommand: ${sub}`);
+        console.error("Use: models status");
+        process.exit(1);
+      }
+      await cmdModelsStatus(dataDir);
       break;
     }
 
