@@ -33,6 +33,7 @@ import { createProjectionStore, formatProjectionsForPrompt, type ProjectionStore
 import { registerToolCapabilities, getToolCapabilities } from "./trust/index.js";
 import { createModelInfra, resolveModel } from "./model-infra.js";
 import { buildSystemPrompt, buildToolSection, SILENT_REPLY_TOKEN, type ToolSummary } from "./system-prompt.js";
+import { quarantineInvalidExtensionTools } from "./tools/schema-validation.js";
 
 // Re-export for backward compatibility with index.ts
 export { SILENT_REPLY_TOKEN };
@@ -288,6 +289,18 @@ export async function loadUserSession(
       console.error(`[extensions] Failed to load ${err.path}: ${err.error}`);
     }
   }
+
+  const schemaIssues = quarantineInvalidExtensionTools(session, extensionToolNames);
+  if (schemaIssues.length > 0) {
+    const quarantined = [...new Set(schemaIssues.map((issue) => issue.toolName))];
+    for (const issue of schemaIssues) {
+      console.error(`[extensions] Quarantined tool ${issue.toolName}: ${issue.message}`);
+    }
+    for (const toolName of quarantined) {
+      extensionToolNames.delete(toolName);
+    }
+  }
+
   // --- 4. Tool registration ---
   // Rebuild promptTools from the fully resolved tool list (custom tools +
   // extension tools) so the system prompt lists every tool the model can call.
@@ -373,10 +386,16 @@ export async function loadUserSession(
     userId,
     sessionDir: sessDir,
     lastUserMessageAt: Date.now(),
-    extensionErrors: extensionsResult.errors.map((e) => ({
-      path: e.path,
-      error: String(e.error),
-    })),
+    extensionErrors: [
+      ...extensionsResult.errors.map((e) => ({
+        path: e.path,
+        error: String(e.error),
+      })),
+      ...schemaIssues.map((issue) => ({
+        path: `tool:${issue.toolName}`,
+        error: `Tool quarantined because its schema is not provider-safe: ${issue.message}`,
+      })),
+    ],
     projectionStore,
     dispose() {
       unsubscribe();
