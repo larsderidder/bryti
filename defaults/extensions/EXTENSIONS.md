@@ -64,6 +64,8 @@ async function fetchWithTimeout(input: Parameters<typeof fetch>[0], init: Parame
 
 ## Returning results
 
+Bryti wraps extension tool output in an untrusted-content boundary before it reaches the model. This protects against prompt injection in API responses, feed entries, calendar descriptions, email bodies, and other external data. Still keep results compact and structured.
+
 Always return JSON-stringified text so the agent can parse the result:
 
 ```typescript
