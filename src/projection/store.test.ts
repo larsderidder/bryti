@@ -138,6 +138,23 @@ describe("createProjectionStore", () => {
     expect(due[0].summary).toBe("Dentist in 30 min");
   });
 
+  it("getExactDue catches up recent missed recurring exact projections", () => {
+    store.add({
+      summary: "Morning recurring check",
+      resolved_when: isoHoursFromNow(-2),
+      resolution: "exact",
+      recurrence: "45 8 * * *",
+    });
+    store.add({
+      summary: "Old non-recurring meeting",
+      resolved_when: isoHoursFromNow(-2),
+      resolution: "exact",
+    });
+
+    const due = store.getExactDue(5);
+    expect(due.map((p) => p.summary)).toEqual(["Morning recurring check"]);
+  });
+
   it("autoExpire marks old projections as passed", () => {
     // Simulate a projection that expired 48 hours ago by inserting directly
     // with a resolved_when 48 hours in the past. We test via the public interface.
@@ -200,6 +217,34 @@ describe("createProjectionStore", () => {
   it("rearm returns false for non-existent id", () => {
     const ok = store.rearm("no-such-id", isoHoursFromNow(24));
     expect(ok).toBe(false);
+  });
+
+  it("rearmMissed skips stale recurring projections to the next occurrence", () => {
+    const oldWhen = isoHoursFromNow(-5);
+    const id = store.add({
+      summary: "Stale recurring check",
+      resolved_when: oldWhen,
+      resolution: "exact",
+      recurrence: "* * * * *",
+    });
+
+    expect(store.rearmMissed("UTC")).toEqual([id]);
+    const due = store.getExactDue(5);
+    expect(due.find((p) => p.id === id)).toBeDefined();
+    expect(due.find((p) => p.id === id)?.resolved_when).not.toBe(oldWhen);
+  });
+
+  it("rearmMissed repairs recurring projections with no resolved_when", () => {
+    const id = store.add({
+      summary: "Recurring without resolved time",
+      resolution: "exact",
+      recurrence: "* * * * *",
+    });
+
+    expect(store.rearmMissed("UTC")).toEqual([id]);
+    const upcoming = store.getUpcoming(1);
+    const repaired = upcoming.find((p) => p.id === id);
+    expect(repaired?.resolved_when).toBeTruthy();
   });
 
   it("non-recurring projections have null recurrence", () => {

@@ -56,6 +56,9 @@ agent:
     - "opencode/minimax-m2.5-free"
     - "opencode/kimi-k2.5-free"
 
+  # Thinking/reasoning level for the main session: off, minimal, low, medium, high, xhigh
+  thinking_level: "high"
+
   # IANA timezone
   timezone: "Europe/Amsterdam"
 
@@ -131,10 +134,10 @@ models:
     #   api: openai-responses
     #   api_key: ${OPENAI_API_KEY}
     #   models:
-    #     - id: "gpt-5.1"
+    #     - id: "gpt-5.2"
     #       context_window: 400000
     #       max_tokens: 128000
-    #     - id: "gpt-5.1-codex-mini"
+    #     - id: "gpt-5.2-codex-mini"
     #       context_window: 400000
     #       max_tokens: 128000
 
@@ -202,6 +205,7 @@ tools:
   workers:
     max_concurrent: 3
     # model: "opencode/minimax-m2.5-free"  # default model for workers
+    # thinking_level: "medium"  # default thinking level for workers
 
 # ---------------------------------------------------------------------------
 # Integrations (optional, values become env vars for extensions)

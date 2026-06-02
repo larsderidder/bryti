@@ -104,6 +104,7 @@ function generateConfig(opts: {
     `    background. You are warm, direct, and proactive. You speak like a trusted`,
     `    colleague, not a customer service bot.`,
     `  model: ${opts.provider}/${opts.model}`,
+    `  thinking_level: high`,
     `  timezone: ${opts.timezone}`,
     "",
     "telegram:",

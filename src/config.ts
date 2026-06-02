@@ -10,6 +10,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
+import type { ThinkingLevel } from "@mariozechner/pi-agent-core";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -55,11 +56,17 @@ export interface EmbeddingsConfig {
   timeout_ms: number;
 }
 
+export type { ThinkingLevel };
+
+const THINKING_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh"];
+
 export interface WorkerTypeConfig {
   /** Description shown in the system prompt so the agent knows when to use this type. */
   description?: string;
   /** Model override for this worker type. */
   model?: string;
+  /** Thinking level for this worker type. Defaults to tools.workers.thinking_level. */
+  thinking_level?: ThinkingLevel;
   /** Tools available to this worker type. Default: ["web_search", "fetch_url"]. */
   tools?: string[];
   /** Timeout in seconds. Default: 3600. */
@@ -248,6 +255,8 @@ export interface Config {
     model: string;
     /** Ordered list of fallback model strings to try when the primary fails. */
     fallback_models: string[];
+    /** Requested thinking/reasoning level for the main agent session. Default: high. */
+    thinking_level: ThinkingLevel;
     /** IANA timezone string, e.g. "Europe/Amsterdam". Injected into the system
      *  prompt so the agent resolves relative time expressions correctly.
      *  Defaults to UTC when omitted. */
@@ -305,6 +314,8 @@ export interface Config {
       max_concurrent: number;
       /** Default model for workers. Falls back to first fallback model, then primary. */
       model?: string;
+      /** Default thinking/reasoning level for workers. Defaults to agent.thinking_level. */
+      thinking_level?: ThinkingLevel;
       /** Named worker types with preset defaults. The agent can select a type
        *  when dispatching to get its model, tools, and timeout without
        *  specifying them individually. */
@@ -475,6 +486,14 @@ function optionalString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
+function normalizeThinkingLevel(value: unknown, fallback: ThinkingLevel): ThinkingLevel {
+  if (typeof value !== "string") return fallback;
+  const normalized = value.trim().toLowerCase();
+  return THINKING_LEVELS.includes(normalized as ThinkingLevel)
+    ? (normalized as ThinkingLevel)
+    : fallback;
+}
+
 function stringRecord(value: unknown): Record<string, string> | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const result: Record<string, string> = {};
@@ -554,6 +573,15 @@ function webE2EEFromConfig(substituted: Record<string, unknown>): WebE2EEConfig 
 function toolsFromConfig(substituted: Record<string, unknown>, dataDir: string): Config["tools"] {
   const raw = (substituted.tools ?? {}) as Record<string, unknown>;
   const webRaw = (raw.web_search ?? {}) as Record<string, unknown>;
+  const workersRaw = (raw.workers ?? {}) as Record<string, unknown>;
+  const workerTypes = (workersRaw.types ?? {}) as Record<string, WorkerTypeConfig>;
+
+  for (const workerType of Object.values(workerTypes)) {
+    if (workerType.thinking_level !== undefined) {
+      workerType.thinking_level = normalizeThinkingLevel(workerType.thinking_level, "medium");
+    }
+  }
+
   return {
     web_search: {
       enabled: webRaw.enabled !== false,
@@ -567,6 +595,8 @@ function toolsFromConfig(substituted: Record<string, unknown>, dataDir: string):
     workers: {
       max_concurrent: 3,
       ...(raw.workers as object | undefined),
+      thinking_level: normalizeThinkingLevel(workersRaw.thinking_level, "medium"),
+      types: workerTypes,
     },
   };
 }
@@ -719,6 +749,7 @@ export function loadConfig(configPath?: string): Config {
       model: "",
       fallback_models: [],
       ...(substituted.agent as object),
+      thinking_level: normalizeThinkingLevel((substituted.agent as Record<string, unknown> | undefined)?.thinking_level, "high"),
     },
     telegram: {
       token: "",

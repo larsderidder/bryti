@@ -125,6 +125,7 @@ export function createWorkerTools(
       const parts = [name];
       if (t.description) parts.push(`— ${t.description}`);
       if (t.model) parts.push(`(model: ${t.model})`);
+      if (t.thinking_level) parts.push(`(thinking: ${t.thinking_level})`);
       return parts.join(" ");
     });
     typesSuffix =
@@ -177,6 +178,9 @@ export function createWorkerTools(
       const effectiveTools = requestedTools ?? workerType?.tools ?? ["web_search", "fetch_url"];
       const effectiveTimeout = timeout_seconds ?? workerType?.timeout_seconds;
       const effectiveModel = modelOverride ?? workerType?.model;
+      const effectiveThinkingLevel = workerType?.thinking_level
+        ?? config.tools.workers.thinking_level
+        ?? config.agent.thinking_level;
 
       // Validate requested tools
       const toolNames: AllowedTool[] = [];
@@ -233,7 +237,7 @@ export function createWorkerTools(
         result_path: resultPath,
       });
 
-      console.log(`[worker] Dispatching ${workerId} (model: ${displayModel}, tools: ${toolNames.join(", ")})`);
+      console.log(`[worker] Dispatching ${workerId} (model: ${displayModel}, thinking: ${effectiveThinkingLevel}, tools: ${toolNames.join(", ")})`);
 
       // Spawn in background — intentionally not awaited
       spawnWorkerSession({
@@ -242,6 +246,7 @@ export function createWorkerTools(
         workerDir,
         task,
         modelOverride: effectiveModel,
+        thinkingLevel: effectiveThinkingLevel,
         toolNames,
         memoryStore,
         projectionStore,

@@ -78,6 +78,8 @@ cron: []
 
     expect(config.tools.web_search.enabled).toBe(true);
     expect(config.tools.fetch_url.timeout_ms).toBe(10000);
+    expect(config.agent.thinking_level).toBe("high");
+    expect(config.tools.workers.thinking_level).toBe("medium");
     expect(config.web_e2ee).toEqual({
       enabled: false,
       listen_host: "127.0.0.1",
@@ -89,6 +91,41 @@ cron: []
         invite_ttl_minutes: 10,
       },
     });
+  });
+
+  it("should load configured thinking levels", () => {
+    const configContent = `
+agent:
+  name: TestBot
+  model: test/model
+  thinking_level: high
+telegram:
+  token: test-token
+models:
+  providers:
+    - name: test
+      base_url: https://test.example.com
+      api_key: test-key
+      models: []
+tools:
+  web_search:
+    searxng_url: "https://search.xithing.eu"
+  fetch_url: {}
+  workers:
+    max_concurrent: 2
+    thinking_level: low
+    types:
+      research:
+        thinking_level: minimal
+cron: []
+`;
+    fs.writeFileSync(path.join(tempDir, "config.yml"), configContent);
+
+    const config = loadConfig();
+
+    expect(config.agent.thinking_level).toBe("high");
+    expect(config.tools.workers.thinking_level).toBe("low");
+    expect(config.tools.workers.types?.research.thinking_level).toBe("minimal");
   });
 
   it("should create data directories", () => {

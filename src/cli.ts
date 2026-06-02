@@ -341,6 +341,7 @@ async function cmdModelsStatus(dataDir: string): Promise<void> {
 
   section("MODELS");
   console.log(`Primary:   ${config.agent.model}`);
+  console.log(`Thinking:  ${config.agent.thinking_level}`);
   if (config.agent.fallback_models.length > 0) {
     console.log("Fallbacks:");
     config.agent.fallback_models.forEach((model, index) => {

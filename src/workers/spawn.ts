@@ -15,7 +15,7 @@ import {
   SettingsManager,
 } from "@mariozechner/pi-coding-agent";
 import type { AgentTool } from "@mariozechner/pi-agent-core";
-import type { Config } from "../config.js";
+import type { Config, ThinkingLevel } from "../config.js";
 import type { MemoryStore } from "../memory/store.js";
 import { embed } from "../memory/embeddings.js";
 import { createBraveSearchTool, createWebSearchTool } from "../tools/web-search.js";
@@ -136,6 +136,7 @@ export async function spawnWorkerSession(opts: {
   workerDir: string;
   task: string;
   modelOverride: string | undefined;
+  thinkingLevel?: ThinkingLevel;
   toolNames: AllowedTool[];
   memoryStore: MemoryStore;
   projectionStore?: ProjectionStore;
@@ -149,12 +150,17 @@ export async function spawnWorkerSession(opts: {
     workerDir,
     task,
     modelOverride,
+    thinkingLevel,
     toolNames,
     memoryStore,
     registry,
     timeoutMs,
     onTrigger,
   } = opts;
+
+  const effectiveThinkingLevel = thinkingLevel
+    ?? config.tools.workers.thinking_level
+    ?? config.agent.thinking_level;
 
   const { authStorage, modelRegistry, agentDir } = createModelInfra(config);
   const modelsDir = path.join(config.data_dir, ".models");
@@ -222,7 +228,7 @@ export async function spawnWorkerSession(opts: {
     authStorage,
     modelRegistry,
     model,
-    thinkingLevel: "off",
+    thinkingLevel: effectiveThinkingLevel,
     tools: [],
     customTools: workerTools,
     resourceLoader: loader,

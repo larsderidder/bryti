@@ -381,7 +381,13 @@ export function createProjectionStore(userId: string, dataDir: string): Projecti
       AND resolution = 'exact'
       AND resolved_when IS NOT NULL
       AND resolved_when <= datetime('now', ? || ' minutes')
-      AND resolved_when > datetime('now', '-10 minutes')
+      AND (
+        resolved_when > datetime('now', '-10 minutes')
+        OR (
+          recurrence IS NOT NULL AND recurrence != ''
+          AND resolved_when > datetime('now', '-4 hours')
+        )
+      )
     ORDER BY resolved_when ASC
   `);
 
@@ -600,7 +606,8 @@ export function createProjectionStore(userId: string, dataDir: string): Projecti
       // tick interval (5 min) so projections due between ticks are never skipped
       // but also never fire early. The lower bound ('-10 minutes') prevents
       // re-firing events that already fired but whose resolved_at hasn't been
-      // written yet.
+      // written yet. Recurring exact projections get a wider 4-hour catch-up
+      // window so a restart shortly after the scheduled time still runs them.
       const rows = stmtExactDue.all(String(window_minutes)) as ProjectionRow[];
       return rows.map(rowToProjection);
     },
@@ -705,13 +712,18 @@ export function createProjectionStore(userId: string, dataDir: string): Projecti
     },
 
     rearmMissed(timezone: string) {
-      // Find recurring projections whose resolved_when has passed (overdue)
+      // Find recurring projections whose resolved_when is missing or so far
+      // overdue that we should skip the missed occurrence instead of sending a
+      // stale reminder. Recent misses are handled by getExactDue's catch-up
+      // window.
       const overdue = db.prepare(`
         SELECT * FROM projections
         WHERE status = 'pending'
           AND recurrence IS NOT NULL AND recurrence != ''
-          AND resolved_when IS NOT NULL
-          AND resolved_when < datetime('now', '-10 minutes')
+          AND (
+            resolved_when IS NULL
+            OR resolved_when < datetime('now', '-4 hours')
+          )
       `).all() as ProjectionRow[];
 
       const rearmed: string[] = [];

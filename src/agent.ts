@@ -257,7 +257,7 @@ export async function loadUserSession(
     authStorage,
     modelRegistry,
     model,
-    thinkingLevel: "off",
+    thinkingLevel: config.agent.thinking_level,
     customTools,
     resourceLoader: loader,
     sessionManager,
