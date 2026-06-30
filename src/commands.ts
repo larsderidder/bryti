@@ -1,17 +1,18 @@
 /**
  * Slash command handling and activity logging.
  *
- * Handles /clear, /memory, /log, and /restart commands.
+ * Handles /clear, /memory, /log, /restart, and thread commands.
  * Builds the human-readable activity log from tool-calls.jsonl.
  */
 
 import fs from "node:fs";
 import path from "node:path";
-import type { IncomingMessage } from "./channels/types.js";
+import type { IncomingMessage, SendOpts } from "./channels/types.js";
 import type { Config } from "./config.js";
 import type { CoreMemory } from "./memory/core-memory.js";
 import type { HistoryManager } from "./history.js";
 import { getUserTimezone } from "./time.js";
+import { createThread, getActiveThread, listThreads, switchThread } from "./threads.js";
 
 /**
  * Human-readable labels for the /log output. Tool names never leak to the user.
@@ -101,11 +102,21 @@ export interface SlashCommandContext {
   coreMemory: CoreMemory;
   historyManager: HistoryManager;
   /** Callback to dispose and delete a user session. */
-  disposeSession: (userId: string) => void;
+  disposeSession: (userId: string, threadId?: string) => void;
   /** Send a message to the user. */
-  sendMessage: (channelId: string, text: string) => Promise<string>;
+  sendMessage: (channelId: string, text: string, opts?: SendOpts) => Promise<string>;
   /** Trigger a restart. */
   triggerRestart: (msg: IncomingMessage, reason: string) => Promise<void>;
+}
+
+function parseSlashCommand(text: string): { command: string; args: string } | null {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("/")) return null;
+
+  const [head, ...rest] = trimmed.split(/\s+/);
+  const command = head.slice(1).split("@", 1)[0];
+  if (!command) return null;
+  return { command, args: rest.join(" ") };
 }
 
 /**
@@ -116,16 +127,46 @@ export async function handleSlashCommand(
   msg: IncomingMessage,
   context: SlashCommandContext,
 ): Promise<boolean> {
-  if (msg.text === "/clear") {
-    // Clear the JSONL audit log and dispose the in-memory session so the next
-    // message starts fresh (a new session file will be created).
-    await context.historyManager.clear();
-    context.disposeSession(msg.userId);
-    await context.sendMessage(msg.channelId, "Conversation history cleared.");
+  const parsed = parseSlashCommand(msg.text);
+  if (!parsed) return false;
+
+  if (parsed.command === "threads") {
+    const threads = listThreads(context.config.data_dir, msg.userId);
+    const lines = threads.map((thread) => `${thread.active ? "*" : "-"} ${thread.title}`);
+    await context.sendMessage(msg.channelId, `Threads:\n${lines.join("\n")}`);
     return true;
   }
 
-  if (msg.text === "/memory") {
+  if (parsed.command === "new") {
+    try {
+      const thread = createThread(context.config.data_dir, msg.userId, parsed.args);
+      await context.sendMessage(msg.channelId, `Created and switched to thread: ${thread.title}`);
+    } catch (err) {
+      await context.sendMessage(msg.channelId, (err as Error).message);
+    }
+    return true;
+  }
+
+  if (parsed.command === "switch") {
+    const thread = switchThread(context.config.data_dir, msg.userId, parsed.args);
+    if (!thread) {
+      await context.sendMessage(msg.channelId, "I couldn't find that thread. Use /threads to see available threads.");
+      return true;
+    }
+    await context.sendMessage(msg.channelId, `Switched to thread: ${thread.title}`);
+    return true;
+  }
+
+  if (parsed.command === "clear") {
+    // Dispose and delete only the active thread session. Shared memory,
+    // reminders, and the activity log are retained.
+    const threadId = getActiveThread(context.config.data_dir, msg.userId);
+    context.disposeSession(msg.userId, threadId);
+    await context.sendMessage(msg.channelId, "Current thread history cleared.");
+    return true;
+  }
+
+  if (parsed.command === "memory") {
     const memory = context.coreMemory.read();
     if (memory) {
       await context.sendMessage(msg.channelId, `Your core memory:\n\n${memory}`);
@@ -138,7 +179,7 @@ export async function handleSlashCommand(
     return true;
   }
 
-  if (msg.text === "/log") {
+  if (parsed.command === "log") {
     const logText = buildActivityLog(
       context.config.data_dir,
       msg.userId,
@@ -148,7 +189,7 @@ export async function handleSlashCommand(
     return true;
   }
 
-  if (msg.text === "/restart") {
+  if (parsed.command === "restart") {
     await context.triggerRestart(msg, "user command");
     return true;
   }

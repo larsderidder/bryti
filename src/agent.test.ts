@@ -24,7 +24,7 @@ function makeConfig(model: string, fallbacks: string[] = []): Config {
     models: { providers: [] },
     tools: {
       web_search: { enabled: false, searxng_url: "" },
-      fetch_url: { enabled: false, timeout_ms: 5000 },
+      fetch_url: { enabled: false, timeout_ms: 5000, backend: "readability", require_https: true },
     },
     cron: [],
     data_dir: "/tmp",

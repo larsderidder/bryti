@@ -7,7 +7,7 @@
  * Public surface:
  *   - AppState          — shared mutable state passed to every handler
  *   - processMessage()  — full pipeline: slash-cmd → trust → session → prompt → send
- *   - getOrLoadSession() — session factory (cached per userId in state.sessions)
+ *   - getOrLoadSession() — session factory (cached per user/thread in state.sessions)
  *   - getBridge()       — pick the right channel bridge for a platform
  *   - triggerRestart()  — write restart marker + signal supervisor
  */
@@ -51,6 +51,7 @@ import {
   type UsageTracker,
 } from "./usage.js";
 import { handleSlashCommand } from "./commands.js";
+import { DEFAULT_THREAD_ID, getActiveThread, getSessionKey } from "./threads.js";
 import {
   writePendingCheckpoint,
   deletePendingCheckpoint,
@@ -69,7 +70,7 @@ export interface AppState {
   coreMemory: CoreMemory;
   historyManager: HistoryManager;
   usageTracker: UsageTracker;
-  /** Persistent session cache: one session per userId. */
+  /** Persistent session cache: one session per user/thread. */
   sessions: Map<string, UserSession>;
   /** Active channel bridges (Telegram, WhatsApp, etc.) */
   bridges: ChannelBridge[];
@@ -127,17 +128,63 @@ function toAssistantMessage(message: unknown): AssistantMessageLike | undefined 
   return message as AssistantMessageLike;
 }
 
-/** Extract plain text from an assistant message (ignores tool calls, thinking). */
-function extractResponseText(msg: AssistantMessageLike | undefined): string {
+function stripThinkingTags(text: string): string {
+  return text
+    .replace(/<thinking>[\s\S]*?<\/thinking>/gi, "")
+    .replace(/<think>[\s\S]*?<\/think>/gi, "")
+    .trim();
+}
+
+function extractThinkingText(block: Record<string, unknown>): string {
+  if (typeof block.thinking === "string" && block.thinking.trim()) {
+    return block.thinking.trim();
+  }
+
+  const summary = block.summary;
+  if (Array.isArray(summary)) {
+    return summary
+      .map((entry) => {
+        if (!entry || typeof entry !== "object") return "";
+        return String((entry as Record<string, unknown>).text ?? "").trim();
+      })
+      .filter(Boolean)
+      .join("\n\n");
+  }
+
+  return "";
+}
+
+function formatThinkingBlock(thinking: string): string {
+  const quoted = thinking
+    .split("\n")
+    .map((line) => `> ${line}`)
+    .join("\n");
+  return `> Thinking:\n${quoted}`;
+}
+
+/** Extract user-visible plain text from an assistant message. */
+function extractResponseText(
+  msg: AssistantMessageLike | undefined,
+  opts: { showThinking?: boolean } = {},
+): string {
   if (!msg || !("content" in msg)) return "";
   const content = msg.content;
   if (Array.isArray(content)) {
     return content
-      .filter((c: Record<string, unknown>) => c.type === "text")
-      .map((c: Record<string, unknown>) => String(c.text ?? ""))
-      .join("");
+      .map((c: Record<string, unknown>) => {
+        if (c.type === "text") return String(c.text ?? "");
+        if (opts.showThinking && (c.type === "thinking" || c.type === "reasoning")) {
+          const thinking = extractThinkingText(c);
+          return thinking ? `\n\n${formatThinkingBlock(thinking)}` : "";
+        }
+        return "";
+      })
+      .join("")
+      .trim();
   }
-  if (typeof content === "string") return content;
+  if (typeof content === "string") {
+    return opts.showThinking ? content : stripThinkingTags(content);
+  }
   return "";
 }
 
@@ -218,6 +265,10 @@ async function prepareVoiceMessage(state: AppState, msg: IncomingMessage): Promi
   }
 }
 
+function sendOptsFor(msg: IncomingMessage): { channelThreadId?: string } {
+  return msg.channelThreadId ? { channelThreadId: msg.channelThreadId } : {};
+}
+
 async function sendAssistantResponse(state: AppState, msg: IncomingMessage, text: string): Promise<void> {
   const bridge = getBridge(state, msg.platform);
   if (
@@ -230,7 +281,7 @@ async function sendAssistantResponse(state: AppState, msg: IncomingMessage, text
     let audioPath = "";
     try {
       audioPath = await state.voiceService.synthesize(text);
-      await bridge.sendVoice(msg.channelId, audioPath);
+      await bridge.sendVoice(msg.channelId, audioPath, sendOptsFor(msg));
       cleanupOutgoingAudioFile(state, audioPath);
       return;
     } catch (err) {
@@ -239,7 +290,7 @@ async function sendAssistantResponse(state: AppState, msg: IncomingMessage, text
     }
   }
 
-  await bridge.sendMessage(msg.channelId, text);
+  await bridge.sendMessage(msg.channelId, text, sendOptsFor(msg));
 }
 
 // ---------------------------------------------------------------------------
@@ -277,6 +328,7 @@ export async function triggerRestart(
   writeRestartMarker(state.config.data_dir, {
     userId: msg.userId,
     channelId: msg.channelId,
+    channelThreadId: msg.channelThreadId,
     platform: msg.platform,
     reason,
   });
@@ -296,9 +348,9 @@ export async function triggerRestart(
 // ---------------------------------------------------------------------------
 
 /**
- * Get or load the persistent session for a user.
+ * Get or load the persistent session for a user thread.
  *
- * On first call for a userId, creates a ModelInfra and ProjectionStore shared
+ * On first call for a user/thread, creates a ModelInfra and ProjectionStore shared
  * between the tool set and the session. On subsequent calls returns the cached
  * session from state.sessions.
  */
@@ -307,7 +359,9 @@ export async function getOrLoadSession(
   msg: IncomingMessage,
 ): Promise<UserSession> {
   const { userId, channelId, platform } = msg;
-  const existing = state.sessions.get(userId);
+  const threadId = msg.threadId ?? DEFAULT_THREAD_ID;
+  const sessionKey = getSessionKey(userId, threadId);
+  const existing = state.sessions.get(sessionKey);
   if (existing) return existing;
 
   const modelInfra = createModelInfra(state.config);
@@ -333,6 +387,8 @@ export async function getOrLoadSession(
           `3. Only THEN suggest next steps or act on them\n` +
           `Never assume the user knows what the worker found. Always present the findings before drawing conclusions or taking action.`,
         platform: "telegram",
+        threadId,
+        channelThreadId: msg.channelThreadId,
         raw: { type: "worker_trigger" },
       });
     },
@@ -348,7 +404,7 @@ export async function getOrLoadSession(
     getLastUserMessage: () => state.lastUserMessages.get(userId),
     onApprovalNeeded: async (prompt, approvalKey) => {
       const bridge = getBridge(state, platform);
-      return bridge.sendApprovalRequest(channelId, prompt, approvalKey);
+      return bridge.sendApprovalRequest(channelId, prompt, approvalKey, undefined, sendOptsFor(msg));
     },
   };
   const wrappedTools = wrapToolsWithTrustChecks(
@@ -358,7 +414,7 @@ export async function getOrLoadSession(
     trustContext,
   );
 
-  const sessDir = path.join(state.config.data_dir, "sessions", userId);
+  const sessDir = path.join(state.config.data_dir, "sessions", sessionKey);
 
   let userSession: UserSession;
   try {
@@ -368,6 +424,7 @@ export async function getOrLoadSession(
       userId,
       wrappedTools,
       projectionStore,
+      sessionKey,
     );
   } catch (err) {
     console.error(
@@ -377,7 +434,7 @@ export async function getOrLoadSession(
     const corruptDir = path.join(
       state.config.data_dir,
       "sessions",
-      `${userId}-corrupt-${Date.now()}`,
+      `${sessionKey}-corrupt-${Date.now()}`,
     );
     if (fs.existsSync(sessDir)) {
       try {
@@ -393,8 +450,9 @@ export async function getOrLoadSession(
       userId,
       wrappedTools,
       projectionStore,
+      sessionKey,
     );
-    state.recoveredSessions.add(userId);
+    state.recoveredSessions.add(sessionKey);
   }
 
   userSession.onCompactionComplete = () => {
@@ -403,6 +461,8 @@ export async function getOrLoadSession(
       channelId,
       userId,
       platform: "telegram",
+      threadId,
+      channelThreadId: msg.channelThreadId,
       text:
         "[System: context was automatically compacted. If you were in the middle of a task " +
         "for the user, continue where you left off. If not, say nothing (NOOP).]",
@@ -418,7 +478,7 @@ export async function getOrLoadSession(
     projectionStore.close();
   };
 
-  state.sessions.set(userId, userSession);
+  state.sessions.set(sessionKey, userSession);
   return userSession;
 }
 
@@ -450,23 +510,35 @@ export async function processMessage(
     config: state.config,
     coreMemory: state.coreMemory,
     historyManager: state.historyManager,
-    disposeSession: (userId: string) => {
-      const existing = state.sessions.get(userId);
+    disposeSession: (userId: string, threadId = DEFAULT_THREAD_ID) => {
+      const sessionKey = getSessionKey(userId, threadId);
+      const existing = state.sessions.get(sessionKey);
       if (existing) {
         existing.dispose();
-        state.sessions.delete(userId);
+        state.sessions.delete(sessionKey);
         if (fs.existsSync(existing.sessionDir)) {
           fs.rmSync(existing.sessionDir, { recursive: true, force: true });
         }
+        return;
+      }
+
+      const sessionDir = path.join(state.config.data_dir, "sessions", sessionKey);
+      if (fs.existsSync(sessionDir)) {
+        fs.rmSync(sessionDir, { recursive: true, force: true });
       }
     },
     sendMessage: (channelId: string, text: string) =>
-      getBridge(state, msg.platform).sendMessage(channelId, text),
+      getBridge(state, msg.platform).sendMessage(channelId, text, sendOptsFor(msg)),
     triggerRestart: (msg: IncomingMessage, reason: string) =>
       triggerRestart(state, msg, reason),
   });
 
   if (wasCommand) return;
+
+  msg = {
+    ...msg,
+    threadId: msg.threadId ?? getActiveThread(state.config.data_dir, msg.userId),
+  };
 
   const voicePreparedMsg = await prepareVoiceMessage(state, msg);
   if (!voicePreparedMsg) return;
@@ -495,12 +567,13 @@ export async function processMessage(
 
   state.lastUserMessages.set(msg.userId, msg.text);
 
-  await getBridge(state, msg.platform).sendTyping(msg.channelId);
+  await getBridge(state, msg.platform).sendTyping(msg.channelId, sendOptsFor(msg));
 
   try {
     const userSession = await getOrLoadSession(state, msg);
-    if (state.recoveredSessions.has(msg.userId)) {
-      state.recoveredSessions.delete(msg.userId);
+    const sessionKey = getSessionKey(msg.userId, msg.threadId ?? DEFAULT_THREAD_ID);
+    if (state.recoveredSessions.has(sessionKey)) {
+      state.recoveredSessions.delete(sessionKey);
       await getBridge(state, msg.platform).sendMessage(
         msg.channelId,
         "I had to start a fresh conversation due to a technical issue. My memory and reminders are intact, just the recent conversation thread was lost.",
@@ -555,43 +628,56 @@ export async function processMessage(
     const messageCountBefore = session.messages.length;
 
     const promptStart = Date.now();
-    // Guard against stuck tool calls (e.g., bash without timeout).
-    // If the prompt takes longer than 5 minutes, abort it.
+    // Guard against stuck model or tool calls. session.abort() is best-effort,
+    // so the timeout must resolve this turn even if the SDK await never unwinds.
     const PROMPT_TIMEOUT_MS = 5 * 60 * 1000;
-    let promptTimedOut = false;
-    const promptTimeout = setTimeout(() => {
-      promptTimedOut = true;
-      console.error(`[agent] Prompt for ${msg.userId} exceeded ${PROMPT_TIMEOUT_MS / 1000}s, aborting`);
-      session.abort();
-    }, PROMPT_TIMEOUT_MS);
-    try {
-      await promptWithFallback(
-        session,
-        msg.text,
-        state.config,
-        userSession.modelRegistry,
-        msg.userId,
-        msg.images,
-      );
-    } finally {
-      clearTimeout(promptTimeout);
-    }
+    let promptTimeout: ReturnType<typeof setTimeout> | null = null;
+    const promptPromise = promptWithFallback(
+      session,
+      msg.text,
+      state.config,
+      userSession.modelRegistry,
+      msg.userId,
+      msg.images,
+    );
+    const promptResult = await Promise.race([
+      promptPromise.then(() => "completed" as const),
+      new Promise<"timeout">((resolve) => {
+        promptTimeout = setTimeout(() => {
+          console.error(`[agent] Prompt for ${sessionKey} exceeded ${PROMPT_TIMEOUT_MS / 1000}s, aborting`);
+          try {
+            void session.abort();
+          } catch (err) {
+            console.warn(`[agent] Failed to abort timed-out prompt for ${sessionKey}:`, (err as Error).message);
+          }
+          resolve("timeout");
+        }, PROMPT_TIMEOUT_MS);
+      }),
+    ]);
+    if (promptTimeout) clearTimeout(promptTimeout);
+
+    // Avoid unhandled rejections if the timed-out SDK call eventually finishes
+    // after this request has already been evicted from the session cache.
+    promptPromise.catch((err) => {
+      console.warn(`[agent] Timed-out prompt for ${sessionKey} later rejected:`, (err as Error).message);
+    });
 
     // If the prompt was aborted due to timeout, the in-memory session state
     // is unreliable (partially updated). Evict it from the cache so the next
     // message reloads from the JSONL file (the source of truth).
-    if (promptTimedOut) {
-      console.log(`[agent] Evicting session for ${msg.userId} after timeout abort`);
+    if (promptResult === "timeout") {
+      console.log(`[agent] Evicting session for ${sessionKey} after timeout abort`);
       try {
         await getBridge(state, msg.platform).sendMessage(
           msg.channelId,
           "One of my tools took too long and I had to stop. Please resend your message.",
+          sendOptsFor(msg),
         );
       } catch {
         // Best-effort — don't let a send failure mask the eviction
       }
-      await userSession.session.dispose();
-      state.sessions.delete(msg.userId);
+      userSession.dispose();
+      state.sessions.delete(sessionKey);
       return;
     }
     const latencyMs = Date.now() - promptStart;
@@ -610,8 +696,9 @@ export async function processMessage(
       .filter((m): m is NonNullable<typeof m> => m != null);
 
     const allResponseTexts: string[] = [];
+    const showThinking = state.config.response?.show_thinking === true;
     for (const assistantMsg of newAssistantMessages) {
-      const text = extractResponseText(assistantMsg).trim();
+      const text = extractResponseText(assistantMsg, { showThinking }).trim();
       if (text && text !== SILENT_REPLY_TOKEN) {
         allResponseTexts.push(text);
       }
@@ -693,7 +780,7 @@ export async function processMessage(
       const followUpMsg = toAssistantMessage(
         session.messages.filter((m) => m.role === "assistant").pop(),
       );
-      const followUpText = extractResponseText(followUpMsg);
+      const followUpText = extractResponseText(followUpMsg, { showThinking: state.config.response?.show_thinking === true });
       if (followUpText.trim() && followUpText.trim() !== SILENT_REPLY_TOKEN) {
         await state.historyManager.append({ role: "assistant", content: followUpText });
         await sendAssistantResponse(state, msg, followUpText);

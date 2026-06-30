@@ -10,6 +10,7 @@ import { describe, it, expect } from "vitest";
 import { createTools } from "./index.js";
 import { PERSONAL_ASSISTANT_DEFAULTS } from "../config.js";
 import type { Config, ToolGroup } from "../config.js";
+import { getToolCapabilities } from "../trust/index.js";
 import type { CoreMemory } from "../memory/core-memory.js";
 import os from "node:os";
 import path from "node:path";
@@ -43,7 +44,7 @@ function makeConfig(dataDir: string, groups: ToolGroup[]): Config {
     models: { providers: [] },
     tools: {
       web_search: { enabled: false, searxng_url: "" },
-      fetch_url: { timeout_ms: 5000 },
+      fetch_url: { enabled: true, timeout_ms: 5000, backend: "readability", require_https: true },
       workers: { max_concurrent: 1, types: {} },
     },
     integrations: {},
@@ -84,6 +85,8 @@ describe("tool group filtering", () => {
     expect(names).toContain("skill_install");
     expect(names).toContain("worker_dispatch");
     expect(names).toContain("pi_session_read");
+    expect(names).not.toContain("web_search");
+    expect(names).not.toContain("fetch_url");
   });
 
   it("devops-monitor groups registers only declared tools", () => {
@@ -133,6 +136,39 @@ describe("tool group filtering", () => {
     expect(names).toContain("worker_check");
     expect(names).toContain("worker_interrupt");
     expect(names).toContain("worker_steer");
+  });
+
+  it("web group opts the main agent into direct search and extraction tools", () => {
+    const dataDir = makeTmpDir();
+    const config = makeConfig(dataDir, ["web"]);
+    config.tools.web_search = { enabled: true, searxng_url: "https://search.example.com" };
+    config.tools.fetch_url = { timeout_ms: 5000, backend: "readability", require_https: true };
+    const names = toolNames(config, dataDir);
+
+    expect(names).toContain("web_search");
+    expect(names).toContain("fetch_url");
+    expect(names).not.toContain("worker_dispatch");
+  });
+
+  it("direct web tools are guarded, not elevated", () => {
+    const dataDir = makeTmpDir();
+    const config = makeConfig(dataDir, ["web"]);
+    config.tools.web_search = { enabled: true, searxng_url: "https://search.example.com" };
+    toolNames(config, dataDir);
+
+    expect(getToolCapabilities("web_search").level).toBe("guarded");
+    expect(getToolCapabilities("fetch_url").level).toBe("guarded");
+  });
+
+  it("web group exposes extraction even when search is disabled", () => {
+    const dataDir = makeTmpDir();
+    const config = makeConfig(dataDir, ["web"]);
+    config.tools.web_search = { enabled: false, searxng_url: "https://search.example.com" };
+    config.tools.fetch_url = { enabled: false, timeout_ms: 5000, backend: "readability", require_https: true };
+    const names = toolNames(config, dataDir);
+
+    expect(names).not.toContain("web_search");
+    expect(names).toContain("fetch_url");
   });
 
   it("system_restart is registered when extensions_management is enabled and onRestart provided", () => {

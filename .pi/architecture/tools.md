@@ -11,7 +11,7 @@ Built-in tools + extension system.
 - Workers: worker_dispatch, worker_check, worker_interrupt, worker_steer
 - Pi sessions: pi_session_list, pi_session_read, pi_session_search, pi_session_inject
 - Files: file_read (unsandboxed, any path), file_write + file_list (sandboxed to data/files/)
-- Web: web_search, fetch_url (only in workers)
+- Web: web_search, fetch_url. Workers always get fetch_url and get web_search when configured/requested; main agent gets web tools only when `agent.yml` includes the opt-in `web` tool group. `fetch_url` uses npm-native Readability by default, can use Argus when configured, is HTTPS-only by default, and uses SSRF protections before extraction.
 - Skills: skill_install (agent writes skills to `data/skills/`)
 
 ## Extensions
@@ -38,4 +38,4 @@ Agent-written Python/Bash scripts, not TypeScript extensions.
 All tools declared in system prompt via `src/system-prompt.ts` → buildToolSection()
 
 - Capability level shown per tool
-- Grouped by: always-on, workers-only, optional (based on config)
+- Grouped by: standard groups, workers, and opt-in direct web access (based on config)

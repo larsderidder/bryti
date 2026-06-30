@@ -14,6 +14,7 @@ import type { IncomingMessage } from "./channels/types.js";
 export interface PendingCheckpoint {
   text: string;
   channelId: string;
+  channelThreadId?: string;
   platform: string;
   timestamp: number;
 }
@@ -30,6 +31,7 @@ export function writePendingCheckpoint(config: Config, msg: IncomingMessage): vo
   const checkpoint: PendingCheckpoint = {
     text: msg.text,
     channelId: msg.channelId,
+    channelThreadId: msg.channelThreadId,
     platform: msg.platform,
     timestamp: Date.now(),
   };

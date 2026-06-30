@@ -62,8 +62,8 @@ const dispatchWorkerSchema = Type.Object({
     Type.Union([Type.Literal("web_search"), Type.Literal("fetch_url")]),
     {
       description:
-        "Tools the worker may use. Defaults to [\"web_search\", \"fetch_url\"]. " +
-        "Omit fetch_url if only keyword search is needed.",
+        "Optional extra tools the worker may use. fetch_url is always available. " +
+        "Defaults to [\"web_search\", \"fetch_url\"] so research workers can search and extract.",
     },
   )),
   model: Type.Optional(Type.String({
@@ -141,7 +141,7 @@ export function createWorkerTools(
       "Returns immediately — the worker runs in the background. " +
       "After dispatching, create a projection with trigger_on_fact matching the worker completion fact " +
       "(e.g. 'worker <id> complete') so you are notified when results are ready. " +
-      "Workers can use web_search and fetch_url. They write results to result.md. " +
+      "Workers always have fetch_url for Argus extraction and can use web_search when configured. They write results to result.md. " +
       `Max ${config.tools.workers.max_concurrent} concurrent workers.` +
       typesSuffix,
     parameters: dispatchWorkerSchema,

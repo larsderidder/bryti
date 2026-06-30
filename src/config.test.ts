@@ -78,6 +78,8 @@ cron: []
 
     expect(config.tools.web_search.enabled).toBe(true);
     expect(config.tools.fetch_url.timeout_ms).toBe(10000);
+    expect(config.tools.fetch_url.backend).toBe("readability");
+    expect(config.tools.fetch_url.require_https).toBe(true);
     expect(config.agent.thinking_level).toBe("high");
     expect(config.tools.workers.thinking_level).toBe("medium");
     expect(config.web_e2ee).toEqual({
@@ -91,6 +93,33 @@ cron: []
         invite_ttl_minutes: 10,
       },
     });
+  });
+
+  it("should load configured fetch_url backend", () => {
+    const configContent = `
+agent:
+  name: TestBot
+  model: test/model
+telegram:
+  token: test-token
+models:
+  providers:
+    - name: test
+      base_url: https://test.example.com
+      api_key: test-key
+      models: []
+tools:
+  fetch_url:
+    backend: argus
+    argus_bin: /usr/local/bin/argus
+cron: []
+`;
+    fs.writeFileSync(path.join(tempDir, "config.yml"), configContent);
+
+    const config = loadConfig();
+
+    expect(config.tools.fetch_url.backend).toBe("argus");
+    expect(config.tools.fetch_url.argus_bin).toBe("/usr/local/bin/argus");
   });
 
   it("should load configured thinking levels", () => {

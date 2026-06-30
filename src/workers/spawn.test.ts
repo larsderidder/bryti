@@ -37,6 +37,7 @@ const mockDispose = vi.fn();
 const mockReload = vi.fn().mockResolvedValue(undefined);
 let mockPromptImpl: () => Promise<void> = async () => {};
 let mockMessages: unknown[] = [];
+let mockCustomToolNames: string[] = [];
 
 // Mock embed so tests never load the embedding model (slow, 300MB download)
 vi.mock("../memory/embeddings.js", () => ({
@@ -50,7 +51,9 @@ vi.mock("@mariozechner/pi-coding-agent", async (importActual) => {
   const actual = await importActual<typeof import("@mariozechner/pi-coding-agent")>();
   return {
     ...actual,
-    createAgentSession: vi.fn().mockImplementation(async () => ({
+    createAgentSession: vi.fn().mockImplementation(async (options: { customTools?: Array<{ name: string }> }) => {
+      mockCustomToolNames = (options.customTools ?? []).map((tool) => tool.name);
+      return {
       session: {
         get messages() { return mockMessages; },
         async prompt() { return mockPromptImpl(); },
@@ -61,7 +64,8 @@ vi.mock("@mariozechner/pi-coding-agent", async (importActual) => {
         getContextUsage() { return { percent: 5, tokens: 500, contextWindow: 10000 }; },
         async setModel() {},
       },
-    })),
+    };
+    }),
     DefaultResourceLoader: class {
       constructor() {}
       async reload() {}
@@ -119,7 +123,7 @@ function makeConfig(dataDir: string): Config {
     },
     tools: {
       web_search: { enabled: false, searxng_url: "" },
-      fetch_url: { timeout_ms: 10000 },
+      fetch_url: { enabled: true, timeout_ms: 10000, backend: "readability", require_https: true },
       workers: { max_concurrent: 3, model: undefined },
     },
     integrations: {},
@@ -206,6 +210,7 @@ describe("spawnWorkerSession completion lifecycle", () => {
     fs.mkdirSync(workerDir, { recursive: true });
     config = makeConfig(tmpDir);
     mockMessages = [];
+    mockCustomToolNames = [];
     mockPromptImpl = async () => {};
     mockAbort.mockClear();
     mockDispose.mockClear();
@@ -230,6 +235,31 @@ describe("spawnWorkerSession completion lifecycle", () => {
       timeoutHandle: null,
     });
   }
+
+  it("always gives workers fetch_url even when only web_search was requested", async () => {
+    const registry = createWorkerRegistry();
+    registerWorker(registry, "w-test01", "test task");
+    const memStore = createMemoryStore("user-1", tmpDir);
+
+    try {
+      await spawnWorkerSession({
+        config,
+        workerId: "w-test01",
+        workerDir,
+        task: "test task",
+        modelOverride: undefined,
+        thinkingLevel: "medium",
+        toolNames: ["web_search"],
+        memoryStore: memStore,
+        registry,
+        timeoutMs: 1000,
+      });
+
+      expect(mockCustomToolNames).toContain("fetch_url");
+    } finally {
+      memStore.close();
+    }
+  });
 
   it("writes status.json as 'complete' after a successful prompt", async () => {
     const registry = createWorkerRegistry();

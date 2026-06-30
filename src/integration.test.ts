@@ -68,7 +68,7 @@ function makeConfig(dataDir: string): Config {
     },
     tools: {
       web_search: { enabled: false, searxng_url: "" },
-      fetch_url: { timeout_ms: 10000 },
+      fetch_url: { enabled: true, timeout_ms: 10000, backend: "readability", require_https: true },
       workers: { max_concurrent: 3 },
     },
     integrations: {},

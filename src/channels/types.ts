@@ -26,6 +26,10 @@ export interface IncomingMessage {
   channelId: string;
   /** Platform-specific user ID */
   userId: string;
+  /** Bryti conversation thread ID. Defaults to main. */
+  threadId?: string;
+  /** Platform-specific thread/topic ID inside channel, when available. */
+  channelThreadId?: string;
   /** Platform-specific message ID when available. */
   messageId?: string;
   /** Message text content */
@@ -44,6 +48,8 @@ export interface IncomingMessage {
 
 export interface SendOpts {
   parseMode?: "markdown" | "html" | "plain";
+  /** Platform-specific thread/topic ID inside channel, when replying in grouped channels. */
+  channelThreadId?: string;
 }
 
 /**
@@ -68,10 +74,10 @@ export interface ChannelBridge {
   editMessage(channelId: string, messageId: string, text: string): Promise<void>;
 
   /** Send a voice/audio message when the channel supports it. */
-  sendVoice?(channelId: string, audioPath: string, opts?: { caption?: string }): Promise<string>;
+  sendVoice?(channelId: string, audioPath: string, opts?: SendOpts & { caption?: string }): Promise<string>;
 
   /** Show typing indicator. */
-  sendTyping(channelId: string): Promise<void>;
+  sendTyping(channelId: string, opts?: SendOpts): Promise<void>;
 
   /** Register a handler for incoming messages. */
   onMessage(handler: (msg: IncomingMessage) => Promise<void>): void;
@@ -89,5 +95,6 @@ export interface ChannelBridge {
     prompt: string,
     approvalKey: string,
     timeoutMs?: number,
+    opts?: SendOpts,
   ): Promise<ApprovalResult>;
 }

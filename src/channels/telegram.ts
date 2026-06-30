@@ -140,11 +140,28 @@ const MEDIA_GROUP_FLUSH_MS = 600;
 const TELEGRAM_API_TIMEOUT_MS = 30_000;
 const TELEGRAM_FILE_DOWNLOAD_TIMEOUT_MS = 30_000;
 
+const BOT_COMMANDS = [
+  { command: "new", description: "Create and switch to a new thread" },
+  { command: "switch", description: "Switch to an existing thread" },
+  { command: "threads", description: "List your threads" },
+  { command: "clear", description: "Clear the current thread history" },
+  { command: "memory", description: "Show core memory" },
+  { command: "log", description: "Show recent activity" },
+  { command: "restart", description: "Restart Bryti" },
+] as const;
+
+interface TelegramBridgeOptions {
+  mode?: "dm" | "group";
+  allowedGroups?: number[];
+}
+
 interface MediaGroupEntry {
   images: Array<{ data: string; mimeType: string }>;
   caption: string;
   channelId: string;
   userId: string;
+  threadId?: string;
+  channelThreadId?: string;
   raw: unknown;
   timer: ReturnType<typeof setTimeout>;
 }
@@ -318,13 +335,21 @@ export class TelegramBridge implements ChannelBridge {
   private handler: MessageHandler | null = null;
   private typingIntervals: Map<string, NodeJS.Timeout> = new Map();
   private readonly allowedUsers: number[];
+  private readonly allowedGroups: number[];
+  private readonly mode: "dm" | "group";
   /** Pending approval requests: approvalKey → resolve function */
   private pendingApprovals: Map<string, (result: ApprovalResult) => void> = new Map();
   /** Media group buffer: media_group_id → accumulated entry */
   private mediaGroupBuffer: Map<string, MediaGroupEntry> = new Map();
 
-  constructor(private readonly botToken: string, allowedUsers: number[] = []) {
+  constructor(
+    private readonly botToken: string,
+    allowedUsers: number[] = [],
+    options: TelegramBridgeOptions = {},
+  ) {
     this.allowedUsers = allowedUsers;
+    this.allowedGroups = options.allowedGroups ?? [];
+    this.mode = options.mode ?? "dm";
   }
 
   // -------------------------------------------------------------------------
@@ -345,7 +370,7 @@ export class TelegramBridge implements ChannelBridge {
     // message processing pipeline. /start and everything else goes to the agent.
     this.bot.on("message:text", async (ctx) => {
       if (!this.isAllowed(ctx)) {
-        await ctx.reply("Sorry, you're not authorized to use this bot.");
+        await this.replyUnauthorized(ctx);
         return;
       }
 
@@ -356,6 +381,9 @@ export class TelegramBridge implements ChannelBridge {
         const msg: IncomingMessage = {
           channelId: String(ctx.chat.id),
           userId: String(ctx.from?.id),
+          threadId: this.brytiThreadId(ctx),
+          channelThreadId: this.channelThreadId(ctx),
+          messageId: String(ctx.message.message_id),
           text,
           platform: "telegram",
           raw: ctx.message,
@@ -370,7 +398,7 @@ export class TelegramBridge implements ChannelBridge {
     // and dispatch a single message containing all images.
     this.bot.on("message:photo", async (ctx) => {
       if (!this.isAllowed(ctx)) {
-        await ctx.reply("Sorry, you're not authorized to use this bot.");
+        await this.replyUnauthorized(ctx);
         return;
       }
 
@@ -389,6 +417,8 @@ export class TelegramBridge implements ChannelBridge {
       const channelId = String(ctx.chat.id);
       const userId = String(ctx.from?.id);
       const mediaGroupId = ctx.message.media_group_id;
+      const threadId = this.brytiThreadId(ctx);
+      const channelThreadId = this.channelThreadId(ctx);
 
       if (mediaGroupId) {
         // Album: accumulate images and reset the flush timer
@@ -407,6 +437,8 @@ export class TelegramBridge implements ChannelBridge {
             caption,
             channelId,
             userId,
+            threadId,
+            channelThreadId,
             raw: ctx.message,
             timer: setTimeout(
               () => this.flushMediaGroup(mediaGroupId),
@@ -424,6 +456,8 @@ export class TelegramBridge implements ChannelBridge {
         channelId,
         userId,
         text,
+        threadId,
+        channelThreadId,
         platform: "telegram",
         raw: ctx.message,
         images: image,
@@ -435,7 +469,7 @@ export class TelegramBridge implements ChannelBridge {
     // file and transcribed later by the generic voice service.
     this.bot.on("message:voice", async (ctx) => {
       if (!this.isAllowed(ctx)) {
-        await ctx.reply("Sorry, you're not authorized to use this bot.");
+        await this.replyUnauthorized(ctx);
         return;
       }
 
@@ -453,6 +487,8 @@ export class TelegramBridge implements ChannelBridge {
       const msg: IncomingMessage = {
         channelId: String(ctx.chat.id),
         userId: String(fromId),
+        threadId: this.brytiThreadId(ctx),
+        channelThreadId: this.channelThreadId(ctx),
         messageId: String(ctx.message.message_id),
         text: "The user sent a voice message.",
         platform: "telegram",
@@ -466,7 +502,7 @@ export class TelegramBridge implements ChannelBridge {
     // Handle document messages that are images (sent as files instead of photos)
     this.bot.on("message:document", async (ctx) => {
       if (!this.isAllowed(ctx)) {
-        await ctx.reply("Sorry, you're not authorized to use this bot.");
+        await this.replyUnauthorized(ctx);
         return;
       }
 
@@ -489,6 +525,8 @@ export class TelegramBridge implements ChannelBridge {
       const msg: IncomingMessage = {
         channelId: String(ctx.chat.id),
         userId: String(ctx.from?.id),
+        threadId: this.brytiThreadId(ctx),
+        channelThreadId: this.channelThreadId(ctx),
         text,
         platform: "telegram",
         raw: ctx.message,
@@ -497,10 +535,14 @@ export class TelegramBridge implements ChannelBridge {
       await this.handler(msg);
     });
 
-    // Handle non-text messages
+    // Handle unsupported user content. grammy's broad "message" filter also
+    // matches text, media handled above, and Telegram service updates such as
+    // topic creation. Do not reply to those here.
     this.bot.on("message", async (ctx) => {
+      if (this.isHandledOrServiceMessage(ctx)) return;
+
       if (!this.isAllowed(ctx)) {
-        await ctx.reply("Sorry, you're not authorized to use this bot.");
+        await this.replyUnauthorized(ctx);
         return;
       }
       await ctx.reply("Sorry, I can only handle text messages, images, and voice messages for now.");
@@ -554,6 +596,7 @@ export class TelegramBridge implements ChannelBridge {
 
     // Initialize bot (fetches bot info) then start polling in background
     await this.bot.init();
+    await this.registerCommands();
     // bot.start() blocks until stopped; run it in background.
     // Explicitly declare the update types we handle so Telegram doesn't send
     // types we haven't subscribed to (e.g. channel_post, message_reaction).
@@ -567,6 +610,20 @@ export class TelegramBridge implements ChannelBridge {
       }
     });
     console.log("Telegram bridge started (polling mode)");
+  }
+
+  private async registerCommands(): Promise<void> {
+    if (!this.bot) return;
+
+    try {
+      await withTimeout(
+        this.bot.api.setMyCommands([...BOT_COMMANDS]),
+        TELEGRAM_API_TIMEOUT_MS,
+        "Telegram setMyCommands",
+      );
+    } catch (err) {
+      console.warn("Telegram command registration failed:", (err as Error).message);
+    }
   }
 
   async stop(): Promise<void> {
@@ -597,7 +654,7 @@ export class TelegramBridge implements ChannelBridge {
     const chatId = parseInt(channelId, 10);
 
     // Stop typing indicator for this chat
-    this.stopTyping(channelId);
+    this.stopTyping(channelId, opts);
 
     // Always use HTML parse mode. For markdown input, parse into an IR first
     // then chunk at semantic boundaries (never mid-fence or mid-tag), then
@@ -611,7 +668,14 @@ export class TelegramBridge implements ChannelBridge {
     for (const chunk of chunks) {
       try {
         const message = await withRetry(() =>
-          withTimeout(bot.api.sendMessage(chatId, chunk, { parse_mode: "HTML" }), TELEGRAM_API_TIMEOUT_MS, "Telegram sendMessage"),
+          withTimeout(
+            bot.api.sendMessage(chatId, chunk, {
+              parse_mode: "HTML",
+              ...this.telegramThreadOptions(opts),
+            }),
+            TELEGRAM_API_TIMEOUT_MS,
+            "Telegram sendMessage",
+          ),
         );
         lastMessageId = String(message.message_id);
       } catch (error) {
@@ -621,7 +685,11 @@ export class TelegramBridge implements ChannelBridge {
           console.warn("HTML parse failed, falling back to plain text:", err.description);
           const plain = chunk.replace(/<[^>]+>/g, "");
           const message = await withRetry(() =>
-            withTimeout(bot.api.sendMessage(chatId, plain), TELEGRAM_API_TIMEOUT_MS, "Telegram sendMessage"),
+            withTimeout(
+              bot.api.sendMessage(chatId, plain, this.telegramThreadOptions(opts)),
+              TELEGRAM_API_TIMEOUT_MS,
+              "Telegram sendMessage",
+            ),
           );
           lastMessageId = String(message.message_id);
         } else {
@@ -633,15 +701,16 @@ export class TelegramBridge implements ChannelBridge {
     return lastMessageId;
   }
 
-  async sendVoice(channelId: string, audioPath: string, opts?: { caption?: string }): Promise<string> {
+  async sendVoice(channelId: string, audioPath: string, opts?: { caption?: string; channelThreadId?: string }): Promise<string> {
     const bot = await this.requireBot();
     const chatId = parseInt(channelId, 10);
 
-    this.stopTyping(channelId);
+    this.stopTyping(channelId, opts);
 
     const message = await withRetry(() =>
       bot.api.sendVoice(chatId, new InputFile(audioPath), {
         ...(opts?.caption ? { caption: opts.caption } : {}),
+        ...this.telegramThreadOptions(opts),
       }),
     );
     return String(message.message_id);
@@ -671,12 +740,14 @@ export class TelegramBridge implements ChannelBridge {
     }
   }
 
-  async sendTyping(channelId: string): Promise<void> {
+  async sendTyping(channelId: string, opts?: SendOpts): Promise<void> {
     // Don't wait for bot during typing, it's cosmetic. Just skip silently.
     if (!this.bot) return;
 
+    const typingKey = this.typingKey(channelId, opts);
+
     // If already typing, don't start another interval
-    if (this.typingIntervals.has(channelId)) {
+    if (this.typingIntervals.has(typingKey)) {
       return;
     }
 
@@ -684,7 +755,11 @@ export class TelegramBridge implements ChannelBridge {
 
     // Send initial typing action
     try {
-      await withTimeout(this.bot.api.sendChatAction(chatId, "typing"), TELEGRAM_API_TIMEOUT_MS, "Telegram sendChatAction");
+      await withTimeout(
+        this.bot.api.sendChatAction(chatId, "typing", this.telegramThreadOptions(opts)),
+        TELEGRAM_API_TIMEOUT_MS,
+        "Telegram sendChatAction",
+      );
     } catch {
       // Ignore errors
     }
@@ -693,15 +768,19 @@ export class TelegramBridge implements ChannelBridge {
     const interval = setInterval(async () => {
       try {
         if (this.bot) {
-          await withTimeout(this.bot.api.sendChatAction(chatId, "typing"), TELEGRAM_API_TIMEOUT_MS, "Telegram sendChatAction");
+          await withTimeout(
+            this.bot.api.sendChatAction(chatId, "typing", this.telegramThreadOptions(opts)),
+            TELEGRAM_API_TIMEOUT_MS,
+            "Telegram sendChatAction",
+          );
         }
       } catch {
         // Stop on error
-        this.stopTyping(channelId);
+        this.stopTyping(channelId, opts);
       }
     }, 5000);
 
-    this.typingIntervals.set(channelId, interval);
+    this.typingIntervals.set(typingKey, interval);
   }
 
   onMessage(handler: (msg: IncomingMessage) => Promise<void>): void {
@@ -730,6 +809,7 @@ export class TelegramBridge implements ChannelBridge {
     prompt: string,
     approvalKey: string,
     timeoutMs = 5 * 60 * 1000,
+    opts?: SendOpts,
   ): Promise<ApprovalResult> {
     const bot = await this.requireBot();
 
@@ -748,6 +828,7 @@ export class TelegramBridge implements ChannelBridge {
         bot.api.sendMessage(parseInt(channelId, 10), prompt, {
           parse_mode: "HTML",
           reply_markup: keyboard,
+          ...this.telegramThreadOptions(opts),
         }),
         TELEGRAM_API_TIMEOUT_MS,
         "Telegram approval sendMessage",
@@ -768,6 +849,7 @@ export class TelegramBridge implements ChannelBridge {
                 this.bot!.api.sendMessage(
                   parseInt(channelId, 10),
                   "⏱ Permission request expired (auto-denied).",
+                  this.telegramThreadOptions(opts),
                 ),
                 TELEGRAM_API_TIMEOUT_MS,
                 "Telegram approval timeout sendMessage",
@@ -813,6 +895,8 @@ export class TelegramBridge implements ChannelBridge {
     const msg: IncomingMessage = {
       channelId: entry.channelId,
       userId: entry.userId,
+      threadId: entry.threadId,
+      channelThreadId: entry.channelThreadId,
       text,
       platform: "telegram",
       raw: entry.raw,
@@ -1005,6 +1089,71 @@ export class TelegramBridge implements ChannelBridge {
     throw new Error("Bot not started");
   }
 
+  private channelThreadId(ctx: Context): string | undefined {
+    const threadId = (ctx.message as { message_thread_id?: number } | undefined)?.message_thread_id;
+    return threadId == null ? undefined : String(threadId);
+  }
+
+  private brytiThreadId(ctx: Context): string | undefined {
+    if (this.mode !== "group") return undefined;
+    if (ctx.chat?.type === "private") return undefined;
+    const chatId = ctx.chat?.id;
+    if (chatId == null) return undefined;
+    const topicId = this.channelThreadId(ctx);
+    return topicId ? `telegram-topic-${Math.abs(chatId)}-${topicId}` : `telegram-chat-${Math.abs(chatId)}`;
+  }
+
+  private telegramThreadOptions(opts?: SendOpts): { message_thread_id?: number } {
+    const threadId = opts?.channelThreadId ? Number(opts.channelThreadId) : undefined;
+    return Number.isSafeInteger(threadId) ? { message_thread_id: threadId } : {};
+  }
+
+  private typingKey(channelId: string, opts?: SendOpts): string {
+    return opts?.channelThreadId ? `${channelId}:${opts.channelThreadId}` : channelId;
+  }
+
+  private isHandledOrServiceMessage(ctx: Context): boolean {
+    const message = ctx.message as Record<string, unknown> | undefined;
+    if (!message) return true;
+
+    const handledKeys = ["text", "photo", "voice", "document"];
+    if (handledKeys.some((key) => key in message)) return true;
+
+    const serviceKeys = [
+      "forum_topic_created",
+      "forum_topic_edited",
+      "forum_topic_closed",
+      "forum_topic_reopened",
+      "general_forum_topic_hidden",
+      "general_forum_topic_unhidden",
+      "new_chat_members",
+      "left_chat_member",
+      "pinned_message",
+      "message_auto_delete_timer_changed",
+      "migrate_to_chat_id",
+      "migrate_from_chat_id",
+      "group_chat_created",
+      "supergroup_chat_created",
+      "channel_chat_created",
+    ];
+    return serviceKeys.some((key) => key in message);
+  }
+
+  private async replyUnauthorized(ctx: Context): Promise<void> {
+    if (ctx.chat?.type === "private") {
+      await ctx.reply("Sorry, you're not authorized to use this bot.");
+    }
+  }
+
+  private logGroupAuth(ctx: Context, allowed: boolean, reason: string): void {
+    if (ctx.chat?.type !== "group" && ctx.chat?.type !== "supergroup") return;
+    console.log(
+      `[telegram] group message ${allowed ? "accepted" : "rejected"}: ` +
+      `reason=${reason} chat=${ctx.chat.id} from=${ctx.from?.id ?? "none"} ` +
+      `thread=${this.channelThreadId(ctx) ?? "none"}`,
+    );
+  }
+
   /**
    * Check if user is allowed to use the bot.
    * When allowed_users is empty, nobody is allowed (deny by default).
@@ -1012,24 +1161,40 @@ export class TelegramBridge implements ChannelBridge {
   private isAllowed(ctx: Context): boolean {
     const userId = ctx.from?.id;
     if (!userId) {
+      this.logGroupAuth(ctx, false, "missing_from");
+      return false;
+    }
+    if (!this.allowedUsers.includes(userId)) {
+      this.logGroupAuth(ctx, false, "user_not_allowed");
       return false;
     }
 
-    if (this.allowedUsers.length === 0) {
+    const chat = ctx.chat;
+    if (!chat) return false;
+
+    if (chat.type === "private") {
+      return true;
+    }
+
+    if (this.mode === "dm") {
+      this.logGroupAuth(ctx, false, "dm_mode_group");
       return false;
     }
 
-    return this.allowedUsers.includes(userId);
+    const allowed = this.allowedGroups.includes(chat.id);
+    this.logGroupAuth(ctx, allowed, allowed ? "group_allowed" : "group_not_allowed");
+    return allowed;
   }
 
   /**
    * Stop typing indicator for a channel.
    */
-  private stopTyping(channelId: string): void {
-    const interval = this.typingIntervals.get(channelId);
+  private stopTyping(channelId: string, opts?: SendOpts): void {
+    const typingKey = this.typingKey(channelId, opts);
+    const interval = this.typingIntervals.get(typingKey);
     if (interval) {
       clearInterval(interval);
-      this.typingIntervals.delete(channelId);
+      this.typingIntervals.delete(typingKey);
     }
   }
 }

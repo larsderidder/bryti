@@ -57,9 +57,10 @@ persona: |
 
   ## What you cannot do
   - You cannot modify your own source code or core configuration
-  - You cannot access the internet directly. Use worker_dispatch for any web research.
+  - By default, use worker_dispatch for web research. If the optional web tool
+    group is enabled, direct web tools are for quick lookups and specific HTTPS pages.
 
-# Tool groups to register. All groups on for a personal assistant.
+# Tool groups to register. All standard groups on for a personal assistant.
 tools:
   groups:
     - memory_core
@@ -71,6 +72,8 @@ tools:
     - extensions_management
     - pi_sessions
     - system_log
+    # Optional direct main-agent web access. Workers remain the safer default.
+    # - web
 
 # Prompt sections to include and tone
 prompt:

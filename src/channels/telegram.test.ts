@@ -29,6 +29,7 @@ const grammyMocks = vi.hoisted(() => {
       editMessageText: vi.fn(async () => ({})),
       sendChatAction: vi.fn(async () => ({})),
       getFile: vi.fn(async () => ({ file_path: "voice/test.ogg" })),
+      setMyCommands: vi.fn(async () => ({})),
     };
 
     constructor(public readonly token: string) {
@@ -60,7 +61,7 @@ import { TelegramBridge, markdownToHtml, chunkMessage, markdownToTelegramChunks 
 
 function makeVoiceContext(overrides: Partial<any> = {}) {
   return {
-    chat: { id: 12345 },
+    chat: { id: 12345, type: "private" },
     from: { id: 67890 },
     message: {
       message_id: 42,
@@ -185,6 +186,116 @@ describe("TelegramBridge", () => {
 
     expect(handler).not.toHaveBeenCalled();
     expect(ctx.reply).toHaveBeenCalledWith("Sorry, I couldn't download that voice message.");
+    await bridge.stop();
+  });
+
+  it("does not send unsupported-message fallback for text messages", async () => {
+    const bridge = new TelegramBridge("test-token", [67890], {
+      mode: "group",
+      allowedGroups: [-1001],
+    });
+    await bridge.start();
+
+    const bot = grammyMocks.MockBot.instances[0];
+    const fallbackHandler = bot.handlers.get("message");
+    const ctx = {
+      chat: { id: -1001, type: "supergroup" },
+      from: { id: 67890 },
+      message: { message_id: 7, message_thread_id: 32, text: "Hi" },
+      reply: vi.fn(async () => ({})),
+    };
+
+    await fallbackHandler?.(ctx);
+
+    expect(ctx.reply).not.toHaveBeenCalled();
+    await bridge.stop();
+  });
+
+  it("ignores Telegram service messages", async () => {
+    const bridge = new TelegramBridge("test-token", [67890], {
+      mode: "group",
+      allowedGroups: [-1001],
+    });
+    await bridge.start();
+
+    const bot = grammyMocks.MockBot.instances[0];
+    const fallbackHandler = bot.handlers.get("message");
+    const ctx = {
+      chat: { id: -1001, type: "supergroup" },
+      from: { id: 67890 },
+      message: { message_id: 8, message_thread_id: 32, forum_topic_created: { name: "TCG" } },
+      reply: vi.fn(async () => ({})),
+    };
+
+    await fallbackHandler?.(ctx);
+
+    expect(ctx.reply).not.toHaveBeenCalled();
+    await bridge.stop();
+  });
+
+  it("allows owner DMs while group mode is enabled", async () => {
+    const bridge = new TelegramBridge("test-token", [67890], {
+      mode: "group",
+      allowedGroups: [-1001],
+    });
+    const handler = vi.fn(async () => {});
+    bridge.onMessage(handler);
+    await bridge.start();
+
+    const bot = grammyMocks.MockBot.instances[0];
+    const textHandler = bot.handlers.get("message:text");
+    await textHandler?.({
+      chat: { id: 67890, type: "private" },
+      from: { id: 67890 },
+      message: { message_id: 3, text: "dm ping" },
+      reply: vi.fn(async () => ({})),
+    });
+
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(handler.mock.calls[0][0].threadId).toBeUndefined();
+    await bridge.stop();
+  });
+
+  it("routes allowed group topic messages to a Bryti thread", async () => {
+    const bridge = new TelegramBridge("test-token", [67890], {
+      mode: "group",
+      allowedGroups: [-1001],
+    });
+    const handler = vi.fn(async () => {});
+    bridge.onMessage(handler);
+    await bridge.start();
+
+    const bot = grammyMocks.MockBot.instances[0];
+    const textHandler = bot.handlers.get("message:text");
+    await textHandler?.({
+      chat: { id: -1001, type: "supergroup" },
+      from: { id: 67890 },
+      message: { message_id: 9, message_thread_id: 42, text: "hello" },
+      reply: vi.fn(async () => ({})),
+    });
+
+    expect(handler).toHaveBeenCalledTimes(1);
+    const msg = handler.mock.calls[0][0];
+    expect(msg.channelId).toBe("-1001");
+    expect(msg.threadId).toBe("telegram-topic-1001-42");
+    expect(msg.channelThreadId).toBe("42");
+    await bridge.stop();
+  });
+
+  it("sends group replies into the requested Telegram topic", async () => {
+    const bridge = new TelegramBridge("test-token", [67890], {
+      mode: "group",
+      allowedGroups: [-1001],
+    });
+    await bridge.start();
+
+    const bot = grammyMocks.MockBot.instances[0];
+    await bridge.sendMessage("-1001", "hello", { channelThreadId: "42" });
+
+    expect(bot.api.sendMessage).toHaveBeenCalledWith(-1001, "hello", {
+      parse_mode: "HTML",
+      message_thread_id: 42,
+    });
     await bridge.stop();
   });
 

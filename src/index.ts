@@ -129,7 +129,10 @@ async function startApp(onRequestRestart?: () => void): Promise<RunningApp> {
     if (config.telegram.allowed_users.length === 0) {
       console.warn("[telegram] WARNING: allowed_users is empty. No users will be able to interact with the bot. Add Telegram user IDs to config.");
     }
-    const telegram = new TelegramBridge(config.telegram.token, config.telegram.allowed_users);
+    const telegram = new TelegramBridge(config.telegram.token, config.telegram.allowed_users, {
+      mode: config.telegram.mode,
+      allowedGroups: config.telegram.allowed_groups,
+    });
     bridges.push(withDurableOutbound(telegram, config.data_dir));
   }
 
@@ -232,6 +235,7 @@ async function startApp(onRequestRestart?: () => void): Promise<RunningApp> {
     await bridge.sendMessage(
       checkpoint.channelId,
       "Sorry, I crashed while working on your last message. Could you resend it?",
+      checkpoint.channelThreadId ? { channelThreadId: checkpoint.channelThreadId } : undefined,
     );
   });
 
@@ -248,6 +252,7 @@ async function startApp(onRequestRestart?: () => void): Promise<RunningApp> {
       await bridge.sendMessage(
         marker.channelId,
         `Back online, but your config.yml change was invalid and has been rolled back.\n\nError: ${rollbackReason}\n\nThe previous working config is still active.`,
+        marker.channelThreadId ? { channelThreadId: marker.channelThreadId } : undefined,
       );
     } else {
       // Send a synthetic message through the agent so it can verify the
@@ -255,6 +260,7 @@ async function startApp(onRequestRestart?: () => void): Promise<RunningApp> {
       const restartMsg: IncomingMessage = {
         channelId: marker.channelId,
         userId: marker.userId,
+        channelThreadId: marker.channelThreadId,
         platform: marker.platform as IncomingMessage["platform"],
         text: `[System: you just restarted. Reason: "${marker.reason}". ` +
           `Verify the restart achieved its goal (check that new tools/extensions loaded, ` +

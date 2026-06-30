@@ -188,8 +188,8 @@ export async function spawnWorkerSession(opts: {
   let modelString = model.provider + "/" + model.id;
 
   // ---- Tool selection -------------------------------------------------------
-  // Only the tools explicitly requested by the dispatcher are included. The
-  // scoped file tools (write_file, read_file) are always added regardless.
+  // Web search is request/config controlled. Argus extraction and scoped file
+  // tools are always added for workers.
   const workerTools: AgentTool<any>[] = [];
 
   if (toolNames.includes("web_search") && config.tools.web_search.enabled) {
@@ -201,9 +201,15 @@ export async function spawnWorkerSession(opts: {
     }
     // If neither is configured, web_search is silently omitted from worker tools.
   }
-  if (toolNames.includes("fetch_url")) {
-    workerTools.push(createFetchUrlTool(config.tools.fetch_url.timeout_ms));
-  }
+  // fetch_url is always present for workers. It is the one-off background
+  // extraction tool and remains available even when the main agent has not
+  // opted into direct web access.
+  workerTools.push(createFetchUrlTool(config.tools.fetch_url.timeout_ms, {
+    backend: config.tools.fetch_url.backend,
+    requireHttps: config.tools.fetch_url.require_https,
+    argusBin: config.tools.fetch_url.argus_bin,
+    searxngUrl: config.tools.web_search.searxng_url,
+  }));
 
   // Scoped file tools are always present — they are the worker's only way to
   // persist findings. The worker cannot access files outside workerDir.

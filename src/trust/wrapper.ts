@@ -61,6 +61,8 @@ const TOOL_DESCRIPTIONS: Record<string, string> = {
   system_restart: "Restart to pick up changes",
   shell_exec: "Run a shell command",
   http_request: "Make a web request",
+  web_search: "Search the public web from the main conversation",
+  fetch_url: "Fetch and extract text from a web page in the main conversation",
 };
 
 function humanToolDescription(toolName: string, reason?: string): string {

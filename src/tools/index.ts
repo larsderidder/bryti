@@ -3,8 +3,8 @@
  * supplementing pi's built-in tools.
  *
  * Which tool groups are registered is controlled by config.agent_def.tool_groups.
- * By default (personal-assistant preset) all groups are registered, matching
- * the original behavior. Focused agents can opt in to only the groups they need.
+ * By default (personal-assistant preset) the standard groups are registered,
+ * matching the original behavior. Direct web access is an explicit opt-in group.
  */
 
 import type { AgentTool, AgentToolResult } from "@mariozechner/pi-agent-core";
@@ -16,6 +16,8 @@ import { createSkillInstallTool } from "./skill-install.js";
 import { createCoreMemoryTools } from "./core-memory-tool.js";
 import { createArchivalMemoryTools } from "./archival-memory-tool.js";
 import { createConversationSearchTool } from "./conversation-search-tool.js";
+import { createFetchUrlTool } from "./fetch-url.js";
+import { createBraveSearchTool, createWebSearchTool } from "./web-search.js";
 import { createProjectionTools, createProjectionStore, type ProjectionStore } from "../projection/index.js";
 import { createWorkerTools, createWorkerRegistry } from "../workers/index.js";
 import { toolSuccess } from "./result.js";
@@ -40,7 +42,7 @@ const restartSchema = Type.Object({
  * Create bryti tools based on configuration.
  *
  * Only tool groups listed in config.agent_def.tool_groups are registered.
- * The default (personal-assistant preset) enables all groups.
+ * The default (personal-assistant preset) enables the standard groups.
  *
  * Pass an existing `projectionStore` to share the single store instance
  * created by the agent session. If omitted a new store is created here
@@ -68,16 +70,44 @@ export function createTools(
   const archivalStore = createMemoryStore(userId, config.data_dir);
 
   // ---------------------------------------------------------------------------
-  // SECURITY BOUNDARY: web_search and fetch_url are intentionally excluded
-  // from the main agent's tool set. All external network access goes through
-  // workers, which run in isolated sessions with scoped file access.
+  // Web access is opt-in for the main agent. The default personal-assistant
+  // preset does not include the `web` group, so external content continues to
+  // flow through isolated workers unless the operator explicitly opts in.
   //
-  // Rationale: a web page or search result could contain prompt-injected
-  // instructions. Processing untrusted content inside the main agent session
-  // would let an attacker influence the agent's memory, projections, or tool
-  // calls. Workers are disposable; the main agent only sees their sanitised
-  // result files.
+  // Rationale: web pages and search snippets can contain prompt-injected
+  // instructions. Direct web tools are elevated, HTTPS-only for extraction by
+  // default, and still pass through trust approval before the main agent can use
+  // them. Workers remain the safer default for broad or untrusted research.
   // ---------------------------------------------------------------------------
+
+  if (groups.has("web")) {
+    if (config.tools.web_search.enabled) {
+      const ws = config.tools.web_search;
+      if (ws.brave_api_key) {
+        tools.push(createBraveSearchTool(ws.brave_api_key));
+      } else if (ws.searxng_url) {
+        tools.push(createWebSearchTool(ws.searxng_url));
+      }
+    }
+
+    tools.push(createFetchUrlTool(config.tools.fetch_url.timeout_ms, {
+      backend: config.tools.fetch_url.backend,
+      requireHttps: config.tools.fetch_url.require_https,
+      argusBin: config.tools.fetch_url.argus_bin,
+      searxngUrl: config.tools.web_search.searxng_url,
+    }));
+
+    registerToolCapabilities("web_search", {
+      level: "guarded",
+      capabilities: ["network"],
+      reason: "Searches the public web directly from the main agent session. Search result snippets are external, untrusted content.",
+    });
+    registerToolCapabilities("fetch_url", {
+      level: "guarded",
+      capabilities: ["network"],
+      reason: "Fetches and extracts web page text directly into the main agent session. Page content is external, untrusted content.",
+    });
+  }
 
   // files — file_write sandboxed to data dir.
   // Reading is handled by the SDK's built-in `read` and `ls` tools (always present).

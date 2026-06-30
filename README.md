@@ -142,7 +142,11 @@ A reflection pass runs every 30 minutes, scanning recent conversation history fo
 
 Background sessions for long-running tasks. The main agent dispatches a worker with a goal; the worker runs independently (web search, URL fetching, analysis) and writes results to a file. When it finishes, a completion fact is archived, which can trigger projections so the main agent reads the summary and notifies you right away.
 
-Workers are also the first security boundary. The main agent has no web search or URL fetch tools. External content is processed in isolation, and only the worker's cleaned-up result file enters the main conversation. This keeps prompt injection in web content from reaching the agent's context.
+Workers are also the default security boundary. By default, the main agent has no web search or URL fetch tools. External content is processed in isolation, and only the worker's cleaned-up result file enters the main conversation. This keeps prompt injection in web content from reaching the agent's context.
+
+Direct main-agent web access is available as an explicit opt-in tool group. Add `web` to `agent.yml` `tools.groups` to expose `web_search` and `fetch_url` directly. The same `fetch_url` tool is always available to background workers. It uses npm-native Readability by default, is HTTPS-only by default, and is protected against private-network fetches before extraction. Worker isolation is still the safer choice for broad or adversarial research.
+
+If you prefer Argus extraction, set `tools.fetch_url.backend: argus` and install Argus separately. You can point Bryti at it with `ARGUS_BIN` or `tools.fetch_url.argus_bin`.
 
 You can configure named worker types in `config.yml` with preset models, tools, and timeouts:
 

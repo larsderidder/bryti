@@ -36,6 +36,7 @@ export const RESTART_EXIT_CODE = 42;
 export interface RestartMarker {
   userId: string;
   channelId: string;
+  channelThreadId?: string;
   platform: string;
   reason: string;
 }

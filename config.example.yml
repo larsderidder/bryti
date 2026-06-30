@@ -45,8 +45,9 @@ agent:
 
     ## What you cannot do
     - You cannot modify your own source code or core configuration
-    - You cannot access the internet directly. Use worker_dispatch for any
-      web research.
+    - By default, use worker_dispatch for web research. If the optional `web`
+      tool group is enabled, you may use direct web tools for quick lookups and
+      specific HTTPS pages, while workers remain safer for broad research.
 
   # Primary model. Format: provider/model-id
   model: "anthropic/claude-sonnet-4-6"
@@ -76,7 +77,9 @@ agent:
 
 telegram:
   token: ${TELEGRAM_BOT_TOKEN}
-  allowed_users: []  # Telegram user IDs
+  mode: dm  # dm or group. Group mode is opt-in and only accepts allowed_groups.
+  allowed_users: []  # Telegram user IDs allowed to drive the bot
+  allowed_groups: [] # Telegram supergroup IDs allowed when mode is group
 
 # WhatsApp via baileys (QR code auth on first run)
 # whatsapp:
@@ -107,6 +110,14 @@ telegram:
 #   path_prefix: "/"
 #   pairing:
 #     invite_ttl_minutes: 10
+
+# ---------------------------------------------------------------------------
+# Response rendering
+# ---------------------------------------------------------------------------
+
+response:
+  # Expose model thinking/reasoning blocks in chat. Off by default.
+  show_thinking: false
 
 # ---------------------------------------------------------------------------
 # Model providers
@@ -195,12 +206,24 @@ models:
 # ---------------------------------------------------------------------------
 # Tools
 # ---------------------------------------------------------------------------
+# Direct main-agent web access is opt-in. Add `web` to agent.yml tools.groups
+# to expose web_search and fetch_url to the main agent. Without that, fetch_url
+# is still available to background workers.
 
 tools:
-  # Web search for workers. Set brave_api_key OR searxng_url.
+  # Web search for workers and the optional main-agent `web` tool group.
+  # Set brave_api_key OR searxng_url. SearXNG can point at your own instance.
   web_search:
     # brave_api_key: "${BRAVE_API_KEY}"  # https://api.search.brave.com/
     searxng_url: "https://searx.be"
+
+  # Safe URL extraction. Default backend is npm-native Readability so it works
+  # out of the box. Set backend: argus if you have Argus installed.
+  fetch_url:
+    backend: readability  # readability | argus
+    timeout_ms: 10000
+    require_https: true
+    # argus_bin: "argus"  # Optional for backend: argus, defaults to ARGUS_BIN or argus
 
   workers:
     max_concurrent: 3

@@ -128,8 +128,8 @@ function truncate(text: string, maxLen: number): string {
  * Per-user session directory. Each user gets their own so continueRecent()
  * picks up the right session.
  */
-function userSessionDir(config: Config, userId: string): string {
-  const dir = path.join(config.data_dir, "sessions", userId);
+function userSessionDir(config: Config, sessionKey: string): string {
+  const dir = path.join(config.data_dir, "sessions", sessionKey);
   fs.mkdirSync(dir, { recursive: true });
   return dir;
 }
@@ -150,6 +150,7 @@ export async function loadUserSession(
   userId: string,
   customTools: AgentTool[],
   existingProjectionStore?: ProjectionStore,
+  sessionKey = userId,
 ): Promise<UserSession> {
   const { authStorage, modelRegistry, agentDir } = createModelInfra(config);
 
@@ -167,7 +168,7 @@ export async function loadUserSession(
 
   // Session manager: continue most recent session for this user, or create new.
   // Each user gets their own session directory so continueRecent finds the right file.
-  const sessDir = userSessionDir(config, userId);
+  const sessDir = userSessionDir(config, sessionKey);
   const isNewUser = !fs.existsSync(sessDir) || fs.readdirSync(sessDir).length === 0;
   const sessionManager = SessionManager.continueRecent(config.data_dir, sessDir);
   const promptTools: ToolSummary[] = customTools.map((tool) => ({

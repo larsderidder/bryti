@@ -11,6 +11,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import type { ThinkingLevel } from "@mariozechner/pi-agent-core";
+import type { FetchUrlBackend } from "./tools/fetch-url.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -121,7 +122,8 @@ export interface WebE2EEConfig {
  * Tool groups that can be enabled for an agent.
  *
  * Each group corresponds to a set of tools registered at startup.
- * The default ("all") enables every group, matching the current behavior.
+ * The default enables every standard group, matching the current behavior.
+ * Direct main-agent web access is excluded unless `web` is listed explicitly.
  */
 export type ToolGroup =
   | "memory_core"
@@ -132,9 +134,10 @@ export type ToolGroup =
   | "files"
   | "extensions_management"
   | "pi_sessions"
-  | "system_log";
+  | "system_log"
+  | "web";
 
-/** All tool groups — used as the default when no explicit list is given. */
+/** Standard tool groups used as the default when no explicit list is given. */
 export const ALL_TOOL_GROUPS: ToolGroup[] = [
   "memory_core",
   "memory_archival",
@@ -220,7 +223,7 @@ export interface MemoryConfig {
  * (legacy). Fields here describe what the agent IS and what it can do.
  */
 export interface AgentDefinition {
-  /** Which tool groups to register. Defaults to all groups. */
+  /** Which tool groups to register. Defaults to the standard groups, excluding direct web. */
   tool_groups: ToolGroup[];
   /** Which system prompt sections to include. Defaults to all sections. */
   prompt_sections: PromptSection[];
@@ -273,7 +276,11 @@ export interface Config {
   };
   telegram: {
     token: string;
+    /** dm is the classic one-to-one chat; group enables explicit group/topic mode. */
+    mode?: "dm" | "group";
     allowed_users: number[];
+    /** Telegram supergroup IDs allowed when mode is group. */
+    allowed_groups?: number[];
   };
   whatsapp: {
     enabled: boolean;
@@ -303,12 +310,22 @@ export interface Config {
   tools: {
     web_search: {
       enabled: boolean;
-      /** SearXNG instance URL (no trailing slash). Workers only. */
+      /** SearXNG instance URL (no trailing slash). Used by workers and the opt-in main-agent web group. */
       searxng_url: string;
-      /** Brave Search API key. If set, used instead of SearXNG. Workers only. */
+      /** Brave Search API key. If set, used instead of SearXNG. */
       brave_api_key?: string;
     };
-    fetch_url: { timeout_ms: number };
+    fetch_url: {
+      /** Deprecated and ignored. Exposure is controlled by workers and the `web` tool group. */
+      enabled?: boolean;
+      timeout_ms: number;
+      /** Extraction backend. Default: readability, which is npm-native. */
+      backend: FetchUrlBackend;
+      /** Require HTTPS for URL extraction. Default: true. */
+      require_https: boolean;
+      /** Argus executable name or path. Defaults to ARGUS_BIN or "argus". */
+      argus_bin?: string;
+    };
     workers: {
       /** Maximum number of workers that may run concurrently. Default: 3. */
       max_concurrent: number;
@@ -331,6 +348,11 @@ export interface Config {
    */
   integrations: Record<string, Record<string, string>>;
   cron: CronJob[];
+  /** Response rendering options. */
+  response?: {
+    /** Show model thinking/reasoning blocks to the user. Defaults to false. */
+    show_thinking: boolean;
+  };
   /** Optional voice support via configurable STT/TTS commands. */
   voice?: VoiceConfig;
   /** Optional active hours window. Scheduler callbacks skip firing outside it. */
@@ -343,7 +365,7 @@ export interface Config {
   /**
    * Agent definition: identity-specific config (tool groups, prompt sections,
    * tone, memory jobs). Populated from agent.yml if present, otherwise defaults
-   * to the "personal-assistant" preset (all features on).
+   * to the personal-assistant preset with standard features on.
    */
   agent_def: AgentDefinition;
   data_dir: string;
@@ -446,6 +468,12 @@ function stringListFrom(value: unknown): string[] {
       .filter(Boolean);
   }
   return [];
+}
+
+function numberListFrom(value: unknown): number[] {
+  return stringListFrom(value)
+    .map((entry) => Number(entry))
+    .filter((entry) => Number.isSafeInteger(entry));
 }
 
 function voiceFromConfig(substituted: Record<string, unknown>): VoiceConfig {
@@ -574,6 +602,9 @@ function toolsFromConfig(substituted: Record<string, unknown>, dataDir: string):
   const raw = (substituted.tools ?? {}) as Record<string, unknown>;
   const webRaw = (raw.web_search ?? {}) as Record<string, unknown>;
   const workersRaw = (raw.workers ?? {}) as Record<string, unknown>;
+  const searxngUrl = typeof webRaw.searxng_url === "string"
+    ? webRaw.searxng_url.replace(/\/+$/, "")
+    : "https://searx.be";
   const workerTypes = (workersRaw.types ?? {}) as Record<string, WorkerTypeConfig>;
 
   for (const workerType of Object.values(workerTypes)) {
@@ -585,12 +616,15 @@ function toolsFromConfig(substituted: Record<string, unknown>, dataDir: string):
   return {
     web_search: {
       enabled: webRaw.enabled !== false,
-      searxng_url: (webRaw.searxng_url as string) ?? "https://searx.be",
+      searxng_url: searxngUrl,
       brave_api_key: (webRaw.brave_api_key as string) ?? undefined,
     },
     fetch_url: {
       timeout_ms: 10000,
+      require_https: true,
       ...(raw.fetch_url as object | undefined),
+      backend: ((raw.fetch_url as Record<string, unknown> | undefined)?.backend === "argus" ? "argus" : "readability") as FetchUrlBackend,
+      argus_bin: optionalString((raw.fetch_url as Record<string, unknown> | undefined)?.argus_bin),
     },
     workers: {
       max_concurrent: 3,
@@ -602,8 +636,8 @@ function toolsFromConfig(substituted: Record<string, unknown>, dataDir: string):
 }
 
 /**
- * The personal-assistant preset: all tool groups and prompt sections enabled,
- * conversational tone, reflection and daily review on. This is the default
+ * The personal-assistant preset: standard tool groups and all prompt sections
+ * enabled, conversational tone, reflection and daily review on. This is the default
  * for existing deployments that have no agent.yml.
  */
 export const PERSONAL_ASSISTANT_DEFAULTS: AgentDefinition = {
@@ -751,11 +785,16 @@ export function loadConfig(configPath?: string): Config {
       ...(substituted.agent as object),
       thinking_level: normalizeThinkingLevel((substituted.agent as Record<string, unknown> | undefined)?.thinking_level, "high"),
     },
-    telegram: {
-      token: "",
-      allowed_users: [],
-      ...(substituted.telegram as object),
-    },
+    telegram: (() => {
+      const raw = (substituted.telegram ?? {}) as Record<string, unknown>;
+      const mode = raw.mode === "group" ? "group" : "dm";
+      return {
+        token: (raw.token as string | undefined) ?? "",
+        mode,
+        allowed_users: numberListFrom(raw.allowed_users),
+        allowed_groups: numberListFrom(raw.allowed_groups),
+      };
+    })(),
     whatsapp: {
       enabled: (substituted.whatsapp as { enabled?: boolean })?.enabled ?? false,
       allowed_users: ((substituted.whatsapp as { allowed_users?: string[] })?.allowed_users ?? []).map(String),
@@ -786,6 +825,9 @@ export function loadConfig(configPath?: string): Config {
     tools: toolsFromConfig(substituted, dataDir),
     integrations: integrationsFromConfig(substituted),
     cron: (substituted.cron as CronJob[]) || [],
+    response: {
+      show_thinking: booleanFrom((substituted.response as Record<string, unknown> | undefined)?.show_thinking, false),
+    },
     voice: voiceFromConfig(substituted),
     active_hours: (substituted.active_hours as ActiveHoursConfig | undefined) ?? undefined,
     trust: {
@@ -850,6 +892,9 @@ function validateConfig(config: Config): void {
   }
   if (!config.agent.model) {
     errors.push("agent.model is required");
+  }
+  if (config.telegram.mode === "group" && (config.telegram.allowed_groups ?? []).length === 0) {
+    errors.push("telegram.allowed_groups must include at least one group ID when telegram.mode is group");
   }
   if (config.models.providers.length === 0) {
     errors.push("at least one model provider is required");
@@ -982,10 +1027,13 @@ function validateConfig(config: Config): void {
     }
   }
 
-  // --- Web search needs a URL ---
+  // --- Web tools need configured backends ---
 
-  if (config.tools.web_search.enabled && !config.tools.web_search.searxng_url) {
-    warnings.push("web_search is enabled but searxng_url is empty. Workers won't be able to search.");
+  if (config.tools.web_search.enabled && !config.tools.web_search.searxng_url && !config.tools.web_search.brave_api_key) {
+    warnings.push("web_search is enabled but neither searxng_url nor brave_api_key is configured. Web search won't be available.");
+  }
+  if (!Number.isInteger(config.tools.fetch_url.timeout_ms) || config.tools.fetch_url.timeout_ms <= 0) {
+    errors.push("fetch_url.timeout_ms must be a positive integer");
   }
 
   // --- Emit ---

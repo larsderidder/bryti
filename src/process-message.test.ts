@@ -55,7 +55,7 @@ function makeConfig(dataDir: string): Config {
     },
     tools: {
       web_search: { enabled: false, searxng_url: "" },
-      fetch_url: { timeout_ms: 10000 },
+      fetch_url: { enabled: true, timeout_ms: 10000, backend: "readability", require_https: true },
       workers: { max_concurrent: 3 },
     },
     integrations: {},
@@ -216,6 +216,7 @@ describe("processMessage pipeline", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
@@ -276,6 +277,67 @@ describe("processMessage pipeline", () => {
     expect(record.user_id).toBe("12345");
     expect(record.input_tokens).toBe(100);
     expect(record.output_tokens).toBe(50);
+  });
+
+  it("hides thinking blocks by default", async () => {
+    const session = makeUserSession("12345", [{
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "private reasoning" },
+        { type: "text", text: "Visible answer" },
+      ],
+      stopReason: "end_turn",
+      provider: "test-provider",
+      model: "test-model",
+      usage: { input: 10, output: 5 },
+    }]);
+    const state = makeState(config, session, tmpDir);
+    const bridge = state.bridges[0] as ReturnType<typeof makeBridge>;
+
+    await processMessage(state, incomingMsg("Hi"));
+
+    expect(bridge.sent[0].text).toBe("Visible answer");
+    expect(bridge.sent[0].text).not.toContain("private reasoning");
+  });
+
+  it("can expose thinking blocks when configured", async () => {
+    config.response = { show_thinking: true };
+    const session = makeUserSession("12345", [{
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "private reasoning" },
+        { type: "text", text: "Visible answer" },
+      ],
+      stopReason: "end_turn",
+      provider: "test-provider",
+      model: "test-model",
+      usage: { input: 10, output: 5 },
+    }]);
+    const state = makeState(config, session, tmpDir);
+    const bridge = state.bridges[0] as ReturnType<typeof makeBridge>;
+
+    await processMessage(state, incomingMsg("Hi"));
+
+    expect(bridge.sent[0].text).toContain("> Thinking:");
+    expect(bridge.sent[0].text).toContain("> private reasoning");
+    expect(bridge.sent[0].text).toContain("Visible answer");
+  });
+
+  it("strips XML-style thinking from string content by default", async () => {
+    const session = makeUserSession("12345", [{
+      role: "assistant",
+      content: "<thinking>private reasoning</thinking>Visible answer",
+      stopReason: "end_turn",
+      provider: "test-provider",
+      model: "test-model",
+      usage: { input: 10, output: 5 },
+    }]);
+    const state = makeState(config, session, tmpDir);
+    const bridge = state.bridges[0] as ReturnType<typeof makeBridge>;
+
+    await processMessage(state, incomingMsg("Hi"));
+
+    expect(bridge.sent[0].text).toBe("Visible answer");
   });
 
   it("suppresses SILENT_REPLY_TOKEN without sending a message", async () => {
@@ -511,6 +573,22 @@ describe("processMessage pipeline", () => {
 
     const texts = bridge.sent.map((s) => s.text);
     expect(texts.some((t) => t.includes("went wrong"))).toBe(true);
+  });
+
+  it("times out stuck prompts and evicts the session", async () => {
+    vi.useFakeTimers();
+    const session = makeUserSession("12345", []);
+    vi.spyOn(session.session, "prompt").mockImplementation(() => new Promise(() => {}));
+    const state = makeState(config, session, tmpDir);
+    const bridge = state.bridges[0] as ReturnType<typeof makeBridge>;
+
+    const processing = processMessage(state, incomingMsg("hello"));
+    await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+    await processing;
+
+    expect(bridge.sent.some((s) => s.text.includes("took too long"))).toBe(true);
+    expect(state.sessions.has("12345")).toBe(false);
+    expect(session.dispose).toHaveBeenCalled();
   });
 
   it("catches and reports thrown errors gracefully", async () => {

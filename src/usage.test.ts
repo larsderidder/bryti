@@ -124,7 +124,7 @@ describe("usage cost helpers", () => {
     },
     tools: {
       web_search: { enabled: false, searxng_url: "" },
-      fetch_url: { enabled: false, timeout_ms: 1000 },
+      fetch_url: { enabled: false, timeout_ms: 1000, backend: "readability", require_https: true },
     },
     cron: [],
     data_dir: "/tmp",

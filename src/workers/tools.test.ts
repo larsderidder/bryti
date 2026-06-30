@@ -59,7 +59,7 @@ function makeMockConfig(dataDir: string): Config {
     },
     tools: {
       web_search: { enabled: true, searxng_url: "https://search.xithing.eu" },
-      fetch_url: { enabled: true, timeout_ms: 5000 },
+      fetch_url: { enabled: true, timeout_ms: 5000, backend: "readability", require_https: true },
       workers: { max_concurrent: 3 },
     },
     cron: [],

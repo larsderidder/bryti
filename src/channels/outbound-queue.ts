@@ -105,8 +105,8 @@ export class DurableOutboundBridge implements ChannelBridge {
     await this.inner.editMessage(channelId, messageId, text);
   }
 
-  async sendTyping(channelId: string): Promise<void> {
-    await this.inner.sendTyping(channelId);
+  async sendTyping(channelId: string, opts?: SendOpts): Promise<void> {
+    await this.inner.sendTyping(channelId, opts);
   }
 
   async sendApprovalRequest(
@@ -114,8 +114,9 @@ export class DurableOutboundBridge implements ChannelBridge {
     prompt: string,
     approvalKey: string,
     timeoutMs?: number,
+    opts?: SendOpts,
   ): Promise<ApprovalResult> {
-    return this.inner.sendApprovalRequest(channelId, prompt, approvalKey, timeoutMs);
+    return this.inner.sendApprovalRequest(channelId, prompt, approvalKey, timeoutMs, opts);
   }
 
   private createRecord(channelId: string, text: string, opts?: SendOpts): OutboundRecord {

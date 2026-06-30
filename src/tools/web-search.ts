@@ -13,12 +13,13 @@
  *                 higher volume, or aggregated coverage matters more than setup
  *                 cost).
  *
- * Workers only; the main agent has no access to these tools (security boundary).
+ * Workers use this by default. The main agent only gets this tool when the
+ * operator opts into the `web` tool group.
  *
- * Selection logic (in workers/tools.ts):
- *   - brave_api_key set → Brave Search
- *   - searxng_url set  → SearXNG
- *   - neither          → web search disabled
+ * Selection logic:
+ *   - brave_api_key set -> Brave Search
+ *   - searxng_url set  -> SearXNG
+ *   - neither          -> web search disabled
  */
 
 import https from "node:https";
