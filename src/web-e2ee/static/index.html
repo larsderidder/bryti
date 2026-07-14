@@ -66,8 +66,11 @@
           </div>
         </div>
         <div id="chat-log" class="chat-log" aria-live="polite"></div>
-        <input id="chat-input" type="text" placeholder="Pair and connect to enable encrypted outbound text" disabled>
-        <button id="chat-send" type="button" disabled>Send</button>
+        <div class="chat-composer">
+          <label class="visually-hidden" for="chat-input">Encrypted message to Bryti</label>
+          <textarea id="chat-input" rows="1" placeholder="Pair and connect to enable encrypted outbound text" disabled></textarea>
+          <button id="chat-send" type="button" disabled>Send</button>
+        </div>
         <div class="recording-actions">
           <button id="record-start" type="button" disabled>Record</button>
           <button id="record-stop" type="button" disabled>Stop</button>
