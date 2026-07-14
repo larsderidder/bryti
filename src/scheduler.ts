@@ -21,7 +21,7 @@
 
 import { Cron } from "croner";
 import type { Config } from "./config.js";
-import type { IncomingMessage } from "./channels/types.js";
+import type { IncomingMessage, Platform } from "./channels/types.js";
 import { createProjectionStore, formatProjectionsForPrompt, runReflection } from "./projection/index.js";
 import { isActiveNow } from "./active-hours.js";
 import { getUserTimezone } from "./time.js";
@@ -77,8 +77,9 @@ function bootstrapDailyReview(config: Config): void {
     ? mem.daily_review
     : "0 8 * * *";
 
-  const knownUsers = getKnownUsers(config);
-  for (const userId of knownUsers) {
+  const targets = getSchedulerTargets(config);
+  for (const target of targets) {
+    const userId = target.userId;
     const store = createProjectionStore(userId, config.data_dir);
     try {
       // Check if a daily review projection already exists (tagged), or if there's
@@ -148,30 +149,46 @@ export interface Scheduler {
 // Factory
 // ---------------------------------------------------------------------------
 
+export interface SchedulerTarget {
+  userId: string;
+  channelId: string;
+  platform: Platform;
+}
+
+function targetKey(target: SchedulerTarget): string {
+  return `${target.platform}:${target.userId}:${target.channelId}`;
+}
+
+function addTarget(targets: Map<string, SchedulerTarget>, target: SchedulerTarget): void {
+  targets.set(targetKey(target), target);
+}
+
 /**
- * Return all user IDs that are authorised to use the bot.
+ * Return configured delivery targets that are authorised to use the bot.
  *
- * Combines Telegram, WhatsApp, and Threema allow-lists into a single deduplicated
- * list of string IDs. This is the canonical source of "known users" for
- * scheduler jobs — more reliable than scanning session directories (which
- * only exist after first contact) and consistent with the auth layer.
+ * Each target keeps user, channel, and platform together. Scheduler jobs must
+ * use this tuple as a coherent routing unit instead of deriving user IDs and
+ * platforms independently.
  */
-function getKnownUsers(config: Config): string[] {
-  const ids = new Set<string>();
+export function getSchedulerTargets(config: Config): SchedulerTarget[] {
+  const targets = new Map<string, SchedulerTarget>();
   for (const id of config.telegram.allowed_users) {
-    ids.add(String(id));
+    const userId = String(id);
+    addTarget(targets, { userId, channelId: userId, platform: "telegram" });
   }
   if (config.whatsapp.enabled) {
     for (const id of config.whatsapp.allowed_users) {
-      ids.add(String(id));
+      const userId = String(id);
+      addTarget(targets, { userId, channelId: userId, platform: "whatsapp" });
     }
   }
   if (config.threema.enabled) {
     for (const id of config.threema.allowed_senders) {
-      ids.add(String(id));
+      const userId = String(id);
+      addTarget(targets, { userId, channelId: userId, platform: "threema" });
     }
   }
-  return [...ids];
+  return [...targets.values()];
 }
 
 /**
@@ -186,21 +203,12 @@ export function createScheduler(
 ): Scheduler {
   const cronJobs = new Map<string, Cron>();
 
-  function defaultPlatform(): IncomingMessage["platform"] {
-    if (config.telegram.allowed_users.length > 0) return "telegram";
-    if (config.whatsapp.enabled && config.whatsapp.allowed_users.length > 0) return "whatsapp";
-    if (config.threema.enabled && config.threema.allowed_senders.length > 0) return "threema";
-    return "telegram";
-  }
-
-  function defaultChannelId(): string {
-    const telegramUser = config.telegram.allowed_users[0];
-    if (telegramUser) return String(telegramUser);
-    const whatsappUser = config.whatsapp.allowed_users[0];
-    if (config.whatsapp.enabled && whatsappUser) return String(whatsappUser);
-    const threemaUser = config.threema.allowed_senders[0];
-    if (config.threema.enabled && threemaUser) return String(threemaUser);
-    return "cron";
+  function defaultTarget(): SchedulerTarget {
+    return getSchedulerTargets(config)[0] ?? {
+      userId: "cron",
+      channelId: "cron",
+      platform: "telegram",
+    };
   }
 
   function startConfigJobs(): void {
@@ -212,15 +220,15 @@ export function createScheduler(
           cronJob.schedule,
           async () => {
             console.log(`[scheduler] Config job triggered: ${cronJob.schedule}`);
-            const channelId = defaultChannelId();
+            const target = defaultTarget();
             // raw.type identifies this as a scheduler message. processMessage() in
-        // index.ts checks for this field to skip crash-recovery checkpoints
-        // that only make sense for real user messages.
-        const msg: IncomingMessage = {
-              channelId,
-              userId: "cron",
+            // index.ts checks for this field to skip crash-recovery checkpoints
+            // that only make sense for real user messages.
+            const msg: IncomingMessage = {
+              channelId: target.channelId,
+              userId: target.userId,
               text: cronJob.message,
-              platform: defaultPlatform(),
+              platform: target.platform,
               raw: { type: "cron", schedule: cronJob.schedule },
             };
             await onMessage(msg);
@@ -250,8 +258,8 @@ export function createScheduler(
    * whatsapp.allowed_users) so new users are picked up on the next restart.
    */
   function startExactTimeCheck(): void {
-    const knownUsers = getKnownUsers(config);
-    if (knownUsers.length === 0) return;
+    const targets = getSchedulerTargets(config);
+    if (targets.length === 0) return;
 
     const exactJob = new Cron(
       "*/5 * * * *",
@@ -260,7 +268,8 @@ export function createScheduler(
           return; // Silent skip — fires every 5 min, no need to log each one
         }
 
-        for (const userId of knownUsers) {
+        for (const target of targets) {
+          const userId = target.userId;
           const store = createProjectionStore(userId, config.data_dir);
           try {
             store.evaluateDependencies();
@@ -308,8 +317,8 @@ export function createScheduler(
             // raw.type marks this as a scheduler message so processMessage() can
             // distinguish it from a real user message and skip crash checkpoints.
             const msg: IncomingMessage = {
-              channelId: userId,
-              userId,
+              channelId: target.channelId,
+              userId: target.userId,
               text:
                 `[Scheduled reminder]\n\nThe following reminder(s) are due now:\n\n` +
                 `${formatted}\n\n` +
@@ -318,7 +327,7 @@ export function createScheduler(
                 `2. Execute any actions described in the reminder (check email, check calendar, etc.)\n` +
                 `3. Send the user a helpful, natural message with your findings\n\n` +
                 `Only reply NOOP if the reminder is purely informational and requires no action or message.`,
-              platform: defaultPlatform(),
+              platform: target.platform,
               raw: { type: "projection_exact_check" },
             };
             try {
@@ -334,7 +343,7 @@ export function createScheduler(
       { timezone: "UTC" },
     );
     cronJobs.set("projection-exact", exactJob);
-    console.log(`[projections] Exact-time check scheduled every 5 minutes for ${knownUsers.length} user(s)`);
+    console.log(`[projections] Exact-time check scheduled every 5 minutes for ${targets.length} target(s)`);
   }
 
   /**
@@ -354,8 +363,8 @@ export function createScheduler(
    *   5+        8 h
    */
   function startReflectionJob(): void {
-    const knownUsers = getKnownUsers(config);
-    if (knownUsers.length === 0) {
+    const targets = getSchedulerTargets(config);
+    if (targets.length === 0) {
       return;
     }
 
@@ -370,7 +379,8 @@ export function createScheduler(
     const job = new Cron(
       "*/30 * * * *",
       async () => {
-        for (const userId of knownUsers) {
+        for (const target of targets) {
+          const userId = target.userId;
           const until = backoffUntil.get(userId) ?? 0;
           // During a backoff window, skip silently — the cron still fires every
           // 30 min so recovery is detected promptly once the window expires.
@@ -420,7 +430,7 @@ export function createScheduler(
       { timezone: "UTC" },
     );
     cronJobs.set("projection-reflection", job);
-    console.log(`[projections] Reflection pass scheduled every 30 minutes for ${knownUsers.length} user(s)`);
+    console.log(`[projections] Reflection pass scheduled every 30 minutes for ${targets.length} target(s)`);
   }
 
   return {
