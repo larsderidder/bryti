@@ -22,10 +22,18 @@ export interface WorkerEntry {
   model: string;
   /**
    * Abort the running session. Set asynchronously after session creation in
-   * spawnWorkerSession — it is null in the brief window between registry.register()
+   * spawnWorkerSession. It is null in the brief window between registry.register()
    * and the session coming up. Always check for null before calling.
    */
   abort: (() => Promise<void>) | null;
+  /**
+   * Steer the running session. Set asynchronously after session creation.
+   * Guidance sent before this exists is stored in pendingSteering and flushed
+   * as soon as the session is available.
+   */
+  steer: ((guidance: string) => Promise<void>) | null;
+  /** Most recent guidance waiting for a worker session to become steerable. */
+  pendingSteering: string | null;
   /**
    * Handle for the forced-termination timer set in spawnWorkerSession.
    * Null when the worker has already finished (timer was cleared) or has not
@@ -36,13 +44,13 @@ export interface WorkerEntry {
 
 export interface WorkerRegistry {
   /** Register a new worker. Returns the entry. */
-  register(entry: Omit<WorkerEntry, "completedAt">): WorkerEntry;
+  register(entry: Omit<WorkerEntry, "completedAt" | "steer" | "pendingSteering"> & Partial<Pick<WorkerEntry, "steer" | "pendingSteering">>): WorkerEntry;
 
   /** Get a worker by id. Returns null if not found. */
   get(workerId: string): WorkerEntry | null;
 
   /** Update mutable fields of a worker entry. */
-  update(workerId: string, updates: Partial<Pick<WorkerEntry, "status" | "completedAt" | "error" | "abort" | "timeoutHandle">>): void;
+  update(workerId: string, updates: Partial<Pick<WorkerEntry, "status" | "completedAt" | "error" | "abort" | "steer" | "pendingSteering" | "timeoutHandle">>): void;
 
   /**
    * Count workers with status "running".
@@ -63,7 +71,12 @@ export function createWorkerRegistry(): WorkerRegistry {
 
   return {
     register(entry) {
-      const full: WorkerEntry = { ...entry, completedAt: null };
+      const full: WorkerEntry = {
+        ...entry,
+        steer: entry.steer ?? null,
+        pendingSteering: entry.pendingSteering ?? null,
+        completedAt: null,
+      };
       entries.set(entry.workerId, full);
       return full;
     },

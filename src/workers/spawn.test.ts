@@ -35,6 +35,7 @@ import path from "node:path";
 const mockAbort = vi.fn().mockResolvedValue(undefined);
 const mockDispose = vi.fn();
 const mockReload = vi.fn().mockResolvedValue(undefined);
+const mockSteer = vi.fn().mockResolvedValue(undefined);
 let mockPromptImpl: () => Promise<void> = async () => {};
 let mockMessages: unknown[] = [];
 let mockCustomToolNames: string[] = [];
@@ -58,6 +59,7 @@ vi.mock("@earendil-works/pi-coding-agent", async (importActual) => {
         get messages() { return mockMessages; },
         async prompt() { return mockPromptImpl(); },
         abort: mockAbort,
+        steer: mockSteer,
         dispose: mockDispose,
         async reload() { return mockReload(); },
         agent: { replaceMessages(_msgs: unknown[]) {} },
@@ -214,6 +216,7 @@ describe("spawnWorkerSession completion lifecycle", () => {
     mockPromptImpl = async () => {};
     mockAbort.mockClear();
     mockDispose.mockClear();
+    mockSteer.mockClear();
   });
 
   afterEach(() => {

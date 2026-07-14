@@ -38,11 +38,8 @@ const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 /**
  * Build the system prompt for a worker session.
  *
- * The steering.md polling instruction embedded here (check every 3 tool calls)
- * is the only communication channel from the main agent to a worker that is
- * already running. worker_steer writes the file; the worker reads it on its
- * own schedule. There is no push mechanism — the interval of 3 tool calls is
- * a trade-off between responsiveness and unnecessary read_file overhead.
+ * Workers are steered directly with AgentSession.steer(). Guidance is delivered
+ * as a queued user message after the worker's current tool execution finishes.
  */
 function buildWorkerSystemPrompt(task: string, workerDir: string): string {
   return [
@@ -61,10 +58,8 @@ function buildWorkerSystemPrompt(task: string, workerDir: string): string {
     ``,
     `## Steering`,
     ``,
-    `After every 3 tool calls, check for a file called steering.md using read_file.`,
-    `If the file exists, read it and immediately incorporate the guidance into your work.`,
-    `The steering note may narrow your focus, redirect your research, or add new requirements.`,
-    `Treat it as an authoritative update from the agent that dispatched you.`,
+    `The dispatching agent may send updated guidance while you are working.`,
+    `Treat later guidance as authoritative and incorporate it immediately.`,
     ``,
     `## Task`,
     ``,
@@ -245,7 +240,18 @@ export async function spawnWorkerSession(opts: {
   // ---- Timeout setup --------------------------------------------------------
   registry.update(workerId, {
     abort: () => session.abort(),
+    steer: (guidance: string) => session.steer(guidance),
   });
+
+  const pendingSteering = registry.get(workerId)?.pendingSteering;
+  if (pendingSteering) {
+    registry.update(workerId, { pendingSteering: null });
+    try {
+      await session.steer(pendingSteering);
+    } catch (err) {
+      console.warn(`[worker] ${workerId} failed to apply queued steering: ${(err as Error).message}`);
+    }
+  }
 
   // Set up timeout
   const timeoutHandle = setTimeout(async () => {

@@ -9,8 +9,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
-import type { Static } from "@sinclair/typebox";
-import { Type } from "@sinclair/typebox";
+import type { Static } from "typebox";
+import { Type } from "typebox";
 import { toolError, toolSuccess } from "../tools/result.js";
 
 const MAX_FILE_SIZE = 100 * 1024; // 100KB — workers may write longer research docs
@@ -39,18 +39,13 @@ type ReadResultInput = Static<typeof readResultSchema>;
  * Reserved filenames that workers must not overwrite:
  *   - status.json  : written by spawn.ts to record worker status; read by
  *                    worker_check to report progress back to the main agent.
- *   - task.md      : the initial task brief written by worker_dispatch; treated
- *                    as read-only so the worker always has access to its original
- *                    instructions even if steering changes direction.
- *   - steering.md  : the communication channel from the main agent to a running
- *                    worker; written exclusively by worker_steer so the worker
- *                    can safely poll it without racing against its own writes.
+ *   - task.md      : the initial task brief written by worker_dispatch.
  */
 function isValidFilename(filename: string): boolean {
   if (!filename || filename.length > 255) return false;
   if (filename.includes("/") || filename.includes("\\")) return false;
   if (filename.startsWith(".")) return false;
-  if (filename === "status.json" || filename === "task.md" || filename === "steering.md") return false; // reserved
+  if (filename === "status.json" || filename === "task.md") return false; // reserved
   return true;
 }
 
@@ -59,11 +54,10 @@ function isValidFilename(filename: string): boolean {
  *
  * Isolation guarantees:
  *   - Workers can only write to their own workerDir (flat layout, no subdirectories).
- *   - Workers can only read files that live in the same workerDir, which means
- *     only files they wrote themselves plus task.md and steering.md. There is no
+ *   - Workers can only read files that live in the same workerDir. There is no
  *     cross-worker access and no parent-directory traversal.
- *   - Reserved filenames (status.json, task.md, steering.md) are blocked from
- *     writes so the runtime's control files cannot be corrupted.
+ *   - Reserved filenames (status.json, task.md) are blocked from writes so the
+ *     runtime's control files cannot be corrupted.
  */
 export function createWorkerScopedTools(workerDir: string): AgentTool<any>[] {
   const writeTool: AgentTool<typeof writeResultSchema> = {

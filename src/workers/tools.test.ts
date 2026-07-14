@@ -648,12 +648,13 @@ describe("worker_steer", () => {
     }
   });
 
-  it("writes steering.md into the worker directory", async () => {
+  it("steers the worker session directly", async () => {
     const tools = createWorkerTools(config, memoryStore, registry);
     const steer = tools.find((t) => t.name === "worker_steer")!;
 
     const workerDir = path.join(tempDir, "files", "workers", "w-steerable");
     fs.mkdirSync(workerDir, { recursive: true });
+    const guidanceReceived: string[] = [];
 
     registry.register({
       workerId: "w-steerable",
@@ -665,6 +666,7 @@ describe("worker_steer", () => {
       error: null,
       model: "test-provider/test-model",
       abort: null,
+      steer: async (guidance: string) => { guidanceReceived.push(guidance); },
       timeoutHandle: null,
     });
 
@@ -674,22 +676,22 @@ describe("worker_steer", () => {
     });
 
     expect((result.details as any).status).toBe("running");
-
-    const steeringPath = path.join(workerDir, "steering.md");
-    expect(fs.existsSync(steeringPath)).toBe(true);
-    const content = fs.readFileSync(steeringPath, "utf-8");
-    expect(content).toBe("Skip GPT-4. Focus only on open-weight models released in 2025.");
+    expect((result.details as any).note).toMatch(/delivered/i);
+    expect(guidanceReceived).toEqual([
+      "Skip GPT-4. Focus only on open-weight models released in 2025.",
+    ]);
+    expect(fs.existsSync(path.join(workerDir, "steering.md"))).toBe(false);
   });
 
-  it("replaces the previous steering note on subsequent calls", async () => {
+  it("queues only the latest steering guidance while the session starts", async () => {
     const tools = createWorkerTools(config, memoryStore, registry);
     const steer = tools.find((t) => t.name === "worker_steer")!;
 
-    const workerDir = path.join(tempDir, "files", "workers", "w-resterr");
+    const workerDir = path.join(tempDir, "files", "workers", "w-restart");
     fs.mkdirSync(workerDir, { recursive: true });
 
     registry.register({
-      workerId: "w-resterr",
+      workerId: "w-restart",
       status: "running",
       task: "Research something",
       resultPath: path.join(workerDir, "result.md"),
@@ -701,11 +703,12 @@ describe("worker_steer", () => {
       timeoutHandle: null,
     });
 
-    await steer.execute("call1", { worker_id: "w-resterr", guidance: "First note." });
-    await steer.execute("call2", { worker_id: "w-resterr", guidance: "Second note — replaces first." });
+    await steer.execute("call1", { worker_id: "w-restart", guidance: "First note." });
+    const result = await steer.execute("call2", { worker_id: "w-restart", guidance: "Second note, replaces first." });
 
-    const steeringPath = path.join(workerDir, "steering.md");
-    const content = fs.readFileSync(steeringPath, "utf-8");
-    expect(content).toBe("Second note — replaces first.");
+    const entry = registry.get("w-restart");
+    expect((result.details as any).note).toMatch(/queued/i);
+    expect(entry?.pendingSteering).toBe("Second note, replaces first.");
+    expect(fs.existsSync(path.join(workerDir, "steering.md"))).toBe(false);
   });
 });

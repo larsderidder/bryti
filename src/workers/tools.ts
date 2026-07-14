@@ -16,8 +16,8 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
-import type { Static } from "@sinclair/typebox";
-import { Type } from "@sinclair/typebox";
+import type { Static } from "typebox";
+import { Type } from "typebox";
 import type { Config } from "../config.js";
 import type { MemoryStore } from "../memory/store.js";
 import { embed } from "../memory/embeddings.js";
@@ -437,9 +437,9 @@ export function createWorkerTools(
     label: "worker_steer",
     description:
       "Send updated guidance to a running background worker. " +
-      "The worker checks for a steering.md file after every few tool calls and incorporates the instructions. " +
+      "The guidance is injected directly into the worker session and delivered after the current tool execution. " +
       "Use this to narrow focus, redirect research, add requirements, or correct course mid-task. " +
-      "Each call replaces the previous steering note — include everything the worker needs. " +
+      "If the worker session is still starting, only the latest guidance is queued and delivered once it is ready. " +
       "Has no effect on workers that have already finished.",
     parameters: steerWorkerSchema,
     async execute(
@@ -460,21 +460,28 @@ export function createWorkerTools(
         });
       }
 
-      const steeringPath = path.join(entry.workerDir, "steering.md");
-      try {
-        fs.writeFileSync(steeringPath, guidance, "utf-8");
-      } catch (error) {
-        return toolError(error, "Failed to write steering note");
+      if (!entry.steer) {
+        registry.update(worker_id, { pendingSteering: guidance });
+        console.log(`[worker] ${worker_id} steering queued (${Buffer.byteLength(guidance, "utf-8")} bytes)`);
+        return toolSuccess({
+          worker_id,
+          status: "running",
+          note: "Worker session is still starting. Steering guidance queued and will be delivered once ready.",
+        });
       }
 
-      console.log(`[worker] ${worker_id} steering note updated (${Buffer.byteLength(guidance, "utf-8")} bytes)`);
+      try {
+        await entry.steer(guidance);
+      } catch (error) {
+        return toolError(error, "Failed to steer worker");
+      }
+
+      console.log(`[worker] ${worker_id} steered (${Buffer.byteLength(guidance, "utf-8")} bytes)`);
 
       return toolSuccess({
         worker_id,
         status: "running",
-        note:
-          "Steering note written. The worker will pick it up after its next few tool calls " +
-          "and adjust its work accordingly.",
+        note: "Steering guidance delivered to the worker session.",
       });
     },
   };
