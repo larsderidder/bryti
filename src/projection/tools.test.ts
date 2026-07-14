@@ -50,6 +50,33 @@ describe("ProjectionTools dependencies", () => {
     expect(deps[0].condition_type).toBe("status_change");
   });
 
+
+  it("stores the originating delivery target on created projections", async () => {
+    tools = createProjectionTools(store, "UTC", {
+      userId: "wed_active",
+      channelId: "wed_active",
+      platform: "web_e2ee",
+    });
+    const projectTool = tools.find((t) => t.name === "projection_create");
+    expect(projectTool).toBeDefined();
+
+    const result = await projectTool!.execute(
+      "call-target",
+      { summary: "Targeted reminder", when: "2026-02-19T10:00" },
+      undefined,
+      undefined,
+      undefined as any,
+    );
+
+    const id = (result.details as any).id as string;
+    const projection = store.getById(id);
+    expect(projection).toMatchObject({
+      target_user_id: "wed_active",
+      target_channel_id: "wed_active",
+      target_platform: "web_e2ee",
+    });
+  });
+
   it("projection_link links existing projections", async () => {
     const subjectId = store.add({ summary: "Call" });
     const observerId = store.add({ summary: "Follow-up email" });

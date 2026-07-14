@@ -5,7 +5,7 @@
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { Static } from "@sinclair/typebox";
 import { Type } from "@sinclair/typebox";
-import type { DependencyConditionType, ProjectionResolution, ProjectionStore } from "./store.js";
+import type { DependencyConditionType, ProjectionResolution, ProjectionStore, ProjectionTarget } from "./store.js";
 
 // ---------------------------------------------------------------------------
 // Tool schemas
@@ -152,7 +152,7 @@ function toUtcDatetime(naive: string, timezone: string | undefined): string {
  * Create projection tools. When timezone is set, naive datetimes from the
  * agent are converted to UTC before storage.
  */
-export function createProjectionTools(store: ProjectionStore, timezone?: string): AgentTool<any>[] {
+export function createProjectionTools(store: ProjectionStore, timezone?: string, defaultTarget?: ProjectionTarget): AgentTool<any>[] {
   const projectTool: AgentTool<typeof projectSchema> = {
     name: "projection_create",
     label: "projection_create",
@@ -199,6 +199,7 @@ export function createProjectionTools(store: ProjectionStore, timezone?: string)
           trigger_on_fact,
           context,
           linked_ids,
+          target: defaultTarget,
           depends_on: depends_on?.map((dep) => ({
             subject_id: dep.projection_id,
             condition: dep.condition,

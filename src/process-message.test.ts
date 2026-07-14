@@ -13,7 +13,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { AppState } from "./process-message.js";
-import { processMessage } from "./process-message.js";
+import { createInternalMessage, processMessage } from "./process-message.js";
 import { SILENT_REPLY_TOKEN } from "./agent.js";
 import { createHistoryManager } from "./history.js";
 import { createCoreMemory } from "./memory/core-memory.js";
@@ -205,6 +205,24 @@ function incomingMsg(text: string, userId = "12345"): IncomingMessage {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+describe("internal synthetic messages", () => {
+  it("preserves the originating routing target", () => {
+    const msg = createInternalMessage(
+      { userId: "device-user", channelId: "device-channel", platform: "web_e2ee" },
+      "internal follow-up",
+      { type: "compaction_resume" },
+    );
+
+    expect(msg).toMatchObject({
+      userId: "device-user",
+      channelId: "device-channel",
+      platform: "web_e2ee",
+      text: "internal follow-up",
+      raw: { type: "compaction_resume" },
+    });
+  });
+});
 
 describe("processMessage pipeline", () => {
   let tmpDir: string;

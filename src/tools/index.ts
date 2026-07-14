@@ -25,6 +25,7 @@ import { embed } from "../memory/embeddings.js";
 import { createMemoryStore } from "../memory/store.js";
 import path from "node:path";
 import type { Config, ToolGroup } from "../config.js";
+import type { ProjectionTarget } from "../projection/index.js";
 import type { CoreMemory } from "../memory/core-memory.js";
 import type { WorkerTriggerCallback } from "../workers/tools.js";
 import { registerToolCapabilities } from "../trust/index.js";
@@ -55,6 +56,7 @@ export function createTools(
   onWorkerTrigger?: WorkerTriggerCallback,
   onRestart?: RestartCallback,
   projectionStore?: ProjectionStore,
+  projectionTarget?: ProjectionTarget,
 ): BrytiTool[] {
   const tools: BrytiTool[] = [];
   const groups = new Set<ToolGroup>(config.agent_def.tool_groups);
@@ -140,7 +142,7 @@ export function createTools(
   // Created before archival tools so the projection store is available when
   // archival inserts need to activate trigger-based projections.
   if (groups.has("projections")) {
-    tools.push(...createProjectionTools(resolvedProjectionStore, config.agent.timezone));
+    tools.push(...createProjectionTools(resolvedProjectionStore, config.agent.timezone, projectionTarget));
   }
 
   // memory_archival — archival_insert, archival_search

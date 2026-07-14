@@ -188,6 +188,23 @@ function extractResponseText(
   return "";
 }
 
+export function createInternalMessage(
+  target: Pick<IncomingMessage, "userId" | "channelId" | "platform"> &
+    Partial<Pick<IncomingMessage, "threadId" | "channelThreadId">>,
+  text: string,
+  raw: Record<string, unknown>,
+): IncomingMessage {
+  return {
+    channelId: target.channelId,
+    userId: target.userId,
+    platform: target.platform,
+    threadId: target.threadId,
+    channelThreadId: target.channelThreadId,
+    text,
+    raw,
+  };
+}
+
 function modelNameForLog(
   provider: string | undefined,
   model: string | undefined,
@@ -372,30 +389,32 @@ export async function getOrLoadSession(
     state.config,
     state.coreMemory,
     userId,
-    (triggered) => {
+        (triggered) => {
       if (!state.enqueue) return;
-      const channelId = String(state.config.telegram.allowed_users[0] ?? userId);
       const summaries = triggered.map((p) => `- ${p.summary} (id: ${p.id})`).join("\n");
-      state.enqueue({
-        channelId,
-        userId,
-        text:
-          `[Worker completed]\n\nThe following commitment(s) were triggered:\n\n${summaries}\n\n` +
+
+      state.enqueue(createInternalMessage(
+        {
+          userId,
+          channelId,
+          platform,
+          threadId,
+          channelThreadId: msg.channelThreadId,
+        },
+        `[Worker completed]\n\nThe following commitment(s) were triggered:\n\n${summaries}\n\n` +
           `IMPORTANT: The user has NOT seen the worker's results yet. You must:\n` +
           `1. Read the worker's result file (read tool)\n` +
           `2. Share the key findings with the user FIRST\n` +
           `3. Only THEN suggest next steps or act on them\n` +
           `Never assume the user knows what the worker found. Always present the findings before drawing conclusions or taking action.`,
-        platform: "telegram",
-        threadId,
-        channelThreadId: msg.channelThreadId,
-        raw: { type: "worker_trigger" },
-      });
+        { type: "worker_trigger" },
+      ));
     },
     async (reason: string) => {
       await triggerRestart(state, { userId, channelId, platform, text: "", raw: null }, reason);
     },
     projectionStore,
+    { userId, channelId, platform },
   );
 
   const trustContext: TrustWrapperContext = {
@@ -455,20 +474,19 @@ export async function getOrLoadSession(
     state.recoveredSessions.add(sessionKey);
   }
 
-  userSession.onCompactionComplete = () => {
-    const channelId = String(state.config.telegram.allowed_users[0] ?? userId);
-    const compactionMsg: IncomingMessage = {
-      channelId,
-      userId,
-      platform: "telegram",
-      threadId,
-      channelThreadId: msg.channelThreadId,
-      text:
-        "[System: context was automatically compacted. If you were in the middle of a task " +
+    userSession.onCompactionComplete = () => {
+    state.enqueue?.(createInternalMessage(
+      {
+        userId,
+        channelId,
+        platform,
+        threadId,
+        channelThreadId: msg.channelThreadId,
+      },
+      "[System: context was automatically compacted. If you were in the middle of a task " +
         "for the user, continue where you left off. If not, say nothing (NOOP).]",
-      raw: { type: "compaction_resume" },
-    };
-    state.enqueue?.(compactionMsg);
+      { type: "compaction_resume" },
+    ));
   };
 
   // Wrap dispose so this module closes the store it owns.

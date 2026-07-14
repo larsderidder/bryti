@@ -41,6 +41,12 @@ export interface ProjectionDependencyInput {
   condition_type?: DependencyConditionType;
 }
 
+export interface ProjectionTarget {
+  userId: string;
+  channelId: string;
+  platform: string;
+}
+
 export interface Projection {
   id: string;
   summary: string;
@@ -51,6 +57,9 @@ export interface Projection {
   trigger_on_fact: string | null;
   context: string | null;
   linked_ids: string[];
+  target_user_id: string | null;
+  target_channel_id: string | null;
+  target_platform: string | null;
   status: ProjectionStatus;
   created_at: string;
   resolved_at: string | null;
@@ -67,6 +76,7 @@ export interface ProjectionStore {
     trigger_on_fact?: string;
     context?: string;
     linked_ids?: string[];
+    target?: ProjectionTarget;
     depends_on?: ProjectionDependencyInput[];
   }): string;
 
@@ -184,6 +194,9 @@ interface ProjectionRow {
   trigger_on_fact: string | null;
   context: string | null;
   linked_ids: string | null;
+  target_user_id: string | null;
+  target_channel_id: string | null;
+  target_platform: string | null;
   status: string;
   created_at: string;
   resolved_at: string | null;
@@ -217,6 +230,9 @@ function rowToProjection(row: ProjectionRow): Projection {
     trigger_on_fact: row.trigger_on_fact,
     context: row.context,
     linked_ids,
+    target_user_id: row.target_user_id,
+    target_channel_id: row.target_channel_id,
+    target_platform: row.target_platform,
     status: row.status as ProjectionStatus,
     created_at: row.created_at,
     resolved_at: row.resolved_at,
@@ -287,6 +303,9 @@ export function createProjectionStore(userId: string, dataDir: string): Projecti
       trigger_on_fact TEXT,
       context         TEXT,
       linked_ids      TEXT,
+      target_user_id  TEXT,
+      target_channel_id TEXT,
+      target_platform TEXT,
       status          TEXT NOT NULL DEFAULT 'pending',
       created_at      TEXT NOT NULL,
       resolved_at     TEXT
@@ -307,6 +326,9 @@ export function createProjectionStore(userId: string, dataDir: string): Projecti
   for (const ddl of [
     `ALTER TABLE projections ADD COLUMN recurrence TEXT;`,
     `ALTER TABLE projections ADD COLUMN trigger_on_fact TEXT;`,
+    `ALTER TABLE projections ADD COLUMN target_user_id TEXT;`,
+    `ALTER TABLE projections ADD COLUMN target_channel_id TEXT;`,
+    `ALTER TABLE projections ADD COLUMN target_platform TEXT;`,
   ]) {
     try {
       db.exec(ddl);
@@ -317,9 +339,9 @@ export function createProjectionStore(userId: string, dataDir: string): Projecti
 
   const stmtInsert = db.prepare(`
     INSERT INTO projections
-      (id, summary, raw_when, resolved_when, resolution, recurrence, trigger_on_fact, context, linked_ids, status, created_at)
+      (id, summary, raw_when, resolved_when, resolution, recurrence, trigger_on_fact, context, linked_ids, target_user_id, target_channel_id, target_platform, status, created_at)
     VALUES
-      (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+      (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', datetime('now'))
   `);
   const stmtInsertDependency = db.prepare(`
     INSERT INTO projection_dependencies
@@ -545,6 +567,7 @@ export function createProjectionStore(userId: string, dataDir: string): Projecti
     trigger_on_fact?: string;
     context?: string;
     linked_ids?: string[];
+    target?: ProjectionTarget;
     depends_on?: ProjectionDependencyInput[];
   }): string => {
     const id = crypto.randomUUID();
@@ -564,7 +587,9 @@ export function createProjectionStore(userId: string, dataDir: string): Projecti
       params.trigger_on_fact ?? null,
       params.context ?? null,
       params.linked_ids ? JSON.stringify(params.linked_ids) : null,
-      now,
+      params.target?.userId ?? null,
+      params.target?.channelId ?? null,
+      params.target?.platform ?? null,
     );
 
     // Each entry in depends_on creates a DAG edge: this new projection (observer)
@@ -576,7 +601,7 @@ export function createProjectionStore(userId: string, dataDir: string): Projecti
   });
 
   return {
-    add({ summary, raw_when, resolved_when, resolution, recurrence, trigger_on_fact, context, linked_ids, depends_on }) {
+    add({ summary, raw_when, resolved_when, resolution, recurrence, trigger_on_fact, context, linked_ids, target, depends_on }) {
       return addWithDependencies({
         summary,
         raw_when,
@@ -586,6 +611,7 @@ export function createProjectionStore(userId: string, dataDir: string): Projecti
         trigger_on_fact,
         context,
         linked_ids,
+        target,
         depends_on,
       });
     },

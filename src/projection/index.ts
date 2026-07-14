@@ -9,6 +9,7 @@ export type {
   ProjectionResolution,
   ProjectionStatus,
   ProjectionStore,
+  ProjectionTarget,
   ProjectionDependency,
   ProjectionDependencyInput,
   DependencyConditionType,
