@@ -3,8 +3,8 @@
  */
 
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
-import type { Static } from "@sinclair/typebox";
-import { Type } from "@sinclair/typebox";
+import type { Static } from "typebox";
+import { Type } from "typebox";
 import { createHybridSearch } from "../memory/search.js";
 import type { MemoryStore } from "../memory/store.js";
 import type { ProjectionStore } from "../projection/store.js";

@@ -13,8 +13,8 @@ import axios from "axios";
 import { parseHTML } from "linkedom";
 import { Readability } from "@mozilla/readability";
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
-import type { Static } from "@sinclair/typebox";
-import { Type } from "@sinclair/typebox";
+import type { Static } from "typebox";
+import { Type } from "typebox";
 import { assertSafePublicUrl, isPrivateHostname, safeLookup, type SafePublicUrl } from "../util/ssrf.js";
 
 const execFileAsync = promisify(execFile);

@@ -21,7 +21,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
-import { Type, type Static } from "@sinclair/typebox";
+import { Type, type Static } from "typebox";
 import { toolError, toolSuccess } from "./result.js";
 
 // ---------------------------------------------------------------------------

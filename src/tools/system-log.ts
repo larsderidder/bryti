@@ -9,8 +9,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
-import type { Static } from "@sinclair/typebox";
-import { Type } from "@sinclair/typebox";
+import type { Static } from "typebox";
+import { Type } from "typebox";
 import { toolError, toolSuccess } from "./result.js";
 
 const systemLogSchema = Type.Object({

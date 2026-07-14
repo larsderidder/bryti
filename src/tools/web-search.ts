@@ -25,8 +25,8 @@
 import https from "node:https";
 import http from "node:http";
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
-import type { Static } from "@sinclair/typebox";
-import { Type } from "@sinclair/typebox";
+import type { Static } from "typebox";
+import { Type } from "typebox";
 
 interface SearxngResult {
   title: string;

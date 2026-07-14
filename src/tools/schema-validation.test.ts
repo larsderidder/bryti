@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 import { quarantineInvalidExtensionTools, validateToolSchema } from "./schema-validation.js";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 

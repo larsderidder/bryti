@@ -3,8 +3,8 @@
  */
 
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
-import type { Static } from "@sinclair/typebox";
-import { Type } from "@sinclair/typebox";
+import type { Static } from "typebox";
+import { Type } from "typebox";
 import { searchConversations } from "../memory/conversation-search.js";
 import { toolError, toolSuccess } from "./result.js";
 

@@ -8,7 +8,7 @@
  */
 
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 import { createFileTools } from "./files.js";
 import { createSystemLogTool } from "./system-log.js";
 import { createPiSessionTools } from "./pi-sessions.js";
