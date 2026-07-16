@@ -25,6 +25,15 @@ export interface ProviderConfig {
   api: string;
   api_key: string;
   headers?: Record<string, string>;
+  env?: Record<string, string>;
+  /** HTTP request timeout in milliseconds for provider SDKs that support it. */
+  timeout_ms?: number;
+  /** Maximum provider SDK retry attempts. */
+  max_retries?: number;
+  /** Maximum server-requested retry delay in milliseconds. */
+  max_retry_delay_ms?: number;
+  /** Provider-scoped proxy URL, exposed through provider env as HTTPS_PROXY/HTTP_PROXY. */
+  proxy?: string;
   models: ModelEntry[];
 }
 
@@ -72,6 +81,8 @@ export interface WorkerTypeConfig {
   tools?: string[];
   /** Timeout in seconds. Default: 3600. */
   timeout_seconds?: number;
+  /** Turn count where the worker is asked to wrap up. Defaults to tools.workers.max_turns. */
+  max_turns?: number;
 }
 
 export interface CronJob {
@@ -303,6 +314,12 @@ export interface Config {
   web_e2ee: WebE2EEConfig;
   models: {
     providers: ProviderConfig[];
+    /** Global HTTP proxy for pi provider calls. */
+    http_proxy?: string;
+    /** Global HTTP idle timeout in milliseconds. */
+    http_idle_timeout_ms?: number;
+    /** Global WebSocket connect timeout in milliseconds. */
+    websocket_connect_timeout_ms?: number;
   };
   memory: {
     embeddings: EmbeddingsConfig;
@@ -333,6 +350,8 @@ export interface Config {
       model?: string;
       /** Default thinking/reasoning level for workers. Defaults to agent.thinking_level. */
       thinking_level?: ThinkingLevel;
+      /** Default turn count where workers are asked to wrap up. */
+      max_turns?: number;
       /** Named worker types with preset defaults. The agent can select a type
        *  when dispatching to get its model, tools, and timeout without
        *  specifying them individually. */
@@ -630,6 +649,7 @@ function toolsFromConfig(substituted: Record<string, unknown>, dataDir: string):
       max_concurrent: 3,
       ...(raw.workers as object | undefined),
       thinking_level: normalizeThinkingLevel(workersRaw.thinking_level, "medium"),
+      max_turns: toFiniteNumber(workersRaw.max_turns),
       types: workerTypes,
     },
   };
@@ -915,6 +935,36 @@ function validateConfig(config: Config): void {
     }
   }
 
+  // --- Provider runtime controls ---
+
+  if (config.models.http_idle_timeout_ms !== undefined && (!Number.isInteger(config.models.http_idle_timeout_ms) || config.models.http_idle_timeout_ms < 0)) {
+    errors.push("models.http_idle_timeout_ms must be a non-negative integer");
+  }
+  if (config.models.websocket_connect_timeout_ms !== undefined && (!Number.isInteger(config.models.websocket_connect_timeout_ms) || config.models.websocket_connect_timeout_ms < 0)) {
+    errors.push("models.websocket_connect_timeout_ms must be a non-negative integer");
+  }
+  for (const provider of config.models.providers) {
+    if (provider.timeout_ms !== undefined && (!Number.isInteger(provider.timeout_ms) || provider.timeout_ms <= 0)) {
+      errors.push(`models.providers.${provider.name}.timeout_ms must be a positive integer`);
+    }
+    if (provider.max_retries !== undefined && (!Number.isInteger(provider.max_retries) || provider.max_retries < 0)) {
+      errors.push(`models.providers.${provider.name}.max_retries must be a non-negative integer`);
+    }
+    if (provider.max_retry_delay_ms !== undefined && (!Number.isInteger(provider.max_retry_delay_ms) || provider.max_retry_delay_ms < 0)) {
+      errors.push(`models.providers.${provider.name}.max_retry_delay_ms must be a non-negative integer`);
+    }
+    if (provider.proxy) {
+      try {
+        const proxyUrl = new URL(provider.proxy);
+        if (proxyUrl.protocol !== "http:" && proxyUrl.protocol !== "https:") {
+          errors.push(`models.providers.${provider.name}.proxy must use http or https`);
+        }
+      } catch {
+        errors.push(`models.providers.${provider.name}.proxy must be a valid URL`);
+      }
+    }
+  }
+
   // --- Fallback models must reference known providers ---
 
   for (const fb of config.agent.fallback_models ?? []) {
@@ -1034,6 +1084,17 @@ function validateConfig(config: Config): void {
   }
   if (!Number.isInteger(config.tools.fetch_url.timeout_ms) || config.tools.fetch_url.timeout_ms <= 0) {
     errors.push("fetch_url.timeout_ms must be a positive integer");
+  }
+  if (!Number.isInteger(config.tools.workers.max_concurrent) || config.tools.workers.max_concurrent <= 0) {
+    errors.push("tools.workers.max_concurrent must be a positive integer");
+  }
+  if (config.tools.workers.max_turns !== undefined && (!Number.isInteger(config.tools.workers.max_turns) || config.tools.workers.max_turns <= 1)) {
+    errors.push("tools.workers.max_turns must be an integer greater than 1");
+  }
+  for (const [name, workerType] of Object.entries(config.tools.workers.types ?? {})) {
+    if (workerType.max_turns !== undefined && (!Number.isInteger(workerType.max_turns) || workerType.max_turns <= 1)) {
+      errors.push(`tools.workers.types.${name}.max_turns must be an integer greater than 1`);
+    }
   }
 
   // --- Emit ---

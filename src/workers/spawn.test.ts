@@ -60,6 +60,7 @@ vi.mock("@earendil-works/pi-coding-agent", async (importActual) => {
         async prompt() { return mockPromptImpl(); },
         abort: mockAbort,
         steer: mockSteer,
+        subscribe: vi.fn(() => vi.fn()),
         dispose: mockDispose,
         async reload() { return mockReload(); },
         agent: { replaceMessages(_msgs: unknown[]) {} },
@@ -78,6 +79,7 @@ vi.mock("@earendil-works/pi-coding-agent", async (importActual) => {
     SettingsManager: {
       create: (_dataDir: string, _agentDir: string) => ({
         load: async () => ({}),
+        applyOverrides: vi.fn(),
       }),
     },
   };

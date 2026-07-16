@@ -3,7 +3,7 @@
  * Each entry records status, timing, file paths, and the timeout handle.
  */
 
-export type WorkerStatus = "running" | "complete" | "failed" | "timeout" | "cancelled";
+export type WorkerStatus = "queued" | "running" | "complete" | "failed" | "timeout" | "cancelled";
 
 export interface WorkerEntry {
   workerId: string;
@@ -52,12 +52,17 @@ export interface WorkerRegistry {
   /** Update mutable fields of a worker entry. */
   update(workerId: string, updates: Partial<Pick<WorkerEntry, "status" | "completedAt" | "error" | "abort" | "steer" | "pendingSteering" | "timeoutHandle">>): void;
 
-  /**
-   * Count workers with status "running".
-   * Used by worker_dispatch in tools.ts to enforce the max_concurrent limit
-   * before spawning a new session.
-   */
+  /** Count workers with status "running". */
   runningCount(): number;
+
+  /** Count workers waiting to start. */
+  queuedCount(): number;
+
+  /** Return the next queued worker in FIFO registration order. */
+  nextQueued(): WorkerEntry | null;
+
+  /** Return a queued worker's 1-based queue position, or null if not queued. */
+  queuePosition(workerId: string): number | null;
 
   /** Remove a worker entry from the registry. */
   remove(workerId: string): void;
@@ -97,6 +102,31 @@ export function createWorkerRegistry(): WorkerRegistry {
         if (entry.status === "running") count++;
       }
       return count;
+    },
+
+    queuedCount() {
+      let count = 0;
+      for (const entry of entries.values()) {
+        if (entry.status === "queued") count++;
+      }
+      return count;
+    },
+
+    nextQueued() {
+      for (const entry of entries.values()) {
+        if (entry.status === "queued") return entry;
+      }
+      return null;
+    },
+
+    queuePosition(workerId) {
+      let position = 0;
+      for (const entry of entries.values()) {
+        if (entry.status !== "queued") continue;
+        position++;
+        if (entry.workerId === workerId) return position;
+      }
+      return null;
     },
 
     remove(workerId) {

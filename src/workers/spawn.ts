@@ -12,7 +12,6 @@ import {
   createAgentSession,
   DefaultResourceLoader,
   SessionManager,
-  SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { Config, ThinkingLevel } from "../config.js";
@@ -23,7 +22,8 @@ import { createFetchUrlTool } from "../tools/fetch-url.js";
 import { createWorkerScopedTools } from "./scoped-tools.js";
 import type { WorkerRegistry } from "./registry.js";
 import type { ProjectionStore } from "../projection/store.js";
-import { createModelInfra, resolveModel, resolveFirstModel } from "../model-infra.js";
+import { createBrytiSettingsManager, createModelInfra, resolveModel, resolveFirstModel } from "../model-infra.js";
+import { attachWorkerRunTracker, type WorkerProgress, type WorkerRuntimePaths } from "./tracker.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -77,13 +77,17 @@ function buildWorkerSystemPrompt(task: string, workerDir: string): string {
 
 export interface WorkerStatusFile {
   worker_id: string;
-  status: "running" | "complete" | "failed" | "timeout" | "cancelled";
+  status: "queued" | "running" | "complete" | "failed" | "timeout" | "cancelled";
   task: string;
   started_at: string;
   completed_at: string | null;
   model: string;
   error: string | null;
   result_path: string;
+  queue_position?: number | null;
+  transcript_path?: string;
+  output_path?: string;
+  progress?: WorkerProgress;
 }
 
 /**
@@ -137,6 +141,7 @@ export async function spawnWorkerSession(opts: {
   projectionStore?: ProjectionStore;
   registry: WorkerRegistry;
   timeoutMs: number;
+  maxTurns?: number;
   onTrigger?: WorkerTriggerCallback;
 }): Promise<void> {
   const {
@@ -150,6 +155,7 @@ export async function spawnWorkerSession(opts: {
     memoryStore,
     registry,
     timeoutMs,
+    maxTurns,
     onTrigger,
   } = opts;
 
@@ -215,12 +221,12 @@ export async function spawnWorkerSession(opts: {
   const loader = new DefaultResourceLoader({
     cwd: config.data_dir,
     agentDir,
-    settingsManager: SettingsManager.create(config.data_dir, agentDir),
+    settingsManager: createBrytiSettingsManager(config, config.data_dir, agentDir),
     systemPromptOverride: () => systemPrompt,
   });
   await loader.reload();
 
-  const settingsManager = SettingsManager.create(config.data_dir, agentDir);
+  const settingsManager = createBrytiSettingsManager(config, config.data_dir, agentDir);
 
   // Spawn the session (no persistence — in-memory only)
   const { session } = await createAgentSession({
@@ -241,6 +247,28 @@ export async function spawnWorkerSession(opts: {
   registry.update(workerId, {
     abort: () => session.abort(),
     steer: (guidance: string) => session.steer(guidance),
+  });
+
+  const tracker = attachWorkerRunTracker({
+    session,
+    workerDir,
+    maxTurns,
+    writeStatus(progress, paths) {
+      const entry = registry.get(workerId);
+      writeStatusFile(workerDir, {
+        worker_id: workerId,
+        status: entry?.status ?? "running",
+        task,
+        started_at: entry?.startedAt.toISOString() ?? new Date().toISOString(),
+        completed_at: entry?.completedAt?.toISOString() ?? null,
+        model: modelString,
+        error: entry?.error ?? null,
+        result_path: resultPath,
+        transcript_path: paths.transcript_path,
+        output_path: paths.output_path,
+        progress,
+      });
+    },
   });
 
   const pendingSteering = registry.get(workerId)?.pendingSteering;
@@ -278,7 +306,11 @@ export async function spawnWorkerSession(opts: {
         model: modelString,
         error: `Timed out after ${timeoutMs / 1000}s`,
         result_path: resultPath,
+        transcript_path: tracker.paths.transcript_path,
+        output_path: tracker.paths.output_path,
+        progress: tracker.progress,
       });
+      tracker.writeOutput("timeout", { error: `Timed out after ${timeoutMs / 1000}s`, result_path: resultPath });
       const factContent = `Worker ${workerId} failed: timed out after ${timeoutMs / 1000}s`;
       try {
         const embedding = await embed(factContent, modelsDir);
@@ -377,7 +409,11 @@ export async function spawnWorkerSession(opts: {
       model: modelString,
       error: null,
       result_path: resultPath,
+      transcript_path: tracker.paths.transcript_path,
+      output_path: tracker.paths.output_path,
+      progress: tracker.progress,
     });
+    tracker.writeOutput("complete", { result_path: resultPath });
     console.log(`[worker] ${workerId} complete`);
 
     const factContent = `Worker ${workerId} complete, results at ${resultPath}`;
@@ -437,7 +473,11 @@ export async function spawnWorkerSession(opts: {
       model: modelString,
       error: errMsg,
       result_path: resultPath,
+      transcript_path: tracker.paths.transcript_path,
+      output_path: tracker.paths.output_path,
+      progress: tracker.progress,
     });
+    tracker.writeOutput("failed", { error: errMsg, result_path: resultPath });
     console.error(`[worker] ${workerId} failed:`, errMsg);
 
     const factContent = `Worker ${workerId} failed: ${errMsg}`;
@@ -449,6 +489,7 @@ export async function spawnWorkerSession(opts: {
       console.error(`[worker] ${workerId} failed to archive failure fact:`, (err2 as Error).message);
     }
   } finally {
+    tracker.unsubscribe();
     session.dispose();
     scheduleCleanup(registry, workerId, workerDir);
   }

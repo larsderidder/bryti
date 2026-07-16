@@ -40,12 +40,15 @@ type ReadResultInput = Static<typeof readResultSchema>;
  *   - status.json  : written by spawn.ts to record worker status; read by
  *                    worker_check to report progress back to the main agent.
  *   - task.md      : the initial task brief written by worker_dispatch.
+ *   - transcript.jsonl / output.json : runtime-owned observability files.
  */
+const RESERVED_FILENAMES = new Set(["status.json", "task.md", "transcript.jsonl", "output.json"]);
+
 function isValidFilename(filename: string): boolean {
   if (!filename || filename.length > 255) return false;
   if (filename.includes("/") || filename.includes("\\")) return false;
   if (filename.startsWith(".")) return false;
-  if (filename === "status.json" || filename === "task.md") return false; // reserved
+  if (RESERVED_FILENAMES.has(filename)) return false;
   return true;
 }
 
@@ -56,8 +59,8 @@ function isValidFilename(filename: string): boolean {
  *   - Workers can only write to their own workerDir (flat layout, no subdirectories).
  *   - Workers can only read files that live in the same workerDir. There is no
  *     cross-worker access and no parent-directory traversal.
- *   - Reserved filenames (status.json, task.md) are blocked from writes so the
- *     runtime's control files cannot be corrupted.
+ *   - Reserved filenames are blocked from writes so the runtime's control files
+ *     cannot be corrupted.
  */
 export function createWorkerScopedTools(workerDir: string): AgentTool<any>[] {
   const writeTool: AgentTool<typeof writeResultSchema> = {

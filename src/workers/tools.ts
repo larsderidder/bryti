@@ -22,7 +22,7 @@ import type { Config } from "../config.js";
 import type { MemoryStore } from "../memory/store.js";
 import { embed } from "../memory/embeddings.js";
 import { toolError, toolSuccess } from "../tools/result.js";
-import type { WorkerRegistry } from "./registry.js";
+import type { WorkerEntry, WorkerRegistry } from "./registry.js";
 import type { ProjectionStore } from "../projection/store.js";
 import {
   spawnWorkerSession,
@@ -39,6 +39,15 @@ const ALLOWED_TOOLS = ["web_search", "fetch_url"] as const;
 type AllowedTool = (typeof ALLOWED_TOOLS)[number];
 
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+
+interface WorkerLaunchSpec {
+  task: string;
+  modelOverride?: string;
+  thinkingLevel?: Config["tools"]["workers"]["thinking_level"];
+  toolNames: AllowedTool[];
+  timeoutMs: number;
+  maxTurns?: number;
+}
 
 // Re-export for use in other modules
 export type { WorkerTriggerCallback } from "./spawn.js";
@@ -73,6 +82,11 @@ const dispatchWorkerSchema = Type.Object({
   })),
   timeout_seconds: Type.Optional(Type.Number({
     description: "Maximum seconds before the worker is forcibly stopped. Default: 3600 (1 hour).",
+  })),
+  max_turns: Type.Optional(Type.Number({
+    description:
+      "Maximum worker turns before Bryti asks the worker to wrap up. " +
+      "Defaults to tools.workers.max_turns when configured.",
   })),
 });
 
@@ -119,6 +133,89 @@ export function createWorkerTools(
   const types = config.tools.workers.types ?? {};
   const typeNames = Object.keys(types);
   let typesSuffix = "";
+  const pendingLaunches = new Map<string, WorkerLaunchSpec>();
+
+  function filesBase(): string {
+    return path.join(config.data_dir, "files");
+  }
+
+  function relativeResultPath(resultPath: string): string {
+    return path.relative(filesBase(), resultPath);
+  }
+
+  function startWorker(entry: WorkerEntry, spec: WorkerLaunchSpec): void {
+    registry.update(entry.workerId, { status: "running", error: null });
+    writeStatusFile(entry.workerDir, {
+      worker_id: entry.workerId,
+      status: "running",
+      task: entry.task,
+      started_at: entry.startedAt.toISOString(),
+      completed_at: null,
+      model: entry.model,
+      error: null,
+      result_path: entry.resultPath,
+    });
+
+    console.log(
+      `[worker] Dispatching ${entry.workerId} ` +
+      `(model: ${entry.model}, thinking: ${spec.thinkingLevel}, tools: ${spec.toolNames.join(", ")})`,
+    );
+
+    spawnWorkerSession({
+      config,
+      workerId: entry.workerId,
+      workerDir: entry.workerDir,
+      task: spec.task,
+      modelOverride: spec.modelOverride,
+      thinkingLevel: spec.thinkingLevel,
+      toolNames: spec.toolNames,
+      memoryStore,
+      projectionStore,
+      registry,
+      timeoutMs: spec.timeoutMs,
+      maxTurns: spec.maxTurns,
+      onTrigger,
+    }).catch((err: Error) => {
+      console.error(`[worker] ${entry.workerId} spawn failed:`, err.message);
+      registry.update(entry.workerId, {
+        status: "failed",
+        completedAt: new Date(),
+        error: `Spawn failed: ${err.message}`,
+      });
+      writeStatusFile(entry.workerDir, {
+        worker_id: entry.workerId,
+        status: "failed",
+        task: entry.task,
+        started_at: entry.startedAt.toISOString(),
+        completed_at: new Date().toISOString(),
+        model: entry.model,
+        error: `Spawn failed: ${err.message}`,
+        result_path: entry.resultPath,
+      });
+    }).finally(() => {
+      drainQueue();
+    });
+  }
+
+  function drainQueue(): void {
+    const maxConcurrent = config.tools.workers.max_concurrent;
+    while (registry.runningCount() < maxConcurrent) {
+      const next = registry.nextQueued();
+      if (!next) return;
+      const spec = pendingLaunches.get(next.workerId);
+      if (!spec) {
+        registry.update(next.workerId, {
+          status: "failed",
+          completedAt: new Date(),
+          error: "Queued worker lost its launch specification",
+        });
+        continue;
+      }
+      pendingLaunches.delete(next.workerId);
+      startWorker(next, spec);
+    }
+  }
+
   if (typeNames.length > 0) {
     const typeLines = typeNames.map((name) => {
       const t = types[name];
@@ -147,20 +244,11 @@ export function createWorkerTools(
     parameters: dispatchWorkerSchema,
     async execute(
       _toolCallId: string,
-      { task, type: typeName, tools: requestedTools, model: modelOverride, timeout_seconds }: DispatchWorkerInput,
+      { task, type: typeName, tools: requestedTools, model: modelOverride, timeout_seconds, max_turns }: DispatchWorkerInput,
     ): Promise<AgentToolResult<unknown>> {
       // Hard block: no nesting
       if (isWorkerSession) {
         return toolError("Workers cannot dispatch other workers.");
-      }
-
-      // Concurrency limit
-      const maxConcurrent = config.tools.workers.max_concurrent;
-      if (registry.runningCount() >= maxConcurrent) {
-        return toolError(
-          `Maximum concurrent workers (${maxConcurrent}) already running. ` +
-          `Use worker_check to see current workers, or wait for one to complete.`,
-        );
       }
 
       // Resolve worker type defaults (explicit params override type defaults)
@@ -211,10 +299,20 @@ export function createWorkerTools(
         ?? config.agent.model;
       const resultPath = path.join(workerDir, "result.md");
 
-      // Register immediately so worker_check can find it
-      registry.register({
+      const launchSpec: WorkerLaunchSpec = {
+        task,
+        modelOverride: effectiveModel,
+        thinkingLevel: effectiveThinkingLevel,
+        toolNames,
+        timeoutMs,
+        maxTurns: max_turns ?? workerType?.max_turns ?? config.tools.workers.max_turns,
+      };
+
+      const shouldStartNow = registry.runningCount() < config.tools.workers.max_concurrent;
+      const status = shouldStartNow ? "running" : "queued";
+      const entry = registry.register({
         workerId,
-        status: "running",
+        status,
         task,
         resultPath,
         workerDir,
@@ -225,56 +323,37 @@ export function createWorkerTools(
         timeoutHandle: null,
       });
 
-      // Write initial status.json
+      if (!shouldStartNow) {
+        pendingLaunches.set(workerId, launchSpec);
+      }
+
+      const queuePosition = registry.queuePosition(workerId);
       writeStatusFile(workerDir, {
         worker_id: workerId,
-        status: "running",
+        status,
         task,
-        started_at: new Date().toISOString(),
+        started_at: entry.startedAt.toISOString(),
         completed_at: null,
         model: displayModel,
         error: null,
         result_path: resultPath,
+        queue_position: queuePosition,
       });
 
-      console.log(`[worker] Dispatching ${workerId} (model: ${displayModel}, thinking: ${effectiveThinkingLevel}, tools: ${toolNames.join(", ")})`);
+      if (shouldStartNow) {
+        startWorker(entry, launchSpec);
+      }
 
-      // Spawn in background — intentionally not awaited
-      spawnWorkerSession({
-        config,
-        workerId,
-        workerDir,
-        task,
-        modelOverride: effectiveModel,
-        thinkingLevel: effectiveThinkingLevel,
-        toolNames,
-        memoryStore,
-        projectionStore,
-        registry,
-        timeoutMs,
-        onTrigger,
-      }).catch((err: Error) => {
-        console.error(`[worker] ${workerId} spawn failed:`, err.message);
-        registry.update(workerId, {
-          status: "failed",
-          completedAt: new Date(),
-          error: `Spawn failed: ${err.message}`,
-        });
-      });
-
-      // Return immediately — worker is running in the background
-      // Path relative to the file sandbox base (data/files/), not data_dir,
-      // so it's directly usable with the `read` tool.
-      const filesBase = path.join(config.data_dir, "files");
-      const relativeResultPath = path.relative(filesBase, resultPath);
+      const relativeResult = relativeResultPath(resultPath);
       return toolSuccess({
         worker_id: workerId,
-        status: "running",
-        result_path: relativeResultPath,
+        status,
+        ...(queuePosition ? { queue_position: queuePosition } : {}),
+        result_path: relativeResult,
         trigger_hint: `worker ${workerId} complete`,
-        note:
-          `Worker dispatched. Create a projection with trigger_on_fact: "worker ${workerId} complete" ` +
-          `to be notified when results are ready. Read results with read path: ${relativeResultPath}`,
+        note: shouldStartNow
+          ? `Worker dispatched. Create a projection with trigger_on_fact: "worker ${workerId} complete" to be notified when results are ready. Read results with read path: ${relativeResult}`
+          : `Worker queued at position ${queuePosition}. It will start automatically when a running worker finishes. Read results with read path: ${relativeResult}`,
       });
     },
   };
@@ -308,6 +387,10 @@ export function createWorkerTools(
               status: data.status,
               elapsed_minutes: elapsed,
               result_path: relResult,
+              ...(data.queue_position ? { queue_position: data.queue_position } : {}),
+              ...(data.transcript_path ? { transcript_path: path.relative(filesBase, data.transcript_path) } : {}),
+              ...(data.output_path ? { output_path: path.relative(filesBase, data.output_path) } : {}),
+              ...(data.progress ? { progress: data.progress } : {}),
               error: data.error ?? undefined,
               note: `Status read from disk. Read results with read path: ${relResult}`,
             });
@@ -320,16 +403,25 @@ export function createWorkerTools(
 
       const elapsedMs = Date.now() - entry.startedAt.getTime();
       const elapsedMinutes = Math.round(elapsedMs / 60000);
-      const filesBase = path.join(config.data_dir, "files");
-      const relativeResultPath = path.relative(filesBase, entry.resultPath);
+      const statusFile = path.join(entry.workerDir, "status.json");
+      const diskStatus = fs.existsSync(statusFile)
+        ? JSON.parse(fs.readFileSync(statusFile, "utf-8")) as WorkerStatusFile
+        : null;
+      const base = filesBase();
+      const relResult = relativeResultPath(entry.resultPath);
+      const queuePosition = registry.queuePosition(entry.workerId);
 
       return toolSuccess({
         worker_id: entry.workerId,
         status: entry.status,
         elapsed_minutes: elapsedMinutes,
-        result_path: relativeResultPath,
+        result_path: relResult,
+        ...(queuePosition ? { queue_position: queuePosition } : {}),
+        ...(diskStatus?.transcript_path ? { transcript_path: path.relative(base, diskStatus.transcript_path) } : {}),
+        ...(diskStatus?.output_path ? { output_path: path.relative(base, diskStatus.output_path) } : {}),
+        ...(diskStatus?.progress ? { progress: diskStatus.progress } : {}),
         ...(entry.error ? { error: entry.error } : {}),
-        ...(entry.status === "complete" ? { note: `Read results with read path: ${relativeResultPath}` } : {}),
+        ...(entry.status === "complete" ? { note: `Read results with read path: ${relResult}` } : {}),
       });
     },
   };
@@ -367,6 +459,31 @@ export function createWorkerTools(
         return toolError(`Worker not found: ${worker_id}`);
       }
 
+      if (entry.status === "queued") {
+        pendingLaunches.delete(worker_id);
+        const cancelledAt = new Date();
+        registry.update(worker_id, {
+          status: "cancelled",
+          completedAt: cancelledAt,
+          error: null,
+        });
+        writeStatusFile(entry.workerDir, {
+          worker_id,
+          status: "cancelled",
+          task: entry.task,
+          started_at: entry.startedAt.toISOString(),
+          completed_at: cancelledAt.toISOString(),
+          model: entry.model,
+          error: null,
+          result_path: entry.resultPath,
+        });
+        return toolSuccess({
+          worker_id,
+          status: "cancelled",
+          note: "Queued worker has been cancelled before it started.",
+        });
+      }
+
       // Already in a terminal state — nothing to do
       if (entry.status !== "running") {
         return toolSuccess({
@@ -391,7 +508,7 @@ export function createWorkerTools(
         timeoutHandle: null,
       });
 
-      writeStatusFile(path.join(config.data_dir, "files", "workers", worker_id), {
+      writeStatusFile(entry.workerDir, {
         worker_id,
         status: "cancelled",
         task: entry.task,
@@ -450,6 +567,15 @@ export function createWorkerTools(
 
       if (!entry) {
         return toolError(`Worker not found: ${worker_id}`);
+      }
+
+      if (entry.status === "queued") {
+        registry.update(worker_id, { pendingSteering: guidance });
+        return toolSuccess({
+          worker_id,
+          status: "queued",
+          note: "Worker is queued. Steering guidance will be delivered when it starts.",
+        });
       }
 
       if (entry.status !== "running") {

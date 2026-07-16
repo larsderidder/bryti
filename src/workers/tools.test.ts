@@ -111,7 +111,7 @@ describe("worker_dispatch — validation", () => {
     expect((result.details as any).error).toMatch(/cannot dispatch/i);
   });
 
-  it("rejects dispatch when max concurrent workers reached", async () => {
+  it("queues dispatch when max concurrent workers reached", async () => {
     const tools = createWorkerTools(config, memoryStore, registry);
     const dispatch = tools.find((t) => t.name === "worker_dispatch")!;
 
@@ -132,7 +132,8 @@ describe("worker_dispatch — validation", () => {
     }
 
     const result = await dispatch.execute("call1", { task: "Another task" });
-    expect((result.details as any).error).toMatch(/maximum concurrent workers/i);
+    expect((result.details as any).status).toBe("queued");
+    expect((result.details as any).queue_position).toBe(1);
   });
 
   it("respects max_concurrent from config", async () => {
@@ -156,9 +157,9 @@ describe("worker_dispatch — validation", () => {
       });
     }
 
-    const result = await dispatch.execute("call1", { task: "Should be blocked" });
-    expect((result.details as any).error).toMatch(/maximum concurrent workers/i);
-    expect((result.details as any).error).toMatch(/2/);
+    const result = await dispatch.execute("call1", { task: "Should be queued" });
+    expect((result.details as any).status).toBe("queued");
+    expect((result.details as any).queue_position).toBe(1);
   });
 
   it("rejects unknown tool names", async () => {

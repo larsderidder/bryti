@@ -368,29 +368,42 @@ export async function getOrLoadSession(
 
   const projectionStore = createProjectionStore(userId, state.config.data_dir);
 
+  let workerTriggerTimer: ReturnType<typeof setTimeout> | null = null;
+  let pendingWorkerTriggers: Array<{ id: string; summary: string }> = [];
+
+  const flushWorkerTriggers = () => {
+    if (!state.enqueue || pendingWorkerTriggers.length === 0) return;
+    const batch = pendingWorkerTriggers;
+    pendingWorkerTriggers = [];
+    workerTriggerTimer = null;
+    const summaries = batch.map((p) => `- ${p.summary} (id: ${p.id})`).join("\n");
+    state.enqueue({
+      channelId,
+      userId,
+      text:
+        `[Worker completed]\n\nThe following commitment(s) were triggered:\n\n${summaries}\n\n` +
+        `IMPORTANT: The user has NOT seen the worker's results yet. You must:\n` +
+        `1. Read every referenced worker result file (read tool)\n` +
+        `2. Share the key findings with the user FIRST\n` +
+        `3. Only THEN suggest next steps or act on them\n` +
+        `Never assume the user knows what workers found. Always present the findings before drawing conclusions or taking action.`,
+      platform,
+      threadId,
+      channelThreadId: msg.channelThreadId,
+      raw: { type: "worker_trigger", count: batch.length },
+    });
+  };
+
   const tools = createTools(
     state.config,
     state.coreMemory,
     userId,
     (triggered) => {
-      if (!state.enqueue) return;
-      const channelId = String(state.config.telegram.allowed_users[0] ?? userId);
-      const summaries = triggered.map((p) => `- ${p.summary} (id: ${p.id})`).join("\n");
-      state.enqueue({
-        channelId,
-        userId,
-        text:
-          `[Worker completed]\n\nThe following commitment(s) were triggered:\n\n${summaries}\n\n` +
-          `IMPORTANT: The user has NOT seen the worker's results yet. You must:\n` +
-          `1. Read the worker's result file (read tool)\n` +
-          `2. Share the key findings with the user FIRST\n` +
-          `3. Only THEN suggest next steps or act on them\n` +
-          `Never assume the user knows what the worker found. Always present the findings before drawing conclusions or taking action.`,
-        platform: "telegram",
-        threadId,
-        channelThreadId: msg.channelThreadId,
-        raw: { type: "worker_trigger" },
-      });
+      pendingWorkerTriggers.push(...triggered);
+      if (!workerTriggerTimer) {
+        workerTriggerTimer = setTimeout(flushWorkerTriggers, 5_000);
+        workerTriggerTimer.unref();
+      }
     },
     async (reason: string) => {
       await triggerRestart(state, { userId, channelId, platform, text: "", raw: null }, reason);
@@ -460,7 +473,7 @@ export async function getOrLoadSession(
     const compactionMsg: IncomingMessage = {
       channelId,
       userId,
-      platform: "telegram",
+      platform,
       threadId,
       channelThreadId: msg.channelThreadId,
       text:
