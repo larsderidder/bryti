@@ -127,6 +127,10 @@ response:
 # ---------------------------------------------------------------------------
 
 models:
+  # Optional runtime controls for provider calls.
+  # http_proxy: "http://127.0.0.1:8080"
+  # http_idle_timeout_ms: 300000
+  # websocket_connect_timeout_ms: 30000
   providers:
     # Anthropic OAuth (Claude Pro/Max subscription, no API key).
     # One-time: install pi CLI and run `pi login anthropic`.
@@ -134,6 +138,12 @@ models:
       base_url: ""
       api: anthropic-messages
       api_key: ""
+      # timeout_ms: 300000
+      # max_retries: 2
+      # max_retry_delay_ms: 60000
+      # proxy: "http://127.0.0.1:8080"
+      # env:
+      #   HTTPS_PROXY: "http://127.0.0.1:8080"
       models:
         - id: "claude-sonnet-4-6"
           context_window: 200000
@@ -227,6 +237,7 @@ tools:
 
   workers:
     max_concurrent: 3
+    # max_turns: 20  # steer workers to wrap up near this many turns
     # model: "opencode/minimax-m2.5-free"  # default model for workers
     # thinking_level: "medium"  # default thinking level for workers
 

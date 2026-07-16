@@ -6,14 +6,13 @@ become available immediately.
 
 ## The one thing you need to know
 
-Bryti runs headlessly — no terminal, no TUI. Extensions work through
-`pi.registerTool()` only. Everything else in the pi extension API
-(commands, UI, TUI components, session navigation) requires an interactive
-terminal and does nothing here.
+Bryti runs headlessly, with no terminal and no TUI. The safest extension pattern is still `pi.registerTool()`, but headless-safe pi events are also available.
 
-**Use:** `pi.registerTool()`  
-**Ignore:** `pi.registerCommand()`, `pi.registerShortcut()`, `ctx.ui.*`,
-`ctx.sessionManager`, `pi.on()` events — these are no-ops or unavailable.
+**Use:** `pi.registerTool()` for model-callable capabilities. Use `pi.on()` for observability and lifecycle hooks that do not require a UI.
+
+**Gate carefully:** `pi.registerCommand()`, `pi.registerShortcut()`, `ctx.ui.*`, and TUI components require an interactive terminal. Only use them behind `ctx.hasUI` or `ctx.mode === "tui"` checks.
+
+Useful headless events include `before_agent_start`, `after_provider_response`, `tool_result`, `session_before_compact`, and `session_compact`. They are good for telemetry, redaction, and policy checks. Do not log prompt bodies, tool outputs, API keys, or other secrets.
 
 ## Minimal template
 
@@ -65,6 +64,8 @@ async function fetchWithTimeout(input: Parameters<typeof fetch>[0], init: Parame
 ## Returning results
 
 Bryti wraps extension tool output in an untrusted-content boundary before it reaches the model. This protects against prompt injection in API responses, feed entries, calendar descriptions, email bodies, and other external data. Still keep results compact and structured.
+
+If a tool is explicitly a final report-and-stop action, return `terminate: true` with the result. The pi runtime will end the turn once all tool calls in that batch are terminal.
 
 Always return JSON-stringified text so the agent can parse the result:
 
@@ -168,6 +169,7 @@ Read the existing extensions in `data/files/extensions/` for patterns.
 The bundled default:
 
 - `extensions/documents-hedgedoc.ts` — optional tool (skips if env var missing), fetch API, multiple tools
+- `extensions/provider-observability.ts` — headless-safe provider and compaction telemetry hooks
 
 The agent can also write its own extensions at runtime (shell access,
 API integrations, etc.). Check `data/files/extensions/` for any that

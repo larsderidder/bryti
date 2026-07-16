@@ -26,6 +26,7 @@ import type { Model } from "@earendil-works/pi-ai";
 import {
   AuthStorage,
   ModelRegistry,
+  SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import type { Config } from "./config.js";
 
@@ -37,6 +38,11 @@ export interface ModelInfra {
   authStorage: AuthStorage;
   modelRegistry: ModelRegistry;
   agentDir: string;
+}
+
+export interface ModelInfraOptions {
+  /** Which caller is using the infrastructure. Used for future policy and log labels. */
+  purpose?: "main" | "worker" | "reflection" | "guardrail";
 }
 
 // ---------------------------------------------------------------------------
@@ -85,47 +91,6 @@ function generateModelsJson(config: Config, agentDir: string): void {
     }
 
     providers[provider.name] = providerEntry;
-  }
-
-  fs.writeFileSync(
-    modelsJsonPath,
-    JSON.stringify({ providers }, null, 2),
-    "utf-8",
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Claude CLI credential bridge
-// ---------------------------------------------------------------------------
-
-/**
- * Claude CLI credential shape in ~/.claude/.credentials.json.
- */
-interface ClaudeCliCredentials {
-  claudeAiOauth?: {
-    accessToken?: string;
-    refreshToken?: string;
-    expiresAt?: number;
-  };
-}
-
-/**
- * Seed AuthStorage with Anthropic credentials from the Claude CLI credential
- * file (~/.claude/.credentials.json) if no Anthropic credential is already
- * present in auth.json.
- *
- * Claude CLI is the primary auth source for users who have it installed.
-
-        id: m.id,
-        name: m.name || m.id,
-        contextWindow: m.context_window || 200000,
-        maxTokens: m.max_tokens || 32000,
-        input: m.input ?? ["text", "image"],
-        ...(m.api && { api: m.api }),
-        ...(m.cost && { cost: m.cost }),
-        ...(m.compat && { compat: m.compat }),
-      })),
-    };
   }
 
   fs.writeFileSync(
@@ -225,7 +190,7 @@ function seedFromClaudeCliIfNeeded(authStorage: AuthStorage): void {
  *   2. Pi auth.json (~/.pi/agent/auth.json) — fallback for pi CLI users
  *   3. Explicit api_key in config — always wins as a runtime override
  */
-export function createModelInfra(config: Config): ModelInfra {
+export function createModelInfra(config: Config, _options: ModelInfraOptions = {}): ModelInfra {
   const agentDir = path.join(config.data_dir, ".pi");
   fs.mkdirSync(agentDir, { recursive: true });
 
@@ -241,8 +206,25 @@ export function createModelInfra(config: Config): ModelInfra {
   seedFromClaudeCliIfNeeded(authStorage);
 
   for (const provider of config.models.providers) {
+    const providerEnv = {
+      ...(provider.env ?? {}),
+      ...(provider.proxy ? { HTTPS_PROXY: provider.proxy, HTTP_PROXY: provider.proxy } : {}),
+    };
     if (provider.api_key) {
+      if (Object.keys(providerEnv).length > 0) {
+        authStorage.set(provider.name, {
+          type: "api_key",
+          key: provider.api_key,
+          env: providerEnv,
+        });
+      }
       authStorage.setRuntimeApiKey(provider.name, provider.api_key);
+    } else if (Object.keys(providerEnv).length > 0 && !authStorage.get(provider.name)) {
+      authStorage.set(provider.name, {
+        type: "api_key",
+        key: "oauth",
+        env: providerEnv,
+      });
     }
   }
 
@@ -250,6 +232,43 @@ export function createModelInfra(config: Config): ModelInfra {
   modelRegistry.refresh();
 
   return { authStorage, modelRegistry, agentDir };
+}
+
+export function createBrytiSettingsManager(
+  config: Config,
+  cwd: string,
+  agentDir: string,
+): SettingsManager {
+  const settingsManager = SettingsManager.create(cwd, agentDir);
+  const providerTimeouts = config.models.providers
+    .map((provider) => provider.timeout_ms)
+    .filter((value): value is number => typeof value === "number");
+  const providerRetries = config.models.providers
+    .map((provider) => provider.max_retries)
+    .filter((value): value is number => typeof value === "number");
+  const providerRetryDelays = config.models.providers
+    .map((provider) => provider.max_retry_delay_ms)
+    .filter((value): value is number => typeof value === "number");
+
+  settingsManager.applyOverrides({
+    ...(config.models.http_proxy ? { httpProxy: config.models.http_proxy } : {}),
+    ...(config.models.http_idle_timeout_ms ? { httpIdleTimeoutMs: config.models.http_idle_timeout_ms } : {}),
+    ...(config.models.websocket_connect_timeout_ms ? { websocketConnectTimeoutMs: config.models.websocket_connect_timeout_ms } : {}),
+    ...(
+      providerTimeouts.length > 0 || providerRetries.length > 0 || providerRetryDelays.length > 0
+        ? {
+            retry: {
+              provider: {
+                ...(providerTimeouts.length > 0 ? { timeoutMs: Math.max(...providerTimeouts) } : {}),
+                ...(providerRetries.length > 0 ? { maxRetries: Math.max(...providerRetries) } : {}),
+                ...(providerRetryDelays.length > 0 ? { maxRetryDelayMs: Math.max(...providerRetryDelays) } : {}),
+              },
+            },
+          }
+        : {}
+    ),
+  });
+  return settingsManager;
 }
 
 // ---------------------------------------------------------------------------

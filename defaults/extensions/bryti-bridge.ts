@@ -9,9 +9,10 @@
  *    the session ID prefix. The random token prevents blind connection
  *    attempts. The socket directory is kept at 0700 and the socket at 0600.
  *
- *    Protocol: one JSON object per line.
- *      Request:  { "type": "user_message", "text": "..." }
- *      Response: { "ok": true } or { "ok": false, "error": "..." }
+ *    Protocol: one JSON object per line. Legacy user_message requests still work.
+ *      Request:  { "id": "1", "method": "inject_user_message", "params": { "text": "..." } }
+ *      Response: { "id": "1", "ok": true } or { "id": "1", "ok": false, "error": "..." }
+ *      Legacy:   { "type": "user_message", "text": "..." }
  *
  * 2. Pi to Bryti notification.
  *    Registers the bryti_notify tool. The tool writes a JSON event file into
@@ -90,7 +91,16 @@ function writeNotifyEvent(eventsDir: string, userId: string, message: string): s
 export default function (pi: ExtensionAPI) {
   let server: net.Server | null = null;
   let currentSocketPath: string | null = null;
-  let sendUserMessage: ((text: string) => void) | null = null;
+  let currentMetadataPath: string | null = null;
+  let heartbeat: NodeJS.Timeout | null = null;
+  let sessionInfo: {
+    sessionId: string;
+    cwd: string;
+    pid: number;
+    startedAt: string;
+    capabilities: string[];
+    getStatus: () => Record<string, unknown>;
+  } | null = null;
 
   function closeBridge(): void {
     if (server) {
@@ -101,7 +111,35 @@ export default function (pi: ExtensionAPI) {
       try { fs.unlinkSync(currentSocketPath); } catch { /* already gone */ }
       currentSocketPath = null;
     }
-    sendUserMessage = null;
+    if (currentMetadataPath) {
+      try { fs.unlinkSync(currentMetadataPath); } catch { /* already gone */ }
+      currentMetadataPath = null;
+    }
+    if (heartbeat) {
+      clearInterval(heartbeat);
+      heartbeat = null;
+    }
+    sessionInfo = null;
+  }
+
+  function writeMetadata(): void {
+    if (!sessionInfo || !currentMetadataPath) return;
+    try {
+      fs.writeFileSync(currentMetadataPath, JSON.stringify({
+        version: 1,
+        sessionId: sessionInfo.sessionId,
+        cwd: sessionInfo.cwd,
+        pid: sessionInfo.pid,
+        startedAt: sessionInfo.startedAt,
+        lastHeartbeat: new Date().toISOString(),
+        capabilities: sessionInfo.capabilities,
+      }, null, 2), { encoding: "utf-8", mode: 0o600 });
+      try { fs.chmodSync(currentMetadataPath, 0o600); } catch { /* best effort */ }
+    } catch { /* best effort */ }
+  }
+
+  function response(id: unknown, ok: boolean, payload: Record<string, unknown> = {}): string {
+    return `${JSON.stringify({ id: typeof id === "string" ? id : undefined, ok, ...payload })}\n`;
   }
 
   pi.on("session_start", async (_event, ctx) => {
@@ -109,7 +147,6 @@ export default function (pi: ExtensionAPI) {
     if (!sessionId) return;
 
     closeBridge();
-    sendUserMessage = (text: string) => pi.sendUserMessage(text);
 
     const dir = socketsDir();
     ensurePrivateDir(dir);
@@ -125,6 +162,27 @@ export default function (pi: ExtensionAPI) {
     const token = crypto.randomBytes(8).toString("hex");
     const sockPath = socketPath(sessionId, token);
     currentSocketPath = sockPath;
+    currentMetadataPath = `${sockPath}.json`;
+    const capabilities = ["ping", "session_info", "inject_user_message", "follow_up", "steer", "abort", "status"];
+    sessionInfo = {
+      sessionId,
+      cwd: ctx.cwd,
+      pid: process.pid,
+      startedAt: new Date().toISOString(),
+      capabilities,
+      getStatus: () => ({
+        sessionId,
+        cwd: ctx.cwd,
+        mode: ctx.mode,
+        idle: ctx.isIdle(),
+        pendingMessages: ctx.hasPendingMessages(),
+        model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : null,
+        contextUsage: ctx.getContextUsage(),
+      }),
+    };
+    writeMetadata();
+    heartbeat = setInterval(writeMetadata, 10_000);
+    heartbeat.unref();
 
     server = net.createServer((conn) => {
       let buffer = "";
@@ -137,15 +195,40 @@ export default function (pi: ExtensionAPI) {
         for (const line of lines) {
           if (!line.trim()) continue;
           try {
-            const msg = JSON.parse(line) as { type?: unknown; text?: unknown };
-            if (msg.type === "user_message" && typeof msg.text === "string" && sendUserMessage) {
-              sendUserMessage(msg.text);
-              conn.write(`${JSON.stringify({ ok: true })}\n`);
+            const msg = JSON.parse(line) as { id?: unknown; type?: unknown; method?: unknown; text?: unknown; params?: Record<string, unknown> };
+            const id = msg.id;
+            const method = typeof msg.method === "string" ? msg.method : msg.type;
+            const text = typeof msg.text === "string"
+              ? msg.text
+              : typeof msg.params?.text === "string"
+                ? msg.params.text
+                : undefined;
+
+            if (method === "ping") {
+              conn.write(response(id, true, { version: 1, capabilities }));
+            } else if (method === "session_info") {
+              conn.write(response(id, true, { session: sessionInfo }));
+            } else if ((method === "user_message" || method === "inject_user_message") && text) {
+              pi.sendUserMessage(text);
+              conn.write(msg.type === "user_message" && !msg.id
+                ? `${JSON.stringify({ ok: true })}\n`
+                : response(id, true, { deliveredAs: "user_message" }));
+            } else if (method === "follow_up" && text) {
+              pi.sendUserMessage(text, { deliverAs: "followUp" });
+              conn.write(response(id, true, { deliveredAs: "followUp" }));
+            } else if (method === "steer" && text) {
+              pi.sendUserMessage(text, { deliverAs: "steer" });
+              conn.write(response(id, true, { deliveredAs: "steer" }));
+            } else if (method === "abort") {
+              ctx.abort();
+              conn.write(response(id, true));
+            } else if (method === "status") {
+              conn.write(response(id, true, { status: sessionInfo?.getStatus() ?? null }));
             } else {
-              conn.write(`${JSON.stringify({ ok: false, error: "Unknown message type or bridge not ready" })}\n`);
+              conn.write(response(id, false, { error: "Unknown method or missing text" }));
             }
           } catch {
-            conn.write(`${JSON.stringify({ ok: false, error: "Invalid JSON" })}\n`);
+            conn.write(response(undefined, false, { error: "Invalid JSON" }));
           }
         }
       });
@@ -244,6 +327,7 @@ export default function (pi: ExtensionAPI) {
               eventFile,
             }),
           }],
+          terminate: true,
         };
       } catch (err) {
         return {

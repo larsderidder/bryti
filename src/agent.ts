@@ -22,7 +22,6 @@ import {
   DefaultResourceLoader,
   ModelRegistry,
   SessionManager,
-  SettingsManager,
   type AgentSession,
   type AgentSessionEvent,
 } from "@earendil-works/pi-coding-agent";
@@ -31,7 +30,7 @@ import type { CoreMemory } from "./memory/core-memory.js";
 import { repairToolUseResultPairing } from "./compaction/transcript-repair.js";
 import { createProjectionStore, formatProjectionsForPrompt, type ProjectionStore } from "./projection/index.js";
 import { registerToolCapabilities, getToolCapabilities } from "./trust/index.js";
-import { createModelInfra, resolveModel } from "./model-infra.js";
+import { createBrytiSettingsManager, createModelInfra, resolveModel } from "./model-infra.js";
 import { buildSystemPrompt, buildToolSection, SILENT_REPLY_TOKEN, type ToolSummary } from "./system-prompt.js";
 import { quarantineInvalidExtensionTools } from "./tools/schema-validation.js";
 
@@ -228,7 +227,7 @@ export async function loadUserSession(
     agentDir,
     additionalExtensionPaths,
     additionalSkillPaths,
-    settingsManager: SettingsManager.create(config.data_dir, agentDir),
+    settingsManager: createBrytiSettingsManager(config, config.data_dir, agentDir),
     systemPromptOverride: () => {
       // Expire projections older than 24 hours before injecting them into the
       // system prompt. Stale projections must be cleared first so the agent
@@ -249,7 +248,7 @@ export async function loadUserSession(
   });
   await loader.reload();
 
-  const settingsManager = SettingsManager.create(config.data_dir, agentDir);
+  const settingsManager = createBrytiSettingsManager(config, config.data_dir, agentDir);
 
   // --- 3. Session creation + extension loading ---
   const { session, extensionsResult } = await createAgentSession({
@@ -339,13 +338,37 @@ export async function loadUserSession(
   const logsDir = path.join(config.data_dir, "logs");
   fs.mkdirSync(logsDir, { recursive: true });
   const toolCallLogPath = path.join(logsDir, "tool-calls.jsonl");
+  const compactionLogPath = path.join(logsDir, "compactions.jsonl");
+
+  function appendCompactionLog(entry: Record<string, unknown>): void {
+    try {
+      fs.appendFileSync(compactionLogPath, JSON.stringify({
+        timestamp: new Date().toISOString(),
+        userId,
+        sessionId: session.sessionId,
+        sessionFile: session.sessionFile,
+        ...entry,
+      }) + "\n", "utf-8");
+    } catch {
+      // Best-effort telemetry only.
+    }
+  }
 
   // Log compaction and tool call events
   let userSessionRef: UserSession | null = null;
+  let compactionStartedAt: number | null = null;
   const toolCallCounts = new Map<string, number>();
   const unsubscribe = session.subscribe((event: AgentSessionEvent) => {
     if (event.type === "compaction_start") {
+      compactionStartedAt = Date.now();
       console.log(`[compaction] starting (reason: ${event.reason}) for user ${userId}`);
+      appendCompactionLog({
+        phase: "start",
+        reason: event.reason,
+        messageCount: session.messages.length,
+        contextUsage: session.getContextUsage(),
+        model: session.model ? `${session.model.provider}/${session.model.id}` : null,
+      });
     } else if (event.type === "compaction_end") {
       if (event.result) {
         const summary = event.result.summary;
@@ -354,8 +377,35 @@ export async function loadUserSession(
           `tokensBefore=${event.result.tokensBefore} ` +
           `summaryLength=${summary.length}`,
         );
+        appendCompactionLog({
+          phase: "end",
+          success: true,
+          reason: event.reason,
+          durationMs: compactionStartedAt ? Date.now() - compactionStartedAt : null,
+          aborted: event.aborted,
+          willRetry: event.willRetry,
+          tokensBefore: event.result.tokensBefore,
+          summaryLength: summary.length,
+          messageCount: session.messages.length,
+          contextUsage: session.getContextUsage(),
+          model: session.model ? `${session.model.provider}/${session.model.id}` : null,
+        });
+        compactionStartedAt = null;
         userSessionRef?.onCompactionComplete?.();
       } else if (event.errorMessage) {
+        appendCompactionLog({
+          phase: "end",
+          success: false,
+          reason: event.reason,
+          durationMs: compactionStartedAt ? Date.now() - compactionStartedAt : null,
+          aborted: event.aborted,
+          willRetry: event.willRetry,
+          error: event.errorMessage,
+          messageCount: session.messages.length,
+          contextUsage: session.getContextUsage(),
+          model: session.model ? `${session.model.provider}/${session.model.id}` : null,
+        });
+        compactionStartedAt = null;
         console.error(`[compaction] failed for user ${userId}: ${event.errorMessage}`);
       }
     } else if (event.type === "tool_execution_start") {
