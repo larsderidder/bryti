@@ -151,7 +151,8 @@ export async function evaluateToolCall(
   input: GuardrailInput,
   infra?: ModelInfra,
 ): Promise<GuardrailResult> {
-  const { modelRegistry } = infra ?? createModelInfra(config);
+  const resolvedInfra = infra ?? await createModelInfra(config);
+  const { modelRegistry } = resolvedInfra;
 
   // Resolution order: guardrail_model > primary > fallback chain.
   const candidates = [

@@ -1,31 +1,20 @@
 /**
- * Shared model infrastructure: AuthStorage, ModelRegistry, models.json
+ * Shared model infrastructure: ModelRuntime, ModelRegistry, models.json
  * generation, and model string resolution. Used by the main agent, workers,
  * reflection, and the guardrail.
  *
- * This module does three things:
- *   1. Generates models.json from bryti config so pi's ModelRegistry
- *      discovers all configured providers and models.
- *   2. Sets up AuthStorage, bridging Claude CLI credentials and pi auth.json
- *      so every LLM caller gets tokens without extra wiring.
- *   3. Exposes model resolution helpers (resolveModel, resolveFirstModel)
- *      that translate "provider/modelId" config strings into registry Model
- *      objects with fuzzy fallback.
- *
- * These three concerns live together because every LLM-calling component
- * (agent, workers, reflection, guardrail) needs all three: without models.json
- * the registry has nothing to load; without AuthStorage the registry cannot
- * authenticate; without resolution helpers callers cannot turn config strings
- * into actual Model objects.
+ * This module generates models.json from Bryti's config, initializes pi's
+ * model and authentication runtime, and resolves configured provider/model
+ * strings. OAuth credentials come from pi's auth.json; configured API keys
+ * are applied as in-memory runtime overrides and are not written to models.json.
  */
 
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
 import {
-  AuthStorage,
   ModelRegistry,
+  ModelRuntime,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import type { Config } from "./config.js";
@@ -35,7 +24,7 @@ import type { Config } from "./config.js";
 // ---------------------------------------------------------------------------
 
 export interface ModelInfra {
-  authStorage: AuthStorage;
+  modelRuntime: ModelRuntime;
   modelRegistry: ModelRegistry;
   agentDir: string;
 }
@@ -59,13 +48,10 @@ function generateModelsJson(config: Config, agentDir: string): void {
   const providers: Record<string, unknown> = {};
 
   for (const provider of config.models.providers) {
-    // Providers without an api_key use OAuth from ~/.pi/agent/auth.json.
-    // We still need to include them in models.json so custom model IDs
-    // (not yet in SDK built-ins) are discoverable.
-    // Use "oauth" as a placeholder apiKey: pi's auth.json holds the real token
-    // and AuthStorage resolves it at call time, but ModelRegistry requires a
-    // non-empty apiKey field to accept the entry at all.
-    const apiKey = provider.api_key || "oauth";
+    // A non-empty placeholder keeps custom models discoverable. Real API keys
+    // stay in memory instead of models.json (ASVS 13.3.1). OAuth comes from
+    // pi's auth.json.
+    const apiKey = "oauth";
 
     const providerEntry: Record<string, unknown> = {
       api: provider.api || "openai-completions",
@@ -101,137 +87,35 @@ function generateModelsJson(config: Config, agentDir: string): void {
 }
 
 // ---------------------------------------------------------------------------
-// Claude CLI credential bridge
-// ---------------------------------------------------------------------------
-
-/**
- * Claude CLI credential shape in ~/.claude/.credentials.json.
- */
-interface ClaudeCliCredentials {
-  claudeAiOauth?: {
-    accessToken?: string;
-    refreshToken?: string;
-    expiresAt?: number;
-  };
-}
-
-/**
- * Seed AuthStorage with Anthropic credentials from the Claude CLI credential
- * file (~/.claude/.credentials.json) if no Anthropic credential is already
- * present in auth.json.
- *
- * Claude CLI is the primary auth source for users who have it installed.
- * Pi auth.json is used as the fallback (for users who logged in via `pi login`).
- *
- * Once seeded, pi's AuthStorage manages the refresh lifecycle going forward:
- * it will auto-refresh the token using the refresh token when it expires.
- *
- * Credential format conversion:
- *   Claude CLI stores { accessToken, refreshToken, expiresAt } under the
- *   "claudeAiOauth" key. Pi expects { type: "oauth", access, refresh, expires }.
- *   The field names are remapped here; the values are passed through unchanged.
- *
- * This function is called before runtime overrides are applied (setRuntimeApiKey),
- * so an explicit api_key in config always wins over the seeded credential.
- */
-function seedFromClaudeCliIfNeeded(authStorage: AuthStorage): void {
-  // Already have Anthropic creds — nothing to do
-  if (authStorage.has("anthropic")) {
-    return;
-  }
-
-  const claudeCredPath = path.join(os.homedir(), ".claude", ".credentials.json");
-  let raw: string;
-  try {
-    raw = fs.readFileSync(claudeCredPath, "utf-8");
-  } catch {
-    // File doesn't exist or isn't readable — Claude CLI not installed
-    return;
-  }
-
-  let parsed: ClaudeCliCredentials;
-  try {
-    parsed = JSON.parse(raw) as ClaudeCliCredentials;
-  } catch {
-    console.warn("[auth] ~/.claude/.credentials.json is not valid JSON, skipping");
-    return;
-  }
-
-  const creds = parsed.claudeAiOauth;
-  if (!creds?.accessToken || !creds?.refreshToken) {
-    console.warn("[auth] ~/.claude/.credentials.json has no usable claudeAiOauth credentials, skipping");
-    return;
-  }
-
-  // Convert Claude CLI format → pi AuthStorage OAuthCredential format:
-  //   Claude CLI: { accessToken, refreshToken, expiresAt }
-  //   pi:         { type: "oauth", access, refresh, expires }
-  authStorage.set("anthropic", {
-    type: "oauth",
-    access: creds.accessToken,
-    refresh: creds.refreshToken,
-    expires: creds.expiresAt ?? Date.now(),
-  });
-
-  console.log("[auth] Seeded Anthropic credentials from Claude CLI (~/.claude/.credentials.json)");
-}
-
-// ---------------------------------------------------------------------------
 // Infrastructure creation
 // ---------------------------------------------------------------------------
 
 /**
- * Create the auth and model registry infrastructure from config. Generates
- * models.json, sets up AuthStorage with runtime API keys, and initializes
- * ModelRegistry. Shared by everything that talks to an LLM.
- *
- * Auth priority for Anthropic:
- *   1. Claude CLI credentials (~/.claude/.credentials.json) — primary source
- *   2. Pi auth.json (~/.pi/agent/auth.json) — fallback for pi CLI users
- *   3. Explicit api_key in config — always wins as a runtime override
+ * Create the model and authentication infrastructure shared by every caller.
+ * Configured API keys take precedence over credentials in pi's auth.json.
  */
-export function createModelInfra(config: Config, _options: ModelInfraOptions = {}): ModelInfra {
+export async function createModelInfra(
+  config: Config,
+  _options: ModelInfraOptions = {},
+): Promise<ModelInfra> {
   const agentDir = path.join(config.data_dir, ".pi");
   fs.mkdirSync(agentDir, { recursive: true });
 
   generateModelsJson(config, agentDir);
 
-  // Auth: start with ~/.pi/agent/auth.json (pi CLI OAuth creds), then
-  // seed from Claude CLI if no Anthropic credential is present there.
-  // AuthStorage uses file-level locking so concurrent token refreshes are safe.
-  const authStorage = AuthStorage.create();
-
-  // Seed from Claude CLI before applying runtime overrides, so an explicit
-  // api_key in config still wins (setRuntimeApiKey takes precedence).
-  seedFromClaudeCliIfNeeded(authStorage);
+  const modelRuntime = await ModelRuntime.create({
+    modelsPath: path.join(agentDir, "models.json"),
+    allowModelNetwork: false,
+  });
 
   for (const provider of config.models.providers) {
-    const providerEnv = {
-      ...(provider.env ?? {}),
-      ...(provider.proxy ? { HTTPS_PROXY: provider.proxy, HTTP_PROXY: provider.proxy } : {}),
-    };
     if (provider.api_key) {
-      if (Object.keys(providerEnv).length > 0) {
-        authStorage.set(provider.name, {
-          type: "api_key",
-          key: provider.api_key,
-          env: providerEnv,
-        });
-      }
-      authStorage.setRuntimeApiKey(provider.name, provider.api_key);
-    } else if (Object.keys(providerEnv).length > 0 && !authStorage.get(provider.name)) {
-      authStorage.set(provider.name, {
-        type: "api_key",
-        key: "oauth",
-        env: providerEnv,
-      });
+      await modelRuntime.setRuntimeApiKey(provider.name, provider.api_key);
     }
   }
 
-  const modelRegistry = ModelRegistry.create(authStorage, path.join(agentDir, "models.json"));
-  modelRegistry.refresh();
-
-  return { authStorage, modelRegistry, agentDir };
+  const modelRegistry = new ModelRegistry(modelRuntime);
+  return { modelRuntime, modelRegistry, agentDir };
 }
 
 export function createBrytiSettingsManager(

@@ -151,7 +151,7 @@ export async function loadUserSession(
   existingProjectionStore?: ProjectionStore,
   sessionKey = userId,
 ): Promise<UserSession> {
-  const { authStorage, modelRegistry, agentDir } = createModelInfra(config);
+  const { modelRuntime, modelRegistry, agentDir } = await createModelInfra(config);
 
   // --- 1. Model resolution ---
   // Resolve the configured model string to a registry entry. Throws if the
@@ -254,8 +254,7 @@ export async function loadUserSession(
   const { session, extensionsResult } = await createAgentSession({
     cwd: config.data_dir,
     agentDir,
-    authStorage,
-    modelRegistry,
+    modelRuntime,
     model,
     thinkingLevel: config.agent.thinking_level,
     customTools,

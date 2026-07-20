@@ -262,7 +262,7 @@ export async function sdkComplete(
   config: Config,
   messages: CompletionMessage[],
 ): Promise<string> {
-  const { modelRegistry } = createModelInfra(config);
+  const { modelRegistry } = await createModelInfra(config);
 
   // Resolve the model: reflection_model > primary model > first fallback
   const candidates = [

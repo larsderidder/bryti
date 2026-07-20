@@ -336,7 +336,7 @@ async function cmdModelsStatus(dataDir: string): Promise<void> {
   const config = loadConfig(path.join(dataDir, "config.yml"));
   config.data_dir = dataDir;
   const { createModelInfra, resolveModel } = await import("./model-infra.js");
-  const infra = createModelInfra(config);
+  const infra = await createModelInfra(config);
   const candidates = [config.agent.model, ...(config.agent.fallback_models ?? [])];
 
   section("MODELS");

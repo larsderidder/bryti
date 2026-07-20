@@ -163,7 +163,7 @@ export async function spawnWorkerSession(opts: {
     ?? config.tools.workers.thinking_level
     ?? config.agent.thinking_level;
 
-  const { authStorage, modelRegistry, agentDir } = createModelInfra(config);
+  const { modelRuntime, modelRegistry, agentDir } = await createModelInfra(config);
   const modelsDir = path.join(config.data_dir, ".models");
   const resultPath = path.join(workerDir, "result.md");
 
@@ -232,8 +232,7 @@ export async function spawnWorkerSession(opts: {
   const { session } = await createAgentSession({
     cwd: workerDir,
     agentDir,
-    authStorage,
-    modelRegistry,
+    modelRuntime,
     model,
     thinkingLevel: effectiveThinkingLevel,
     tools: [],

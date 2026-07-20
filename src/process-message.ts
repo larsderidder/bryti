@@ -364,7 +364,7 @@ export async function getOrLoadSession(
   const existing = state.sessions.get(sessionKey);
   if (existing) return existing;
 
-  const modelInfra = createModelInfra(state.config);
+  const modelInfra = await createModelInfra(state.config);
 
   const projectionStore = createProjectionStore(userId, state.config.data_dir);
 
