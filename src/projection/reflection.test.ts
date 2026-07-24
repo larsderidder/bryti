@@ -361,17 +361,20 @@ describe("runReflection", () => {
     }
   });
 
-  it("skips when LLM call fails (no server available)", async () => {
+  it("skips when the LLM call fails", async () => {
     const recentTs = new Date(Date.now() - 5 * 60 * 1000).toISOString();
     writeHistory([
       { role: "user", content: "I have a dentist appointment tomorrow at 10", timestamp: recentTs },
       { role: "assistant", content: "Got it!", timestamp: recentTs },
     ]);
 
+    const mockComplete: typeof sdkComplete = async () => {
+      throw new Error("provider unavailable");
+    };
+
     const store = createProjectionStore("12345", tmpDir);
     try {
-      // Config points to localhost:9999 which doesn't exist — should not throw
-      const result = await runReflection(config, "12345", 30, store);
+      const result = await runReflection(config, "12345", 30, store, mockComplete);
       expect(result.skipped).toBe(true);
       expect(result.skipReason).toContain("LLM error");
     } finally {

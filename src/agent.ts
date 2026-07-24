@@ -33,6 +33,10 @@ import { registerToolCapabilities, getToolCapabilities } from "./trust/index.js"
 import { createBrytiSettingsManager, createModelInfra, resolveModel } from "./model-infra.js";
 import { buildSystemPrompt, buildToolSection, SILENT_REPLY_TOKEN, type ToolSummary } from "./system-prompt.js";
 import { quarantineInvalidExtensionTools } from "./tools/schema-validation.js";
+import {
+  configureDynamicToolLoading,
+  createToolSearch,
+} from "./tools/tool-search.js";
 
 // Re-export for backward compatibility with index.ts
 export { SILENT_REPLY_TOKEN };
@@ -170,7 +174,9 @@ export async function loadUserSession(
   const sessDir = userSessionDir(config, sessionKey);
   const isNewUser = !fs.existsSync(sessDir) || fs.readdirSync(sessDir).length === 0;
   const sessionManager = SessionManager.continueRecent(config.data_dir, sessDir);
-  const promptTools: ToolSummary[] = customTools.map((tool) => ({
+  const toolSearch = createToolSearch();
+  const sessionTools = [...customTools, toolSearch.tool];
+  const promptTools: ToolSummary[] = sessionTools.map((tool) => ({
     name: tool.name,
     description: tool.description,
   }));
@@ -257,7 +263,7 @@ export async function loadUserSession(
     modelRuntime,
     model,
     thinkingLevel: config.agent.thinking_level,
-    customTools,
+    customTools: sessionTools,
     resourceLoader: loader,
     sessionManager,
     settingsManager,
@@ -289,27 +295,37 @@ export async function loadUserSession(
     }
   }
 
+  const discoveredExtensionToolNames = new Set(extensionToolNames);
   const schemaIssues = quarantineInvalidExtensionTools(session, extensionToolNames);
+  const quarantinedToolNames = new Set(schemaIssues.map((issue) => issue.toolName));
   if (schemaIssues.length > 0) {
-    const quarantined = [...new Set(schemaIssues.map((issue) => issue.toolName))];
     for (const issue of schemaIssues) {
       console.error(`[extensions] Quarantined tool ${issue.toolName}: ${issue.message}`);
     }
-    for (const toolName of quarantined) {
+    for (const toolName of quarantinedToolNames) {
       extensionToolNames.delete(toolName);
     }
   }
 
   // --- 4. Tool registration ---
-  // Rebuild promptTools from the fully resolved tool list (custom tools +
-  // extension tools) so the system prompt lists every tool the model can call.
-  promptTools.splice(
-    0,
-    promptTools.length,
-    ...session.getAllTools().map((tool) => ({
-      name: tool.name,
-      description: tool.description,
-    })),
+  // Keep Bryti's core tools active and defer extension tools until search_tools
+  // finds a relevant capability. Tool activation is additive, preserving pi's
+  // provider prompt cache while avoiding dozens of unused schemas per request.
+  configureDynamicToolLoading(
+    toolSearch,
+    session,
+    discoveredExtensionToolNames,
+    (activeTools) => {
+      promptTools.splice(
+        0,
+        promptTools.length,
+        ...activeTools.map((tool) => ({
+          name: tool.name,
+          description: tool.description,
+        })),
+      );
+    },
+    quarantinedToolNames,
   );
   await session.reload();
 

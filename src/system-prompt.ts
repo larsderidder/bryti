@@ -116,9 +116,9 @@ function buildExtensionsSection(): string {
     `Tools marked "(extension)" come from TypeScript files in your extensions directory. ` +
     `You can read, rewrite, replace, or create them using the \`read\` and \`file_write\` tools.\n\n` +
     `Extensions are loaded from: data/files/extensions/\n\n` +
-    `Some extensions only register their tools when a required environment variable is set. ` +
-    `If a tool is missing that you expect to be there, the extension is likely not configured. ` +
-    `Read the extension file to find out which env var it needs, then tell the user to add it to .env and restart.\n\n` +
+    `Extension tools are loaded on demand. If a capability is missing, use \`search_tools\` first. ` +
+    `If no matching tool is found, the extension may require an environment variable. ` +
+    `Read the extension file to find out which variable it needs, then tell the user to add it to .env and restart.\n\n` +
     `Only create extensions when the user asks for capabilities you don't have. ` +
     `Don't create them unprompted. Explain what the extension will do before writing it.\n\n` +
     `Before writing or modifying an extension, read the guide:\n` +
