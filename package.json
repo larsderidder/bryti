@@ -45,7 +45,7 @@
     "@types/markdown-it": "^14.1.2",
     "@whiskeysockets/baileys": "^7.0.0-rc.9",
     "axios": "^1.13.5",
-    "better-sqlite3": "^12.6.2",
+    "better-sqlite3": "^13.0.1",
     "croner": "^9.0.0",
     "grammy": "^1.35.0",
     "linkedom": "^0.18.12",
