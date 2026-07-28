@@ -235,7 +235,11 @@ export async function spawnWorkerSession(opts: {
     modelRuntime,
     model,
     thinkingLevel: effectiveThinkingLevel,
-    tools: [],
+    // In pi SDK 0.81+, `tools` is an allowlist for both built-in and custom
+    // tools. An empty array therefore disables the worker's custom tools too.
+    // Allow only the scoped tools assembled above; this keeps built-in file and
+    // shell access disabled while exposing search, fetch, and scoped file I/O.
+    tools: workerTools.map((tool) => tool.name),
     customTools: workerTools,
     resourceLoader: loader,
     sessionManager: SessionManager.inMemory(workerDir),
@@ -370,6 +374,30 @@ export async function spawnWorkerSession(opts: {
           .pop() as Record<string, unknown> | undefined;
         if (lastAssistant?.stopReason === "error") {
           promptError = new Error(String(lastAssistant.errorMessage ?? "Model error"));
+        }
+      }
+
+      if (!promptError) {
+        // A normal model stop is not sufficient: the worker contract requires
+        // a non-empty result.md. Research requests must also gather evidence
+        // through web_search or fetch_url rather than returning unsupported
+        // prose without using their tools.
+        let resultIsUsable = false;
+        try {
+          resultIsUsable = fs.statSync(resultPath).size > 0
+            && fs.readFileSync(resultPath, "utf-8").trim().length > 0;
+        } catch {
+          resultIsUsable = false;
+        }
+
+        if (!resultIsUsable) {
+          promptError = new Error("Worker stopped without writing a non-empty result.md");
+        } else if (
+          toolNames.includes("web_search")
+          && (tracker.progress.tool_calls_by_name.web_search ?? 0) === 0
+          && (tracker.progress.tool_calls_by_name.fetch_url ?? 0) === 0
+        ) {
+          promptError = new Error("Research worker stopped without using web_search or fetch_url");
         }
       }
 

@@ -39,6 +39,7 @@ const mockSteer = vi.fn().mockResolvedValue(undefined);
 let mockPromptImpl: () => Promise<void> = async () => {};
 let mockMessages: unknown[] = [];
 let mockCustomToolNames: string[] = [];
+let mockAllowedToolNames: string[] | undefined;
 
 // Mock embed so tests never load the embedding model (slow, 300MB download)
 vi.mock("../memory/embeddings.js", () => ({
@@ -48,12 +49,30 @@ vi.mock("../memory/embeddings.js", () => ({
   disposeEmbeddings: vi.fn().mockResolvedValue(undefined),
 }));
 
+vi.mock("../model-infra.js", () => {
+  const model = { provider: "test-provider", id: "test-model" };
+  return {
+    createBrytiSettingsManager: vi.fn().mockReturnValue({}),
+    createModelInfra: vi.fn().mockResolvedValue({
+      modelRuntime: {},
+      modelRegistry: {},
+      agentDir: "/tmp/test-agent",
+    }),
+    resolveModel: vi.fn().mockReturnValue(model),
+    resolveFirstModel: vi.fn().mockReturnValue(model),
+  };
+});
+
 vi.mock("@earendil-works/pi-coding-agent", async (importActual) => {
   const actual = await importActual<typeof import("@earendil-works/pi-coding-agent")>();
   return {
     ...actual,
-    createAgentSession: vi.fn().mockImplementation(async (options: { customTools?: Array<{ name: string }> }) => {
+    createAgentSession: vi.fn().mockImplementation(async (options: {
+      customTools?: Array<{ name: string }>;
+      tools?: string[];
+    }) => {
       mockCustomToolNames = (options.customTools ?? []).map((tool) => tool.name);
+      mockAllowedToolNames = options.tools;
       return {
       session: {
         get messages() { return mockMessages; },
@@ -215,7 +234,10 @@ describe("spawnWorkerSession completion lifecycle", () => {
     config = makeConfig(tmpDir);
     mockMessages = [];
     mockCustomToolNames = [];
-    mockPromptImpl = async () => {};
+    mockAllowedToolNames = undefined;
+    mockPromptImpl = async () => {
+      fs.writeFileSync(path.join(workerDir, "result.md"), "# Result\n\nDone.\n", "utf-8");
+    };
     mockAbort.mockClear();
     mockDispose.mockClear();
     mockSteer.mockClear();
@@ -257,10 +279,39 @@ describe("spawnWorkerSession completion lifecycle", () => {
         toolNames: ["web_search"],
         memoryStore: memStore,
         registry,
-        timeoutMs: 1000,
+        timeoutMs: 30_000,
       });
 
       expect(mockCustomToolNames).toContain("fetch_url");
+    } finally {
+      memStore.close();
+    }
+  });
+
+  it("allowlists the worker custom tools instead of disabling all tools", async () => {
+    const registry = createWorkerRegistry();
+    registerWorker(registry, "w-test01", "tool allowlist task");
+    const memStore = createMemoryStore("user-tools", tmpDir);
+
+    try {
+      await spawnWorkerSession({
+        config,
+        workerId: "w-test01",
+        workerDir,
+        task: "tool allowlist task",
+        modelOverride: undefined,
+        toolNames: [],
+        memoryStore: memStore,
+        registry,
+        timeoutMs: 30_000,
+      });
+
+      expect(mockAllowedToolNames).toEqual(mockCustomToolNames);
+      expect(mockAllowedToolNames).toContain("fetch_url");
+      expect(mockAllowedToolNames).toContain("write_file");
+      expect(mockAllowedToolNames).toContain("read_file");
+      expect(mockAllowedToolNames).not.toContain("bash");
+      expect(mockAllowedToolNames).not.toContain("write");
     } finally {
       memStore.close();
     }
@@ -354,6 +405,90 @@ describe("spawnWorkerSession completion lifecycle", () => {
       expect(triggerCalls).toHaveLength(1);
       expect(triggerCalls[0][0].id).toBe("proj-1");
       expect(triggerCalls[0][0].summary).toBe("Check worker results");
+    } finally {
+      memStore.close();
+    }
+  });
+
+  it("marks a normal model stop as failed when result.md is missing", async () => {
+    mockPromptImpl = async () => {};
+
+    const registry = createWorkerRegistry();
+    registerWorker(registry, "w-test01", "missing result task");
+    const memStore = createMemoryStore("user-missing-result", tmpDir);
+
+    try {
+      await spawnWorkerSession({
+        config,
+        workerId: "w-test01",
+        workerDir,
+        task: "missing result task",
+        modelOverride: undefined,
+        toolNames: [],
+        memoryStore: memStore,
+        registry,
+        timeoutMs: 30_000,
+      });
+
+      const status = readStatusFile(workerDir);
+      expect(status.status).toBe("failed");
+      expect(status.error).toContain("non-empty result.md");
+    } finally {
+      memStore.close();
+    }
+  });
+
+  it("marks a normal model stop as failed when result.md is empty", async () => {
+    mockPromptImpl = async () => {
+      fs.writeFileSync(path.join(workerDir, "result.md"), "   \n", "utf-8");
+    };
+
+    const registry = createWorkerRegistry();
+    registerWorker(registry, "w-test01", "empty result task");
+    const memStore = createMemoryStore("user-empty-result", tmpDir);
+
+    try {
+      await spawnWorkerSession({
+        config,
+        workerId: "w-test01",
+        workerDir,
+        task: "empty result task",
+        modelOverride: undefined,
+        toolNames: [],
+        memoryStore: memStore,
+        registry,
+        timeoutMs: 30_000,
+      });
+
+      const status = readStatusFile(workerDir);
+      expect(status.status).toBe("failed");
+      expect(status.error).toContain("non-empty result.md");
+    } finally {
+      memStore.close();
+    }
+  });
+
+  it("rejects a research report produced without research tool calls", async () => {
+    const registry = createWorkerRegistry();
+    registerWorker(registry, "w-test01", "unsupported research task");
+    const memStore = createMemoryStore("user-zero-tool-research", tmpDir);
+
+    try {
+      await spawnWorkerSession({
+        config,
+        workerId: "w-test01",
+        workerDir,
+        task: "unsupported research task",
+        modelOverride: undefined,
+        toolNames: ["web_search"],
+        memoryStore: memStore,
+        registry,
+        timeoutMs: 30_000,
+      });
+
+      const status = readStatusFile(workerDir);
+      expect(status.status).toBe("failed");
+      expect(status.error).toContain("without using web_search or fetch_url");
     } finally {
       memStore.close();
     }
