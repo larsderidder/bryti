@@ -1,27 +1,22 @@
-# Stage 1: Build
-FROM node:22-alpine AS builder
+ARG NODE_IMAGE=node:22.22.0-bookworm-slim@sha256:dd9d21971ec4395903fa6143c2b9267d048ae01ca6d3ea96f16cb30df6187d94
+
+FROM ${NODE_IMAGE} AS builder
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 COPY tsconfig.json ./
+COPY defaults ./defaults
 COPY src ./src
-RUN npm run build
+RUN npm run build && npm prune --omit=dev
 
-# Stage 2: Runtime
-FROM node:22-alpine
+FROM ${NODE_IMAGE}
 WORKDIR /app
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/node_modules ./node_modules
 COPY package.json ./
 
-# Create non-root user
-RUN addgroup -g 1000 -S bryti && \
-    adduser -u 1000 -S bryti -G bryti
-USER bryti
-
-# Data directory (config, memory, sessions, logs) is a volume mount.
-# The embedding model downloads here on first run (~300MB).
+USER node
 VOLUME /data
 ENV BRYTI_DATA_DIR=/data
 
-CMD ["node", "dist/index.js"]
+CMD ["node", "dist/cli.js", "serve"]
