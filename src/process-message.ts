@@ -641,10 +641,43 @@ export async function processMessage(
     const messageCountBefore = session.messages.length;
 
     const promptStart = Date.now();
-    // Guard against stuck model or tool calls. session.abort() is best-effort,
-    // so the timeout must resolve this turn even if the SDK await never unwinds.
-    const PROMPT_TIMEOUT_MS = 5 * 60 * 1000;
+    // Pi already retries stalled provider requests. This watchdog is only for
+    // a completely inactive agent loop, including a tool that ignores abort.
+    // Reset it on every session event so legitimate long-running tasks are not
+    // killed merely because their total runtime exceeds the timeout.
+    const PROMPT_INACTIVITY_TIMEOUT_MS = 6 * 60 * 1000;
     let promptTimeout: ReturnType<typeof setTimeout> | null = null;
+    let promptSettled = false;
+    let resolvePromptTimeout!: (result: "timeout") => void;
+    const timeoutPromise = new Promise<"timeout">((resolve) => {
+      resolvePromptTimeout = resolve;
+    });
+    const armPromptTimeout = () => {
+      if (promptSettled) {
+        return;
+      }
+      if (promptTimeout) {
+        clearTimeout(promptTimeout);
+      }
+      promptTimeout = setTimeout(() => {
+        console.error(
+          `[agent] Prompt for ${sessionKey} had no activity for ` +
+          `${PROMPT_INACTIVITY_TIMEOUT_MS / 1000}s, aborting`,
+        );
+        void session.abort().catch((err) => {
+          console.warn(
+            `[agent] Failed to abort inactive prompt for ${sessionKey}:`,
+            (err as Error).message,
+          );
+        });
+        resolvePromptTimeout("timeout");
+      }, PROMPT_INACTIVITY_TIMEOUT_MS);
+    };
+    const unsubscribePromptActivity = session.subscribe(() => {
+      armPromptTimeout();
+    });
+    armPromptTimeout();
+
     const promptPromise = promptWithFallback(
       session,
       msg.text,
@@ -655,24 +688,18 @@ export async function processMessage(
     );
     const promptResult = await Promise.race([
       promptPromise.then(() => "completed" as const),
-      new Promise<"timeout">((resolve) => {
-        promptTimeout = setTimeout(() => {
-          console.error(`[agent] Prompt for ${sessionKey} exceeded ${PROMPT_TIMEOUT_MS / 1000}s, aborting`);
-          try {
-            void session.abort();
-          } catch (err) {
-            console.warn(`[agent] Failed to abort timed-out prompt for ${sessionKey}:`, (err as Error).message);
-          }
-          resolve("timeout");
-        }, PROMPT_TIMEOUT_MS);
-      }),
+      timeoutPromise,
     ]);
-    if (promptTimeout) clearTimeout(promptTimeout);
+    promptSettled = true;
+    if (promptTimeout) {
+      clearTimeout(promptTimeout);
+    }
+    unsubscribePromptActivity();
 
     // Avoid unhandled rejections if the timed-out SDK call eventually finishes
     // after this request has already been evicted from the session cache.
     promptPromise.catch((err) => {
-      console.warn(`[agent] Timed-out prompt for ${sessionKey} later rejected:`, (err as Error).message);
+      console.warn(`[agent] Inactive prompt for ${sessionKey} later rejected:`, (err as Error).message);
     });
 
     // If the prompt was aborted due to timeout, the in-memory session state

@@ -160,6 +160,28 @@ describe("MessageQueue", () => {
     expect(channels).toContain("chan1");
     expect(channels).toContain("chan2");
   });
+
+  it("isolates Telegram topics within the same group", async () => {
+    let releaseTopic!: () => void;
+    const controlled = vi.fn(async (msg: IncomingMessage) => {
+      processed.push(msg);
+      if (msg.channelThreadId === "32") {
+        await new Promise<void>((resolve) => {
+          releaseTopic = resolve;
+        });
+      }
+    });
+    const q = new MessageQueue(controlled, rejectFn);
+
+    q.enqueue({ ...makeMsg("long task", "group"), channelThreadId: "32" });
+    await vi.waitUntil(() => controlled.mock.calls.length === 1);
+    q.enqueue({ ...makeMsg("other topic", "group"), channelThreadId: "48" });
+
+    await vi.waitUntil(() => processed.length === 2, { timeout: 2000 });
+    expect(processed[1].text).toBe("other topic");
+
+    releaseTopic();
+  });
 });
 
 const MAX_DEPTH_DEFAULT = 10;

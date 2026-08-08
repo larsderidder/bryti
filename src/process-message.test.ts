@@ -118,12 +118,17 @@ function makeBridge(): ChannelBridge & {
   };
 }
 
+type TestUserSession = UserSession & {
+  emitEvent(event: unknown): void;
+};
+
 /** Build a minimal mock UserSession whose session.prompt() resolves immediately. */
 function makeUserSession(
   userId: string,
   responseMessages: Array<{ role: string; content: unknown; provider?: string; model?: string; stopReason?: string; usage?: unknown }> = [],
-): UserSession {
+): TestUserSession {
   const messages: unknown[] = [...responseMessages];
+  const listeners = new Set<(event: unknown) => void>();
   return {
     userId,
     sessionDir: "/tmp/test-session",
@@ -137,13 +142,22 @@ function makeUserSession(
       async abort() {},
       async reload() {},
       dispose() {},
+      subscribe(listener: (event: unknown) => void) {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
       agent: { replaceMessages(_msgs: unknown[]) {} },
       getContextUsage() { return { percent: 10, tokens: 1000, contextWindow: 10000 }; },
       async refreshSystemPrompt() {},
     } as any,
     dispose: vi.fn(),
     onCompactionComplete: undefined,
-  } as unknown as UserSession;
+    emitEvent(event: unknown) {
+      for (const listener of listeners) {
+        listener(event);
+      }
+    },
+  } as unknown as TestUserSession;
 }
 
 /** Helper to build an assistant message as the SDK would return it. */
@@ -575,7 +589,30 @@ describe("processMessage pipeline", () => {
     expect(texts.some((t) => t.includes("went wrong"))).toBe(true);
   });
 
-  it("times out stuck prompts and evicts the session", async () => {
+  it("does not time out an active prompt based on total runtime", async () => {
+    vi.useFakeTimers();
+    const session = makeUserSession("12345", []);
+    let finishPrompt!: () => void;
+    vi.spyOn(session.session, "prompt").mockImplementation(() => new Promise<void>((resolve) => {
+      finishPrompt = resolve;
+    }));
+    const state = makeState(config, session, tmpDir);
+    const bridge = state.bridges[0] as ReturnType<typeof makeBridge>;
+
+    const processing = processMessage(state, incomingMsg("long task"));
+    await vi.advanceTimersByTimeAsync(4 * 60 * 1000);
+    session.emitEvent({ type: "tool_execution_start", toolName: "bash" });
+    await vi.advanceTimersByTimeAsync(4 * 60 * 1000);
+    session.emitEvent({ type: "tool_execution_end", toolName: "bash" });
+    (session.session.messages as unknown[]).push(assistantMsg("Done"));
+    finishPrompt();
+    await processing;
+
+    expect(bridge.sent.some((s) => s.text.includes("took too long"))).toBe(false);
+    expect(state.sessions.has("12345")).toBe(true);
+  });
+
+  it("times out inactive prompts and evicts the session", async () => {
     vi.useFakeTimers();
     const session = makeUserSession("12345", []);
     vi.spyOn(session.session, "prompt").mockImplementation(() => new Promise(() => {}));
@@ -583,7 +620,7 @@ describe("processMessage pipeline", () => {
     const bridge = state.bridges[0] as ReturnType<typeof makeBridge>;
 
     const processing = processMessage(state, incomingMsg("hello"));
-    await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+    await vi.advanceTimersByTimeAsync(6 * 60 * 1000);
     await processing;
 
     expect(bridge.sent.some((s) => s.text.includes("took too long"))).toBe(true);

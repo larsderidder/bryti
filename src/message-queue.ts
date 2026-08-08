@@ -44,6 +44,20 @@ interface ChannelQueue {
 }
 
 /**
+ * Return the serialization key for one independent conversation.
+ *
+ * Telegram topics share a channel ID, but must not block each other. Bryti
+ * threads use the same isolation when no platform topic is available.
+ */
+function conversationKey(msg: IncomingMessage): string {
+  const threadId = msg.channelThreadId ?? msg.threadId;
+  if (!threadId) {
+    return msg.channelId;
+  }
+  return `${msg.channelId}::${threadId}`;
+}
+
+/**
  * Sliding window rate limiter. Tracks timestamps of recent messages per user
  * and rejects when the limit is exceeded.
  */
@@ -112,7 +126,7 @@ export class MessageQueue {
    * draining immediately. Rate-limited per user (10 messages/minute).
    */
   enqueue(msg: IncomingMessage): void {
-    const key = msg.channelId;
+    const key = conversationKey(msg);
 
     // Rate limiting: skip for internal messages (worker triggers, scheduler)
     const rawObj = msg.raw as Record<string, unknown> | null | undefined;
