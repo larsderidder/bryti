@@ -51,6 +51,7 @@ import { WebE2EEBridge } from "./channels/web_e2ee.js";
 import { withDurableOutbound } from "./channels/outbound-queue.js";
 import { createScheduler } from "./scheduler.js";
 import { MessageQueue } from "./message-queue.js";
+import { getActiveThread } from "./threads.js";
 import type { IncomingMessage, ChannelBridge } from "./channels/types.js";
 import { createTrustStore } from "./trust/index.js";
 import { createUsageTracker } from "./usage.js";
@@ -193,6 +194,9 @@ async function startApp(onRequestRestart?: () => void): Promise<RunningApp> {
         "I'm a bit overwhelmed right now. Please wait a moment and try again.",
       );
     },
+    undefined,
+    undefined,
+    (userId) => getActiveThread(config.data_dir, userId),
   );
 
   // ---------------------------------------------------------------------------

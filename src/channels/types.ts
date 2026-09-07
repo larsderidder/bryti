@@ -46,6 +46,17 @@ export interface IncomingMessage {
   replyMode?: ReplyMode;
 }
 
+/** Distinguish Bryti-generated events from platform messages with a raw type. */
+export function isInternalMessage(msg: IncomingMessage): boolean {
+  const type = (msg.raw as { type?: unknown } | null | undefined)?.type;
+  return type === "worker_trigger"
+    || type === "compaction_resume"
+    || type === "cron"
+    || type === "projection_exact_check"
+    || type === "event"
+    || type === "restart_verification";
+}
+
 export interface SendOpts {
   parseMode?: "markdown" | "html" | "plain";
   /** Platform-specific thread/topic ID inside channel, when replying in grouped channels. */

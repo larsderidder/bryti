@@ -35,6 +35,7 @@ import { createProjectionStore } from "./projection/index.js";
 import { createModelInfra } from "./model-infra.js";
 import type { Scheduler } from "./scheduler.js";
 import type { AudioAttachment, IncomingMessage, ChannelBridge } from "./channels/types.js";
+import { isInternalMessage } from "./channels/types.js";
 import type { VoiceService } from "./voice.js";
 import {
   createTrustStore,
@@ -56,6 +57,11 @@ import {
   writePendingCheckpoint,
   deletePendingCheckpoint,
 } from "./crash-recovery.js";
+import {
+  PROMPT_INACTIVITY_TIMEOUT_MS,
+  runPromptWithActivityWatchdog,
+} from "./prompt-lifecycle.js";
+import { acquireSessionTurn } from "./compaction/proactive.js";
 
 // ---------------------------------------------------------------------------
 // AppState
@@ -582,8 +588,10 @@ export async function processMessage(
 
   await getBridge(state, msg.platform).sendTyping(msg.channelId, sendOptsFor(msg));
 
+  let releaseSessionTurn: (() => void) | undefined;
   try {
     const userSession = await getOrLoadSession(state, msg);
+    releaseSessionTurn = await acquireSessionTurn(userSession);
     const sessionKey = getSessionKey(msg.userId, msg.threadId ?? DEFAULT_THREAD_ID);
     if (state.recoveredSessions.has(sessionKey)) {
       state.recoveredSessions.delete(sessionKey);
@@ -594,9 +602,7 @@ export async function processMessage(
     }
     const { session } = userSession;
 
-    const rawObj = msg.raw as Record<string, unknown> | null | undefined;
-    const schedulerType = rawObj?.type as string | undefined;
-    const isSchedulerMessage = schedulerType != null;
+    const isSchedulerMessage = isInternalMessage(msg);
 
     if (!isSchedulerMessage) {
       userSession.lastUserMessageAt = Date.now();
@@ -641,76 +647,46 @@ export async function processMessage(
     const messageCountBefore = session.messages.length;
 
     const promptStart = Date.now();
-    // Pi already retries stalled provider requests. This watchdog is only for
-    // a completely inactive agent loop, including a tool that ignores abort.
-    // Reset it on every session event so legitimate long-running tasks are not
-    // killed merely because their total runtime exceeds the timeout.
-    const PROMPT_INACTIVITY_TIMEOUT_MS = 6 * 60 * 1000;
-    let promptTimeout: ReturnType<typeof setTimeout> | null = null;
-    let promptSettled = false;
-    let resolvePromptTimeout!: (result: "timeout") => void;
-    const timeoutPromise = new Promise<"timeout">((resolve) => {
-      resolvePromptTimeout = resolve;
-    });
-    const armPromptTimeout = () => {
-      if (promptSettled) {
-        return;
-      }
-      if (promptTimeout) {
-        clearTimeout(promptTimeout);
-      }
-      promptTimeout = setTimeout(() => {
+    const promptResult = await runPromptWithActivityWatchdog({
+      sessionKey,
+      subscribe: (listener) => session.subscribe(listener),
+      abort: () => session.abort(),
+      operation: (controls) => promptWithFallback(
+        session,
+        msg.text,
+        state.config,
+        userSession.modelRegistry,
+        msg.userId,
+        msg.images,
+        controls,
+      ),
+      onInactive: (key, timeoutMs) => {
         console.error(
-          `[agent] Prompt for ${sessionKey} had no activity for ` +
-          `${PROMPT_INACTIVITY_TIMEOUT_MS / 1000}s, aborting`,
+          `[agent] Prompt for ${key} had no activity for ` +
+          `${timeoutMs / 1000}s, aborting`,
         );
-        void session.abort().catch((err) => {
-          console.warn(
-            `[agent] Failed to abort inactive prompt for ${sessionKey}:`,
-            (err as Error).message,
-          );
-        });
-        resolvePromptTimeout("timeout");
-      }, PROMPT_INACTIVITY_TIMEOUT_MS);
-    };
-    const unsubscribePromptActivity = session.subscribe(() => {
-      armPromptTimeout();
-    });
-    armPromptTimeout();
-
-    const promptPromise = promptWithFallback(
-      session,
-      msg.text,
-      state.config,
-      userSession.modelRegistry,
-      msg.userId,
-      msg.images,
-    );
-    const promptResult = await Promise.race([
-      promptPromise.then(() => "completed" as const),
-      timeoutPromise,
-    ]);
-    promptSettled = true;
-    if (promptTimeout) {
-      clearTimeout(promptTimeout);
-    }
-    unsubscribePromptActivity();
-
-    // Avoid unhandled rejections if the timed-out SDK call eventually finishes
-    // after this request has already been evicted from the session cache.
-    promptPromise.catch((err) => {
-      console.warn(`[agent] Inactive prompt for ${sessionKey} later rejected:`, (err as Error).message);
+      },
+      onAbortError: (key, err) => {
+        console.warn(
+          `[agent] Failed to abort inactive prompt for ${key}:`,
+          (err as Error).message,
+        );
+      },
+      onLateRejection: (key, err) => {
+        console.warn(`[agent] Inactive prompt for ${key} later rejected:`, (err as Error).message);
+      },
+      timeoutMs: PROMPT_INACTIVITY_TIMEOUT_MS,
     });
 
     // If the prompt was aborted due to timeout, the in-memory session state
     // is unreliable (partially updated). Evict it from the cache so the next
     // message reloads from the JSONL file (the source of truth).
-    if (promptResult === "timeout") {
+    if (promptResult.status === "timeout") {
       console.log(`[agent] Evicting session for ${sessionKey} after timeout abort`);
       try {
         await getBridge(state, msg.platform).sendMessage(
           msg.channelId,
-          "One of my tools took too long and I had to stop. Please resend your message.",
+          "This request took too long without any activity, so I stopped it. Please resend your message.",
           sendOptsFor(msg),
         );
       } catch {
@@ -838,6 +814,7 @@ export async function processMessage(
       "Something went wrong processing your message. Please try again.",
     );
   } finally {
+    releaseSessionTurn?.();
     deletePendingCheckpoint(state.config, msg.userId);
   }
 }

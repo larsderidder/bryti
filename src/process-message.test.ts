@@ -22,6 +22,7 @@ import { createTrustStore } from "./trust/index.js";
 import type { ChannelBridge, IncomingMessage } from "./channels/types.js";
 import type { UserSession } from "./agent.js";
 import type { Config } from "./config.js";
+import { tryCompact } from "./compaction/proactive.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -129,14 +130,17 @@ function makeUserSession(
 ): TestUserSession {
   const messages: unknown[] = [...responseMessages];
   const listeners = new Set<(event: unknown) => void>();
+  const model = { provider: "test-provider", id: "test-model", api: "openai-completions" };
   return {
     userId,
     sessionDir: "/tmp/test-session",
     lastUserMessageAt: 0,
     extensionErrors: [],
     projectionStore: { close: () => {} } as any,
-    modelRegistry: {} as any,
+    modelRegistry: { find: () => model } as any,
     session: {
+      model,
+      setModel: vi.fn().mockResolvedValue(undefined),
       get messages() { return messages; },
       async prompt() {},
       async abort() {},
@@ -589,6 +593,55 @@ describe("processMessage pipeline", () => {
     expect(texts.some((t) => t.includes("went wrong"))).toBe(true);
   });
 
+  it("reserves the session during prompt preparation, before streaming starts", async () => {
+    vi.useFakeTimers();
+    const userSession = makeUserSession("12345", Array.from({ length: 6 }, () => assistantMsg("old")));
+    const compact = vi.fn().mockResolvedValue(undefined);
+    userSession.session.compact = compact;
+    let finishReload!: () => void;
+    vi.spyOn(userSession.session, "reload").mockImplementation(() => new Promise<void>((resolve) => {
+      finishReload = resolve;
+    }));
+    const state = makeState(config, userSession, tmpDir);
+    const processing = processMessage(state, incomingMsg("hello"));
+    await vi.advanceTimersByTimeAsync(0);
+
+    try {
+      await tryCompact(userSession, "nightly");
+      expect(compact).not.toHaveBeenCalled();
+    } finally {
+      finishReload();
+      await processing;
+    }
+    await tryCompact(userSession, "nightly");
+    expect(compact).toHaveBeenCalledOnce();
+  });
+
+  it("waits for proactive compaction before reloading or repairing the session", async () => {
+    vi.useFakeTimers();
+    const userSession = makeUserSession("12345", Array.from({ length: 6 }, () => assistantMsg("old")));
+    let finishCompact!: () => void;
+    userSession.session.compact = vi.fn(() => new Promise((resolve) => {
+      finishCompact = () => resolve({} as Awaited<ReturnType<typeof userSession.session.compact>>);
+    }));
+    const reload = vi.spyOn(userSession.session, "reload");
+    const repair = vi.spyOn(userSession.session.agent, "replaceMessages");
+    const compacting = tryCompact(userSession, "nightly");
+    const state = makeState(config, userSession, tmpDir);
+    const processing = processMessage(state, incomingMsg("hello"));
+    await vi.advanceTimersByTimeAsync(0);
+
+    try {
+      expect(reload).not.toHaveBeenCalled();
+      expect(repair).not.toHaveBeenCalled();
+    } finally {
+      finishCompact();
+      await compacting;
+      await processing;
+    }
+    expect(reload).toHaveBeenCalledOnce();
+  });
+
   it("does not time out an active prompt based on total runtime", async () => {
     vi.useFakeTimers();
     const session = makeUserSession("12345", []);
@@ -637,5 +690,22 @@ describe("processMessage pipeline", () => {
 
     await expect(processMessage(state, incomingMsg("hello"))).resolves.not.toThrow();
     expect(bridge.sent.some((s) => s.text.includes("went wrong"))).toBe(true);
+  });
+
+  it("cleans up the inactivity watchdog when a prompt fails before timeout", async () => {
+    vi.useFakeTimers();
+    const session = makeUserSession("12345", []);
+    vi.spyOn(session.session, "prompt").mockRejectedValue(new Error("network failure"));
+    const abortSpy = vi.spyOn(session.session, "abort");
+    const state = makeState(config, session, tmpDir);
+    const bridge = state.bridges[0] as ReturnType<typeof makeBridge>;
+
+    await processMessage(state, incomingMsg("hello"));
+    await vi.advanceTimersByTimeAsync(6 * 60 * 1000);
+    session.emitEvent({ type: "tool_execution_start", toolName: "bash" });
+    await vi.advanceTimersByTimeAsync(6 * 60 * 1000);
+
+    expect(bridge.sent.some((s) => s.text.includes("went wrong"))).toBe(true);
+    expect(abortSpy).not.toHaveBeenCalled();
   });
 });

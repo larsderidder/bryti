@@ -43,11 +43,74 @@ describe("MessageQueue", () => {
 
     await vi.waitUntil(() => calls === 1);
     expect(processed).toHaveLength(1);
-    expect(q.isProcessing("chan1")).toBe(true);
+    expect(q.isProcessing("user1")).toBe(true);
 
     release();
     await vi.waitUntil(() => processed.length === 2);
     expect(processed[1].text).toBe("second");
+  });
+
+  it("queues worker completions behind private messages in the same session", async () => {
+    let release!: () => void;
+    const controlled = vi.fn(async (msg: IncomingMessage) => {
+      processed.push(msg);
+      if (msg.text === "user message") {
+        await new Promise<void>((resolve) => { release = resolve; });
+      }
+    });
+    const q = new MessageQueue(controlled, rejectFn);
+
+    q.enqueue(makeMsg("user message"));
+    q.enqueue({ ...makeMsg("worker result"), threadId: "main", raw: { type: "worker_trigger" } });
+
+    try {
+      expect(processed.map((msg) => msg.text)).toEqual(["user message"]);
+    } finally {
+      release();
+    }
+    await vi.waitUntil(() => processed.length === 2);
+  });
+
+  it("serializes the same session across channels without merging their replies", async () => {
+    let release!: () => void;
+    const controlled = vi.fn(async (msg: IncomingMessage) => {
+      processed.push(msg);
+      if (msg.text === "first") {
+        await new Promise<void>((resolve) => { release = resolve; });
+      }
+    });
+    const q = new MessageQueue(controlled, rejectFn);
+
+    q.enqueue(makeMsg("first"));
+    q.enqueue(makeMsg("second", "chan2"));
+    q.enqueue(makeMsg("third"));
+
+    try {
+      expect(processed.map((msg) => msg.text)).toEqual(["first"]);
+    } finally {
+      release();
+    }
+    await vi.waitUntil(() => processed.length === 3);
+    expect(processed.map((msg) => msg.channelId)).toEqual(["chan1", "chan2", "chan1"]);
+  });
+
+  it("does not merge worker notifications with queued user messages", async () => {
+    let release!: () => void;
+    const controlled = vi.fn(async (msg: IncomingMessage) => {
+      processed.push(msg);
+      if (msg.text === "first") {
+        await new Promise<void>((resolve) => { release = resolve; });
+      }
+    });
+    const q = new MessageQueue(controlled, rejectFn);
+
+    q.enqueue({ ...makeMsg("first"), threadId: "main" });
+    q.enqueue({ ...makeMsg("worker result"), threadId: "main", raw: { type: "worker_trigger" } });
+    q.enqueue({ ...makeMsg("user message"), threadId: "main" });
+    release();
+
+    await vi.waitUntil(() => processed.length >= 2);
+    expect(processed.map((msg) => msg.text)).toEqual(["first", "worker result", "user message"]);
   });
 
   it("rejects messages when queue is full", async () => {
@@ -137,20 +200,20 @@ describe("MessageQueue", () => {
     });
 
     const q = new MessageQueue(blocked, rejectFn);
-    expect(q.queueDepth("chan1")).toBe(0);
+    expect(q.queueDepth("user1")).toBe(0);
 
     q.enqueue(makeMsg("first"));
     await vi.waitUntil(() => blocked.mock.calls.length === 1);
 
     q.enqueue(makeMsg("second"));
     q.enqueue(makeMsg("third"));
-    expect(q.queueDepth("chan1")).toBe(2);
+    expect(q.queueDepth("user1")).toBe(2);
 
     release();
-    await vi.waitUntil(() => q.queueDepth("chan1") === 0);
+    await vi.waitUntil(() => q.queueDepth("user1") === 0);
   });
 
-  it("isolates queues by channelId", async () => {
+  it("preserves reply destinations across channels", async () => {
     const q = new MessageQueue(processFn, rejectFn);
     q.enqueue(makeMsg("from chan1", "chan1"));
     q.enqueue(makeMsg("from chan2", "chan2"));
@@ -173,14 +236,72 @@ describe("MessageQueue", () => {
     });
     const q = new MessageQueue(controlled, rejectFn);
 
-    q.enqueue({ ...makeMsg("long task", "group"), channelThreadId: "32" });
+    q.enqueue({ ...makeMsg("long task", "group"), channelThreadId: "32", threadId: "telegram-topic-1-32" });
     await vi.waitUntil(() => controlled.mock.calls.length === 1);
-    q.enqueue({ ...makeMsg("other topic", "group"), channelThreadId: "48" });
+    q.enqueue({ ...makeMsg("other topic", "group"), channelThreadId: "48", threadId: "telegram-topic-1-48" });
 
     await vi.waitUntil(() => processed.length === 2, { timeout: 2000 });
     expect(processed[1].text).toBe("other topic");
 
     releaseTopic();
+  });
+
+  it("resolves the active thread before queueing private and internal messages", async () => {
+    let release!: () => void;
+    const controlled = vi.fn(async (msg: IncomingMessage) => {
+      processed.push(msg);
+      if (msg.text === "first") {
+        await new Promise<void>((resolve) => { release = resolve; });
+      }
+    });
+    const activeThread = vi.fn(() => "research");
+    const q = new MessageQueue(controlled, rejectFn, 10, 5000, activeThread);
+
+    q.enqueue(makeMsg("first"));
+    q.enqueue({ ...makeMsg("worker result"), threadId: "research", raw: { type: "worker_trigger" } });
+
+    try {
+      expect(processed.map((msg) => msg.threadId)).toEqual(["research"]);
+      expect(activeThread).toHaveBeenCalledExactlyOnceWith("user1");
+    } finally {
+      release();
+    }
+    await vi.waitUntil(() => processed.length === 2);
+  });
+
+  it("allows independent users to run concurrently", async () => {
+    let release!: () => void;
+    const controlled = vi.fn(async (msg: IncomingMessage) => {
+      processed.push(msg);
+      if (msg.userId === "user1") {
+        await new Promise<void>((resolve) => { release = resolve; });
+      }
+    });
+    const q = new MessageQueue(controlled, rejectFn);
+    q.enqueue(makeMsg("first"));
+    q.enqueue({ ...makeMsg("second"), userId: "user2" });
+    try {
+      expect(processed).toHaveLength(2);
+    } finally {
+      release();
+    }
+  });
+
+  it.each(["threema_callback", "web_e2ee_encrypted_msg"])("merges user messages with raw type %s", async (type) => {
+    const q = new MessageQueue(processFn, rejectFn);
+    q.enqueue(makeMsg("first"));
+    q.enqueue({ ...makeMsg("second"), raw: { type } });
+    q.enqueue({ ...makeMsg("third"), raw: { type } });
+    await vi.waitUntil(() => !q.isProcessing("user1"));
+    expect(processed.map((msg) => msg.text)).toEqual(["first", "second\nthird"]);
+  });
+
+  it.each(["threema_callback", "web_e2ee_encrypted_msg"])("rate limits user messages with raw type %s", (type) => {
+    const q = new MessageQueue(processFn, rejectFn, 20);
+    for (let i = 0; i < 11; i++) {
+      q.enqueue({ ...makeMsg(`message ${i}`), raw: { type } });
+    }
+    expect(rejected).toHaveLength(1);
   });
 });
 

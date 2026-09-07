@@ -50,6 +50,7 @@ function makeSession(overrides: {
   promptFn?: () => Promise<void>;
   messages?: unknown[];
   setModelFn?: () => Promise<void>;
+  modelId?: string;
 } = {}): AgentSession {
   const messages = overrides.messages ?? [
     {
@@ -60,6 +61,7 @@ function makeSession(overrides: {
   ];
 
   return {
+    model: makeModel(overrides.modelId ?? "primary"),
     prompt: overrides.promptFn ?? vi.fn().mockResolvedValue(undefined),
     setModel: overrides.setModelFn ?? vi.fn().mockResolvedValue(undefined),
     get messages() { return messages; },
@@ -115,6 +117,72 @@ describe("promptWithFallback", () => {
     expect(session.setModel).not.toHaveBeenCalled();
   });
 
+  it("restores the configured primary after an earlier fallback", async () => {
+    const session = makeSession({ modelId: "fallback" });
+    const registry = makeRegistry({ "test/primary": makeModel("primary") });
+    await promptWithFallback(session, "hello", makeConfig("test/primary"), registry, "user1");
+    expect(session.setModel).toHaveBeenCalledExactlyOnceWith(makeModel("primary"));
+    expect(vi.mocked(session.setModel).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(session.prompt).mock.invocationCallOrder[0],
+    );
+  });
+
+  it("does not change models or retry a busy session", async () => {
+    const busy = new Error("Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.");
+    const session = makeSession({ promptFn: vi.fn().mockRejectedValue(busy) });
+    const config = makeConfig("test/primary", ["test/fallback"]);
+    const registry = makeRegistry({
+      "test/primary": makeModel("primary"),
+      "test/fallback": makeModel("fallback"),
+    });
+    await expect(promptWithFallback(session, "hello", config, registry, "user1")).rejects.toBe(busy);
+    expect(session.prompt).toHaveBeenCalledOnce();
+    expect(session.setModel).not.toHaveBeenCalled();
+  });
+
+  it("does not touch an already streaming session", async () => {
+    const session = makeSession({ modelId: "fallback" });
+    Object.defineProperty(session, "isStreaming", { value: true });
+    const registry = makeRegistry({ "test/primary": makeModel("primary") });
+    await expect(promptWithFallback(session, "hello", makeConfig("test/primary"), registry, "user1"))
+      .rejects.toThrow("already processing");
+    expect(session.prompt).not.toHaveBeenCalled();
+    expect(session.setModel).not.toHaveBeenCalled();
+  });
+
+  it("stops the fallback chain when the watchdog has timed out", async () => {
+    let active = true;
+    const session = makeSession({
+      promptFn: vi.fn(async () => {
+        active = false;
+        throw new Error("aborted");
+      }),
+    });
+    const config = makeConfig("test/primary", ["test/fallback"]);
+    const registry = makeRegistry({
+      "test/primary": makeModel("primary"),
+      "test/fallback": makeModel("fallback"),
+    });
+    await expect(promptWithFallback(session, "hello", config, registry, "user1", undefined, {
+      shouldContinue: () => active,
+    })).rejects.toThrow("cancelled");
+    expect(session.prompt).toHaveBeenCalledOnce();
+    expect(session.setModel).not.toHaveBeenCalled();
+  });
+
+  it("does not prompt if the watchdog times out during model selection", async () => {
+    let active = true;
+    const session = makeSession({
+      modelId: "fallback",
+      setModelFn: vi.fn(async () => { active = false; }),
+    });
+    const registry = makeRegistry({ "test/primary": makeModel("primary") });
+    await expect(promptWithFallback(session, "hello", makeConfig("test/primary"), registry, "user1", undefined, {
+      shouldContinue: () => active,
+    })).rejects.toThrow("cancelled");
+    expect(session.prompt).not.toHaveBeenCalled();
+  });
+
   it("falls back to second model when primary has stopReason=error", async () => {
     const failMessages = [
       {
@@ -137,6 +205,7 @@ describe("promptWithFallback", () => {
     const promptFn = vi.fn().mockImplementation(async () => { callCount++; });
 
     const session = {
+      model: makeModel("primary"),
       prompt: promptFn,
       setModel: vi.fn().mockResolvedValue(undefined),
       get messages() {
@@ -169,6 +238,7 @@ describe("promptWithFallback", () => {
       { role: "assistant", content: [{ type: "text", text: "ok" }], stopReason: "end_turn" },
     ];
     const session = {
+      model: makeModel("primary"),
       prompt: promptFn,
       setModel: vi.fn().mockResolvedValue(undefined),
       get messages() { return okMessages; },
@@ -190,6 +260,7 @@ describe("promptWithFallback", () => {
       { role: "assistant", stopReason: "error", errorMessage: "gone", content: [] },
     ];
     const session = {
+      model: makeModel("primary"),
       prompt: vi.fn().mockResolvedValue(undefined),
       setModel: vi.fn().mockResolvedValue(undefined),
       get messages() { return errorMessages; },
@@ -218,6 +289,7 @@ describe("promptWithFallback", () => {
     const promptFn = vi.fn().mockImplementation(async () => { callCount++; });
 
     const session = {
+      model: makeModel("primary"),
       prompt: promptFn,
       setModel: vi.fn().mockResolvedValue(undefined),
       get messages() { return callCount <= 1 ? errorMessages : okMessages; },

@@ -60,6 +60,23 @@ describe("repairToolUseResultPairing", () => {
     expect(roles).toEqual(["user", "assistant", "toolResult", "user"]);
   });
 
+  it.each(["error", "aborted"] as const)("does not synthesize results for a %s assistant turn", (stopReason) => {
+    const failed = { ...assistantMsg("partial-call"), stopReason } as AgentMessage;
+    const messages = [userMsg("hi"), failed, userMsg("retry")];
+    const result = repairToolUseResultPairing(messages);
+    expect(result.added).toEqual([]);
+    expect(result.messages).toBe(messages);
+  });
+
+  it.each(["error", "aborted"] as const)("drops results whose %s assistant will not be replayed", (stopReason) => {
+    const failed = { ...assistantMsg("partial-call"), stopReason } as AgentMessage;
+    const messages = [userMsg("hi"), failed, toolResultMsg("partial-call"), userMsg("retry")];
+    const result = repairToolUseResultPairing(messages);
+    expect(result.messages).toEqual([messages[0], failed, messages[3]]);
+    expect(result.droppedOrphanCount).toBe(1);
+    expect(repairToolUseResultPairing(result.messages).changed).toBe(false);
+  });
+
   it("drops duplicate tool results", () => {
     const msgs = [
       userMsg("hi"),

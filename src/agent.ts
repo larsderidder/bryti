@@ -561,10 +561,10 @@ export async function promptWithFallback(
   modelRegistry: ModelRegistry,
   userId: string,
   images?: Array<{ data: string; mimeType: string }>,
+  controls?: { shouldContinue: () => boolean },
 ): Promise<FallbackResult> {
   const candidates = [config.agent.model, ...(config.agent.fallback_models ?? [])];
   let lastError: unknown;
-  let lastReason = "";
 
   // Convert to SDK ImageContent format
   const imageContent = images?.map((img) => ({
@@ -581,27 +581,39 @@ export async function promptWithFallback(
   }
 
   for (let i = 0; i < candidates.length; i++) {
+    if (controls && !controls.shouldContinue()) {
+      throw new Error("Prompt cancelled after inactivity timeout");
+    }
+    if (session.isStreaming) {
+      throw new Error("Agent is already processing; concurrent prompts must share the session queue");
+    }
     const modelString = candidates[i];
+    const model = resolveModel(modelString, modelRegistry);
+    if (!model) {
+      console.warn(`Model not found in registry, skipping: ${modelString}`);
+      continue;
+    }
 
-    // Switch the session to this model if it's not already using it
-    if (i > 0) {
-      const model = resolveModel(modelString, modelRegistry);
-      if (!model) {
-        console.warn(`Fallback model not found in registry, skipping: ${modelString}`);
-        continue;
-      }
-      console.log(
-        `[fallback] Switching to model ${modelString} for user ${userId} ` +
-        `(previous error: ${lastReason})`,
-      );
+    // Restore the primary on a new request, including sessions saved on a fallback.
+    if (session.model?.provider !== model.provider || session.model?.id !== model.id) {
+      console.log(`[fallback] Switching to model ${modelString} for user ${userId}`);
       await session.setModel(model);
+    }
+    if (controls && !controls.shouldContinue()) {
+      throw new Error("Prompt cancelled after inactivity timeout");
     }
 
     let thrownError: unknown = null;
     try {
       await session.prompt(text, imageContent ? { images: imageContent } : undefined);
     } catch (err) {
+      if (err instanceof Error && err.message.startsWith("Agent is already processing")) {
+        throw err;
+      }
       thrownError = err;
+    }
+    if (controls && !controls.shouldContinue()) {
+      throw new Error("Prompt cancelled after inactivity timeout");
     }
 
     const { failed, reason } = didPromptFail(session, thrownError);
@@ -614,7 +626,6 @@ export async function promptWithFallback(
     }
 
     lastError = thrownError ?? new Error(reason);
-    lastReason = reason;
     console.warn(
       `[fallback] Model ${modelString} failed for user ${userId}: ${reason}` +
       (i < candidates.length - 1 ? ", trying next..." : ", all models exhausted"),

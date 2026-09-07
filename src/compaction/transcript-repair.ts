@@ -177,6 +177,12 @@ export function repairToolUseResultPairing(messages: AgentMessage[]): ToolUseRep
     }
 
     const assistant = msg as Extract<AgentMessage, { role: "assistant" }>;
+    // Pi omits failed assistant turns on replay. Their results would have no
+    // matching call at the provider, including placeholders inserted here.
+    if (assistant.stopReason === "error" || assistant.stopReason === "aborted") {
+      out.push(msg);
+      continue;
+    }
 
     // Phase 1: build the expected tool-call sequence from this assistant message.
     const toolCalls = extractToolCallsFromAssistant(assistant);

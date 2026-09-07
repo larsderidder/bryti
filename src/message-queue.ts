@@ -1,11 +1,10 @@
 /**
- * Per-channel FIFO message queue with merge and backpressure.
+ * Per-session FIFO message queue with merge and backpressure.
  *
  * Two core guarantees:
  *
- * 1. Per-channel serialization: only one message is processed at a time per
- *    channel. Subsequent messages queue up behind it rather than racing into
- *    the agent loop in parallel.
+ * 1. Per-session serialization: user messages and internal notifications for
+ *    the same agent session share one queue, even across different channels.
  *
  * 2. Burst merging: rapid-fire messages that arrive within MERGE_WINDOW_MS of
  *    each other are joined into a single prompt before being dispatched. This
@@ -16,7 +15,8 @@
  * callback (backpressure signal, not silent drop).
  */
 
-import type { IncomingMessage } from "./channels/types.js";
+import { isInternalMessage, type IncomingMessage } from "./channels/types.js";
+import { DEFAULT_THREAD_ID, getSessionKey } from "./threads.js";
 
 const MAX_DEPTH = 10;
 // 2-3 seconds is the sweet spot: fast enough that the user experiences a
@@ -43,18 +43,13 @@ interface ChannelQueue {
   processing: boolean;
 }
 
-/**
- * Return the serialization key for one independent conversation.
- *
- * Telegram topics share a channel ID, but must not block each other. Bryti
- * threads use the same isolation when no platform topic is available.
- */
-function conversationKey(msg: IncomingMessage): string {
-  const threadId = msg.channelThreadId ?? msg.threadId;
-  if (!threadId) {
-    return msg.channelId;
-  }
-  return `${msg.channelId}::${threadId}`;
+/** Only merge user messages with the same reply destination. */
+function canMerge(first: IncomingMessage, next: IncomingMessage): boolean {
+  return !isInternalMessage(first) && !isInternalMessage(next)
+    && !first.text.startsWith("/") && !next.text.startsWith("/")
+    && first.channelId === next.channelId
+    && first.platform === next.platform
+    && first.channelThreadId === next.channelThreadId;
 }
 
 /**
@@ -98,7 +93,7 @@ class RateLimiter {
 }
 
 /**
- * Serialises processing per channel and merges rapid follow-up messages.
+ * Serializes processing per agent session and merges rapid user messages.
  */
 export class MessageQueue {
   private readonly queues = new Map<string, ChannelQueue>();
@@ -113,6 +108,7 @@ export class MessageQueue {
     rejectFn: RejectFn,
     maxDepth = MAX_DEPTH,
     mergeWindowMs = MERGE_WINDOW_MS,
+    private readonly activeThread: (userId: string) => string = () => DEFAULT_THREAD_ID,
   ) {
     this.processFn = processFn;
     this.rejectFn = rejectFn;
@@ -122,15 +118,16 @@ export class MessageQueue {
   }
 
   /**
-   * Enqueue a message. If nothing is processing for this channel, starts
-   * draining immediately. Rate-limited per user (10 messages/minute).
+   * Enqueue a message, resolving its thread before choosing the session queue.
+   * Drains immediately when idle. Rate-limited per user (10 messages/minute).
    */
   enqueue(msg: IncomingMessage): void {
-    const key = conversationKey(msg);
+    const threadId = msg.threadId ?? this.activeThread(msg.userId);
+    msg = { ...msg, threadId };
+    const key = getSessionKey(msg.userId, threadId);
 
     // Rate limiting: skip for internal messages (worker triggers, scheduler)
-    const rawObj = msg.raw as Record<string, unknown> | null | undefined;
-    const isInternal = rawObj?.type != null;
+    const isInternal = isInternalMessage(msg);
     if (!isInternal && !this.rateLimiter.check(msg.userId)) {
       console.warn(`[queue] Rate limit exceeded for user ${msg.userId}`);
       this.rejectFn(msg).catch((err) => console.error("rejectFn error:", err));
@@ -160,7 +157,7 @@ export class MessageQueue {
   }
 
   /**
-   * Drain the queue for a channel sequentially, merging close messages.
+   * Drain the queue for a session sequentially, merging compatible messages.
    */
   private async drain(key: string): Promise<void> {
     const q = this.queues.get(key);
@@ -197,7 +194,7 @@ export class MessageQueue {
 
     while (q.entries.length > 0) {
       const next = q.entries[0];
-      if (next.arrivedAt - first.arrivedAt <= this.mergeWindowMs) {
+      if (next.arrivedAt - first.arrivedAt <= this.mergeWindowMs && canMerge(first.msg, next.msg)) {
         batch.push(q.entries.shift()!);
       } else {
         break;
@@ -236,18 +233,18 @@ export class MessageQueue {
   }
 
   /**
-   * Number of queued (not-yet-processing) messages for a channel.
+   * Number of queued (not-yet-processing) messages for a session key.
    * Exposed for monitoring dashboards and unit tests.
    */
-  queueDepth(channelId: string): number {
-    return this.queues.get(channelId)?.entries.length ?? 0;
+  queueDepth(sessionKey: string): number {
+    return this.queues.get(sessionKey)?.entries.length ?? 0;
   }
 
   /**
-   * Whether the channel is currently mid-process (drain loop running).
+   * Whether the session is currently mid-process (drain loop running).
    * Exposed for monitoring dashboards and unit tests.
    */
-  isProcessing(channelId: string): boolean {
-    return this.queues.get(channelId)?.processing ?? false;
+  isProcessing(sessionKey: string): boolean {
+    return this.queues.get(sessionKey)?.processing ?? false;
   }
 }

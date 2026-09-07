@@ -50,7 +50,7 @@ agent:
       specific HTTPS pages, while workers remain safer for broad research.
 
   # Primary model. Format: provider/model-id
-  model: "anthropic/claude-sonnet-4-6"
+  model: "openai-codex/gpt-6-astra"
 
   # Tried in order when primary model fails
   fallback_models:
@@ -132,6 +132,13 @@ models:
   # http_idle_timeout_ms: 300000
   # websocket_connect_timeout_ms: 30000
   providers:
+    # OpenAI Codex subscription. Sign in with /login in pi as the Bryti user.
+    # Uses pi's model catalog, preserving reasoning and context metadata.
+    - name: openai-codex
+      base_url: ""
+      api: openai-codex-responses
+      api_key: ""
+      models: []
     # Anthropic OAuth (Claude Pro/Max subscription, no API key).
     # One-time: install pi CLI and run `pi login anthropic`.
     - name: anthropic

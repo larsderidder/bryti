@@ -52,6 +52,19 @@ cron: []
     expect(config.models.providers).toHaveLength(1);
   });
 
+  it("uses GPT-6 Astra when no primary model is configured", () => {
+    fs.writeFileSync(path.join(tempDir, "config.yml"), `
+telegram:
+  token: test-token
+models:
+  providers:
+    - name: openai-codex
+      api: openai-codex-responses
+      models: []
+`);
+    expect(loadConfig().agent.model).toBe("openai-codex/gpt-6-astra");
+  });
+
   it("should apply defaults", () => {
     const configContent = `
 agent:
@@ -498,7 +511,7 @@ models:
 `;
     fs.writeFileSync(path.join(tempDir, "config.yml"), configContent);
 
-    expect(() => loadConfig()).toThrow("agent.model is required");
+    expect(() => loadConfig()).toThrow("at least one model provider is required");
   });
 
   it("should parse model costs from config values", () => {

@@ -25,6 +25,56 @@ const IDLE_CONTEXT_THRESHOLD = 30; // percent of context window
  */
 const compactionBackoff = new Map<string, { skipUntil: number; failures: number }>();
 
+type SessionLifecycleState = {
+  turnReservations: number;
+  proactiveCompaction: Promise<void> | null;
+};
+
+const sessionLifecycle = new WeakMap<UserSession, SessionLifecycleState>();
+
+function getSessionLifecycle(userSession: UserSession): SessionLifecycleState {
+  let state = sessionLifecycle.get(userSession);
+  if (!state) {
+    state = { turnReservations: 0, proactiveCompaction: null };
+    sessionLifecycle.set(userSession, state);
+  }
+  return state;
+}
+
+function cleanupSessionLifecycle(userSession: UserSession, state: SessionLifecycleState): void {
+  if (state.turnReservations === 0 && !state.proactiveCompaction) {
+    sessionLifecycle.delete(userSession);
+  }
+}
+
+/** Whether a scheduled compaction still owns this session. */
+export function isProactiveCompactionRunning(userSession: UserSession): boolean {
+  return sessionLifecycle.get(userSession)?.proactiveCompaction != null;
+}
+
+/** Reserve a queued message turn, waiting for any scheduled compaction first. */
+export async function acquireSessionTurn(userSession: UserSession): Promise<() => void> {
+  const state = getSessionLifecycle(userSession);
+  state.turnReservations += 1;
+  const activeCompaction = state.proactiveCompaction;
+  let released = false;
+
+  const release = () => {
+    if (released) {
+      return;
+    }
+    released = true;
+    state.turnReservations -= 1;
+    cleanupSessionLifecycle(userSession, state);
+  };
+
+  if (activeCompaction) {
+    await activeCompaction;
+  }
+
+  return release;
+}
+
 function shouldSkipCompaction(userId: string): boolean {
   const entry = compactionBackoff.get(userId);
   if (!entry) return false;
@@ -63,11 +113,21 @@ export async function tryCompact(
   strategy: "conversational" | "operational" = "conversational",
 ): Promise<void> {
   const { session, userId } = userSession;
-  if (session.isCompacting) return;
+  const lifecycle = getSessionLifecycle(userSession);
+  if (
+    session.isCompacting ||
+    session.isStreaming ||
+    lifecycle.turnReservations > 0 ||
+    lifecycle.proactiveCompaction
+  ) {
+    return;
+  }
 
   // Don't compact tiny sessions (system + a couple messages)
   const messageCount = session.messages.length;
-  if (messageCount < 6) return;
+  if (messageCount < 6) {
+    return;
+  }
 
   // Idle compaction: only when context is above threshold. No point compacting
   // a mostly-empty context just because the user stepped away.
@@ -84,6 +144,10 @@ export async function tryCompact(
     return;
   }
 
+  let finishProactiveCompaction!: () => void;
+  lifecycle.proactiveCompaction = new Promise<void>((resolve) => {
+    finishProactiveCompaction = resolve;
+  });
   console.log(`[compaction] proactive ${reason} for user ${userId} (${messageCount} messages)`);
   try {
     let reasonHint: string;
@@ -123,6 +187,10 @@ export async function tryCompact(
   } catch (err) {
     recordCompactionFailure(userId);
     console.error(`[compaction] proactive ${reason} failed for user ${userId}:`, (err as Error).message);
+  } finally {
+    lifecycle.proactiveCompaction = null;
+    finishProactiveCompaction();
+    cleanupSessionLifecycle(userSession, lifecycle);
   }
 }
 
