@@ -18,6 +18,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { Bot, InlineKeyboard, InputFile, type Context } from "grammy";
+import { deliveryNotSent, deliveryUnknown, isDeliveryError } from "./delivery.js";
 import type { ApprovalResult, AudioAttachment, ChannelBridge, IncomingMessage, SendOpts } from "./types.js";
 import { markdownToIR, chunkMarkdownIR, type MarkdownLinkSpan } from "./markdown/ir.js";
 import { renderMarkdownWithMarkers } from "./markdown/render.js";
@@ -318,6 +319,28 @@ async function retryGetFile<T>(
   }
 
   throw lastError;
+}
+
+
+function classifyTelegramDeliveryError(error: unknown): Error {
+  if (isDeliveryError(error)) {
+    return error;
+  }
+
+  if (error instanceof Error && error.message === "Bot not started") {
+    return deliveryNotSent(error.message, { retryable: true, cause: error });
+  }
+
+  const err = error as Error & { error_code?: number; description?: string; parameters?: { retry_after?: number } };
+  if (err.error_code === 429) {
+    return deliveryNotSent(err.description ?? "Telegram rate limited send", { retryable: true, cause: error });
+  }
+
+  if (err.error_code && err.error_code >= 400 && err.error_code < 500) {
+    return deliveryNotSent(err.description ?? err.message, { retryable: false, cause: error });
+  }
+
+  return deliveryUnknown(err.message ?? "Telegram send outcome is unknown", { cause: error });
 }
 
 // ---------------------------------------------------------------------------
@@ -650,7 +673,12 @@ export class TelegramBridge implements ChannelBridge {
   // Message sending with retry
   // -------------------------------------------------------------------------
   async sendMessage(channelId: string, text: string, opts?: SendOpts): Promise<string> {
-    const bot = await this.requireBot();
+    let bot: Bot;
+    try {
+      bot = await this.requireBot();
+    } catch (error) {
+      throw classifyTelegramDeliveryError(error);
+    }
     const chatId = parseInt(channelId, 10);
 
     // Stop typing indicator for this chat
@@ -684,16 +712,20 @@ export class TelegramBridge implements ChannelBridge {
         if (err.error_code === 400 && err.description?.includes("can't parse entities")) {
           console.warn("HTML parse failed, falling back to plain text:", err.description);
           const plain = chunk.replace(/<[^>]+>/g, "");
-          const message = await withRetry(() =>
-            withTimeout(
-              bot.api.sendMessage(chatId, plain, this.telegramThreadOptions(opts)),
-              TELEGRAM_API_TIMEOUT_MS,
-              "Telegram sendMessage",
-            ),
-          );
-          lastMessageId = String(message.message_id);
+          try {
+            const message = await withRetry(() =>
+              withTimeout(
+                bot.api.sendMessage(chatId, plain, this.telegramThreadOptions(opts)),
+                TELEGRAM_API_TIMEOUT_MS,
+                "Telegram sendMessage",
+              ),
+            );
+            lastMessageId = String(message.message_id);
+          } catch (fallbackError) {
+            throw classifyTelegramDeliveryError(fallbackError);
+          }
         } else {
-          throw error;
+          throw classifyTelegramDeliveryError(error);
         }
       }
     }
@@ -702,18 +734,27 @@ export class TelegramBridge implements ChannelBridge {
   }
 
   async sendVoice(channelId: string, audioPath: string, opts?: { caption?: string; channelThreadId?: string }): Promise<string> {
-    const bot = await this.requireBot();
+    let bot: Bot;
+    try {
+      bot = await this.requireBot();
+    } catch (error) {
+      throw classifyTelegramDeliveryError(error);
+    }
     const chatId = parseInt(channelId, 10);
 
     this.stopTyping(channelId, opts);
 
-    const message = await withRetry(() =>
-      bot.api.sendVoice(chatId, new InputFile(audioPath), {
-        ...(opts?.caption ? { caption: opts.caption } : {}),
-        ...this.telegramThreadOptions(opts),
-      }),
-    );
-    return String(message.message_id);
+    try {
+      const message = await withRetry(() =>
+        bot.api.sendVoice(chatId, new InputFile(audioPath), {
+          ...(opts?.caption ? { caption: opts.caption } : {}),
+          ...this.telegramThreadOptions(opts),
+        }),
+      );
+      return String(message.message_id);
+    } catch (error) {
+      throw classifyTelegramDeliveryError(error);
+    }
   }
 
   async editMessage(channelId: string, messageId: string, text: string): Promise<void> {

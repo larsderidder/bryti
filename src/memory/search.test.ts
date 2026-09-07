@@ -163,6 +163,44 @@ describe("HybridSearch", () => {
     });
   });
 
+  describe("embedding failures", () => {
+    it("falls back to keyword results when optional embeddings fail", async () => {
+      const keywordResults: ScoredResult[] = [
+        { id: "A", content: "Fact A", source: "test", timestamp: 1, score: -1 },
+      ];
+
+      const store = createMockStore(keywordResults, []);
+      const embed = vi.fn().mockRejectedValue(new Error("provider raw response with secret"));
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const search = createHybridSearch(store, embed);
+
+      const results = await search("test query");
+
+      expect(results).toHaveLength(1);
+      expect(results[0].id).toBe("A");
+      expect(results[0].matchedBy).toEqual(["keyword"]);
+      expect(store.searchVector).not.toHaveBeenCalled();
+      expect(warn).toHaveBeenCalledWith(
+        "[memory-search] Embedding search degraded. Using keyword-only retrieval.",
+      );
+      expect(warn).not.toHaveBeenCalledWith(expect.stringContaining("secret"));
+      warn.mockRestore();
+    });
+
+    it("rejects embedding failures when embeddings are required", async () => {
+      const keywordResults: ScoredResult[] = [
+        { id: "A", content: "Fact A", source: "test", timestamp: 1, score: -1 },
+      ];
+
+      const store = createMockStore(keywordResults, []);
+      const embed = vi.fn().mockRejectedValue(new Error("provider unavailable"));
+      const search = createHybridSearch(store, embed, { embeddingRequired: true });
+
+      await expect(search("test query")).rejects.toThrow("provider unavailable");
+      expect(store.searchVector).not.toHaveBeenCalled();
+    });
+  });
+
   describe("search with no indexed facts", () => {
     it("returns empty results when store is empty", async () => {
       const store = createMockStore([], []);

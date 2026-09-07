@@ -41,6 +41,15 @@ export interface ProjectionDependencyInput {
   condition_type?: DependencyConditionType;
 }
 
+
+export interface ProjectionTarget {
+  userId: string;
+  channelId: string;
+  platform: string;
+  threadId?: string;
+  channelThreadId?: string;
+}
+
 export interface Projection {
   id: string;
   summary: string;
@@ -51,6 +60,13 @@ export interface Projection {
   trigger_on_fact: string | null;
   context: string | null;
   linked_ids: string[];
+
+  target_user_id: string | null;
+  target_channel_id: string | null;
+  target_platform: string | null;
+  target_thread_id: string | null;
+  target_channel_thread_id: string | null;
+  delivery_work_id: string | null;
   status: ProjectionStatus;
   created_at: string;
   resolved_at: string | null;
@@ -68,6 +84,8 @@ export interface ProjectionStore {
     context?: string;
     linked_ids?: string[];
     depends_on?: ProjectionDependencyInput[];
+
+    target?: ProjectionTarget;
   }): string;
 
   /**
@@ -83,6 +101,22 @@ export interface ProjectionStore {
    * between ticks.
    */
   getExactDue(window_minutes: number): Projection[];
+
+
+  /**
+   * Get pending projections whose scheduled occurrence has been accepted by
+   * the work queue and must be reconciled before rearming or expiring.
+   */
+  getAwaitingDelivery(): Projection[];
+
+  /** Get every pending exact-time projection that still owns an occurrence. */
+  getPendingExact(): Projection[];
+
+  /**
+   * Persist the deterministic work id for the scheduled occurrence. Returns
+   * false when the projection is not pending or belongs to another occurrence.
+   */
+  markDeliveryWork(id: string, workId: string): boolean;
 
   /**
    * Mark a projection's status (done/cancelled/passed).
@@ -185,6 +219,13 @@ interface ProjectionRow {
   context: string | null;
   linked_ids: string | null;
   status: string;
+
+  target_user_id: string | null;
+  target_channel_id: string | null;
+  target_platform: string | null;
+  target_thread_id: string | null;
+  target_channel_thread_id: string | null;
+  delivery_work_id: string | null;
   created_at: string;
   resolved_at: string | null;
 }
@@ -217,6 +258,12 @@ function rowToProjection(row: ProjectionRow): Projection {
     trigger_on_fact: row.trigger_on_fact,
     context: row.context,
     linked_ids,
+    target_user_id: row.target_user_id,
+    target_channel_id: row.target_channel_id,
+    target_platform: row.target_platform,
+    target_thread_id: row.target_thread_id,
+    target_channel_thread_id: row.target_channel_thread_id,
+    delivery_work_id: row.delivery_work_id,
     status: row.status as ProjectionStatus,
     created_at: row.created_at,
     resolved_at: row.resolved_at,
@@ -278,18 +325,24 @@ export function createProjectionStore(userId: string, dataDir: string): Projecti
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS projections (
-      id              TEXT PRIMARY KEY,
-      summary         TEXT NOT NULL,
-      raw_when        TEXT,
-      resolved_when   TEXT,
-      resolution      TEXT NOT NULL DEFAULT 'day',
-      recurrence      TEXT,
-      trigger_on_fact TEXT,
-      context         TEXT,
-      linked_ids      TEXT,
-      status          TEXT NOT NULL DEFAULT 'pending',
-      created_at      TEXT NOT NULL,
-      resolved_at     TEXT
+      id                       TEXT PRIMARY KEY,
+      summary                  TEXT NOT NULL,
+      raw_when                 TEXT,
+      resolved_when            TEXT,
+      resolution               TEXT NOT NULL DEFAULT 'day',
+      recurrence               TEXT,
+      trigger_on_fact          TEXT,
+      context                  TEXT,
+      linked_ids               TEXT,
+      target_user_id           TEXT,
+      target_channel_id        TEXT,
+      target_platform          TEXT,
+      target_thread_id         TEXT,
+      target_channel_thread_id TEXT,
+      delivery_work_id         TEXT,
+      status                   TEXT NOT NULL DEFAULT 'pending',
+      created_at               TEXT NOT NULL,
+      resolved_at              TEXT
     );
   `);
   db.exec(`
@@ -307,19 +360,42 @@ export function createProjectionStore(userId: string, dataDir: string): Projecti
   for (const ddl of [
     `ALTER TABLE projections ADD COLUMN recurrence TEXT;`,
     `ALTER TABLE projections ADD COLUMN trigger_on_fact TEXT;`,
+    `ALTER TABLE projections ADD COLUMN target_user_id TEXT;`,
+    `ALTER TABLE projections ADD COLUMN target_channel_id TEXT;`,
+    `ALTER TABLE projections ADD COLUMN target_platform TEXT;`,
+    `ALTER TABLE projections ADD COLUMN target_thread_id TEXT;`,
+    `ALTER TABLE projections ADD COLUMN target_channel_thread_id TEXT;`,
+    `ALTER TABLE projections ADD COLUMN delivery_work_id TEXT;`,
   ]) {
     try {
       db.exec(ddl);
     } catch {
-      // Column already exists — ignore
+      // Column already exists, ignore.
     }
   }
 
   const stmtInsert = db.prepare(`
     INSERT INTO projections
-      (id, summary, raw_when, resolved_when, resolution, recurrence, trigger_on_fact, context, linked_ids, status, created_at)
+      (
+        id,
+        summary,
+        raw_when,
+        resolved_when,
+        resolution,
+        recurrence,
+        trigger_on_fact,
+        context,
+        linked_ids,
+        target_user_id,
+        target_channel_id,
+        target_platform,
+        target_thread_id,
+        target_channel_thread_id,
+        status,
+        created_at
+      )
     VALUES
-      (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+      (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
   `);
   const stmtInsertDependency = db.prepare(`
     INSERT INTO projection_dependencies
@@ -381,6 +457,7 @@ export function createProjectionStore(userId: string, dataDir: string): Projecti
       AND resolution = 'exact'
       AND resolved_when IS NOT NULL
       AND resolved_when <= datetime('now', ? || ' minutes')
+      AND delivery_work_id IS NULL
       AND (
         resolved_when > datetime('now', '-10 minutes')
         OR (
@@ -391,6 +468,32 @@ export function createProjectionStore(userId: string, dataDir: string): Projecti
     ORDER BY resolved_when ASC
   `);
 
+
+  const stmtAwaitingDelivery = db.prepare(`
+    SELECT * FROM projections
+    WHERE status = 'pending'
+      AND delivery_work_id IS NOT NULL
+      AND delivery_work_id != ''
+    ORDER BY resolved_when ASC
+  `);
+
+
+  const stmtPendingExact = db.prepare(`
+    SELECT * FROM projections
+    WHERE status = 'pending'
+      AND resolution = 'exact'
+      AND resolved_when IS NOT NULL
+    ORDER BY resolved_when ASC
+  `);
+
+  const stmtMarkDeliveryWork = db.prepare(`
+    UPDATE projections
+    SET delivery_work_id = ?
+    WHERE id = ?
+      AND status = 'pending'
+      AND (delivery_work_id IS NULL OR delivery_work_id = ?)
+  `);
+
   const stmtResolve = db.prepare(`
     UPDATE projections
     SET status = ?, resolved_at = datetime('now')
@@ -399,7 +502,7 @@ export function createProjectionStore(userId: string, dataDir: string): Projecti
 
   const stmtRearm = db.prepare(`
     UPDATE projections
-    SET status = 'pending', resolved_when = ?, resolved_at = NULL
+    SET status = 'pending', resolved_when = ?, resolved_at = NULL, delivery_work_id = NULL
     WHERE id = ?
   `);
 
@@ -428,6 +531,7 @@ export function createProjectionStore(userId: string, dataDir: string): Projecti
     WHERE status = 'pending'
       AND resolution != 'someday'
       AND recurrence IS NULL
+      AND delivery_work_id IS NULL
       AND resolved_when IS NOT NULL
       AND (
         -- Exact-time items expire after 1 hour (they either fired or were missed)
@@ -438,6 +542,18 @@ export function createProjectionStore(userId: string, dataDir: string): Projecti
       )
   `);
 
+  function validateTarget(target: ProjectionTarget | undefined): ProjectionTarget | undefined {
+    if (!target) {
+      return undefined;
+    }
+    if (target.userId !== userId) {
+      throw new Error("Projection target user must match projection owner");
+    }
+    if (!target.channelId.trim() || !target.platform.trim()) {
+      throw new Error("Projection target must include channelId and platform");
+    }
+    return target;
+  }
   function inferConditionType(condition: string, explicit?: DependencyConditionType): DependencyConditionType {
     if (explicit) return explicit;
     return ["done", "cancelled", "passed"].includes(condition) ? "status_change" : "llm";
@@ -546,6 +662,7 @@ export function createProjectionStore(userId: string, dataDir: string): Projecti
     context?: string;
     linked_ids?: string[];
     depends_on?: ProjectionDependencyInput[];
+    target?: ProjectionTarget;
   }): string => {
     const id = crypto.randomUUID();
     const now = new Date().toISOString();
@@ -554,6 +671,7 @@ export function createProjectionStore(userId: string, dataDir: string): Projecti
     // caller is responsible for resolving natural-language expressions like
     // "next Monday" before calling add()). For trigger_on_fact projections no
     // resolved_when is needed upfront — checkTriggers() sets it at fire time.
+    const target = validateTarget(params.target);
     stmtInsert.run(
       id,
       params.summary,
@@ -564,6 +682,11 @@ export function createProjectionStore(userId: string, dataDir: string): Projecti
       params.trigger_on_fact ?? null,
       params.context ?? null,
       params.linked_ids ? JSON.stringify(params.linked_ids) : null,
+      target?.userId ?? null,
+      target?.channelId ?? null,
+      target?.platform ?? null,
+      target?.threadId ?? null,
+      target?.channelThreadId ?? null,
       now,
     );
 
@@ -576,7 +699,7 @@ export function createProjectionStore(userId: string, dataDir: string): Projecti
   });
 
   return {
-    add({ summary, raw_when, resolved_when, resolution, recurrence, trigger_on_fact, context, linked_ids, depends_on }) {
+    add({ summary, raw_when, resolved_when, resolution, recurrence, trigger_on_fact, context, linked_ids, target, depends_on }) {
       return addWithDependencies({
         summary,
         raw_when,
@@ -586,6 +709,7 @@ export function createProjectionStore(userId: string, dataDir: string): Projecti
         trigger_on_fact,
         context,
         linked_ids,
+        target,
         depends_on,
       });
     },
@@ -610,6 +734,23 @@ export function createProjectionStore(userId: string, dataDir: string): Projecti
       // window so a restart shortly after the scheduled time still runs them.
       const rows = stmtExactDue.all(String(window_minutes)) as ProjectionRow[];
       return rows.map(rowToProjection);
+    },
+
+
+    getAwaitingDelivery() {
+      const rows = stmtAwaitingDelivery.all() as ProjectionRow[];
+      return rows.map(rowToProjection);
+    },
+
+
+    getPendingExact() {
+      const rows = stmtPendingExact.all() as ProjectionRow[];
+      return rows.map(rowToProjection);
+    },
+
+    markDeliveryWork(id, workId) {
+      const result = stmtMarkDeliveryWork.run(workId, id, workId) as { changes: number };
+      return result.changes > 0;
     },
 
     resolve(id, status) {
@@ -720,6 +861,7 @@ export function createProjectionStore(userId: string, dataDir: string): Projecti
         SELECT * FROM projections
         WHERE status = 'pending'
           AND recurrence IS NOT NULL AND recurrence != ''
+          AND delivery_work_id IS NULL
           AND (
             resolved_when IS NULL
             OR resolved_when < datetime('now', '-4 hours')

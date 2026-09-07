@@ -11,6 +11,11 @@ export {
   type CapabilityLevel,
   type Capability,
   type ToolCapabilities,
+  type ApprovalDuration,
+  type ApprovalKind,
+  type ApprovalProvenance,
+  type ApprovalRecord,
+  type ListedApproval,
   type TrustStore,
   createTrustStore,
   registerToolCapabilities,
@@ -20,11 +25,16 @@ export {
   setPendingApproval,
   checkPendingApproval,
   isAlwaysApproval,
+  canonicalizeToolArgs,
+  hashToolArgs,
+  summarizeToolArgs,
+  extractToolDestination,
 } from "./store.js";
 
 export {
   type ApprovalCallback,
   type TrustWrapperContext,
+  type GuardrailEvaluator,
   wrapToolWithTrustCheck,
   wrapToolsWithTrustChecks,
 } from "./wrapper.js";

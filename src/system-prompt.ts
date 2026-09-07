@@ -211,9 +211,8 @@ function buildWorkersSection(directWebEnabled: boolean): string {
     `- Simple conversational responses that don't need external data\n\n` +
     `Standard pattern after dispatching a worker:\n` +
     `1. Call worker_dispatch with a detailed task description.\n` +
-    `2. Create a projection: \`projection_create({ summary: "Inform user about <task> results", trigger_on_fact: "worker <id> complete" })\`\n` +
-    `3. Tell the user you've started looking into it and will share results when ready.\n\n` +
-    `When the trigger fires: read the result.md file with \`read\`, summarize the key findings for the user, resolve the projection.\n\n` +
+    `2. Tell the user you've started looking into it. Completion notifications return automatically to this conversation. Do not create a separate notification projection.\n\n` +
+    `When the completion notification arrives: read result.md with \`read\` and summarize the key findings for the user. Interrupted workers are not automatically restarted.\n\n` +
     `Use worker_check only when the user asks for a progress update.\n` +
     `Use worker_interrupt to cancel a running worker when the task is no longer needed or the user asks to stop it.\n` +
     `Use worker_steer to redirect a running worker mid-task — narrow focus, add requirements, correct course. ` +

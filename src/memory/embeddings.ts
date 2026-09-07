@@ -9,9 +9,9 @@
  *
  * Model files live in <dataDir>/.models/.
  *
- * When node-llama-cpp is not installed, embed() returns null and all callers
- * degrade to keyword-only search. This keeps bryti functional without native
- * build tools.
+ * When embeddings are optional and unavailable, embed() returns null and all
+ * callers degrade to keyword-only search. Required embeddings reject failures so
+ * misconfigured deployments fail visibly.
  */
 
 import type { EmbeddingsConfig } from "../config.js";
@@ -42,6 +42,12 @@ interface NodeLlamaCppModule {
 }
 
 type EmbeddingInputType = "query" | "document";
+export class EmbeddingRequiredError extends Error {
+  constructor() {
+    super("Embedding provider is required but unavailable");
+    this.name = "EmbeddingRequiredError";
+  }
+}
 
 // Hugging Face URI in node-llama-cpp's "hf:<owner>/<repo>/<file>" format.
 // On first use, node-llama-cpp resolves this automatically: it locates (or
@@ -58,20 +64,44 @@ let embeddingContext: LlamaEmbeddingContext | null = null;
 // awaits the same in-progress load instead of starting a new one.
 let initPromise: Promise<LlamaEmbeddingContext | null> | null = null;
 
-let embeddingConfig: EmbeddingsConfig = { provider: "local", timeout_ms: 10000 };
+let embeddingConfig: EmbeddingsConfig = {
+  provider: "local",
+  timeout_ms: 10000,
+  required: false,
+};
 
-/** Whether the configured embedding provider is available. Set once during first init attempt. */
+/** Whether the configured embedding provider is available. Set during provider checks. */
 let llmAvailable: boolean | null = null;
+let embeddingFailureLogged = false;
 
 /**
  * Whether embeddings are available (node-llama-cpp loaded successfully).
  * Returns null before the first init attempt.
  */
 export function configureEmbeddings(config: EmbeddingsConfig): void {
-  embeddingConfig = config;
+  const nextConfig: EmbeddingsConfig = {
+    ...config,
+    required: config.required === true,
+  };
+  const configChanged = JSON.stringify(embeddingConfig) !== JSON.stringify(nextConfig);
+  embeddingConfig = nextConfig;
+  embeddingFailureLogged = false;
+
+  if (configChanged) {
+    initPromise = null;
+  }
+
   if (config.provider === "openai-compatible") {
     llmAvailable = Boolean(config.base_url && config.model);
+    return;
   }
+
+  if (embeddingContext !== null) {
+    llmAvailable = true;
+    return;
+  }
+
+  llmAvailable = null;
 }
 
 export function embeddingsAvailable(): boolean | null {
@@ -96,53 +126,53 @@ async function getEmbeddingContext(modelsDir?: string): Promise<LlamaEmbeddingCo
   }
 
   initPromise = (async () => {
-    let nodeLlamaCpp: NodeLlamaCppModule;
     try {
       // Use a non-literal import specifier so TypeScript does not resolve the
       // optional dependency at compile time. Runtime behavior is unchanged.
       const moduleName = "node-llama-cpp";
-      nodeLlamaCpp = await import(moduleName) as unknown as NodeLlamaCppModule;
+      const nodeLlamaCpp = await import(moduleName) as unknown as NodeLlamaCppModule;
+      const { getLlama, LlamaLogLevel, resolveModelFile } = nodeLlamaCpp;
+
+      const llama = await getLlama({
+        gpu: "auto",
+        logger(level, message) {
+          if (level === LlamaLogLevel.warn && message.includes("special_eos_id is not in special_eog_ids")) {
+            return;
+          }
+          if (level === LlamaLogLevel.error || level === LlamaLogLevel.fatal) {
+            console.error("[llama]", message);
+          }
+        },
+      });
+      llamaInstance = llama;
+
+      const modelPath = await resolveModelFile(EMBEDDING_MODEL_URI, {
+        directory: modelsDir,
+        cli: false,
+        onProgress({ totalSize, downloadedSize }) {
+          let pct = 0;
+          if (totalSize > 0) {
+            pct = Math.round((downloadedSize / totalSize) * 100);
+          }
+          process.stdout.write(`\rDownloading embedding model: ${pct}%`);
+        },
+      });
+      process.stdout.write("\n");
+
+      const model = await llama.loadModel({ modelPath });
+      llamaModel = model;
+      const ctx = await model.createEmbeddingContext();
+
+      embeddingContext = ctx;
+      llmAvailable = true;
+      return ctx;
     } catch {
       llmAvailable = false;
-      console.warn(
-        "[embeddings] node-llama-cpp not installed. " +
-        "Archival memory will use keyword search only (no vector similarity). " +
-        "Install it with: npm install node-llama-cpp",
-      );
+      if (!isEmbeddingsRequired()) {
+        logEmbeddingDegraded("local provider unavailable");
+      }
       return null;
     }
-    const { getLlama, LlamaLogLevel, resolveModelFile } = nodeLlamaCpp;
-
-    const llama = await getLlama({
-      gpu: "auto",
-      logger(level, message) {
-        if (level === LlamaLogLevel.warn && message.includes("special_eos_id is not in special_eog_ids")) {
-          return;
-        }
-        if (level === LlamaLogLevel.error || level === LlamaLogLevel.fatal) {
-          console.error("[llama]", message);
-        }
-      },
-    });
-    llamaInstance = llama;
-
-    const modelPath = await resolveModelFile(EMBEDDING_MODEL_URI, {
-      directory: modelsDir,
-      cli: false,
-      onProgress({ totalSize, downloadedSize }) {
-        const pct = totalSize > 0 ? Math.round((downloadedSize / totalSize) * 100) : 0;
-        process.stdout.write(`\rDownloading embedding model: ${pct}%`);
-      },
-    });
-    process.stdout.write("\n");
-
-    const model = await llama.loadModel({ modelPath });
-    llamaModel = model;
-    const ctx = await model.createEmbeddingContext();
-
-    embeddingContext = ctx;
-    llmAvailable = true;
-    return ctx;
   })();
 
   return initPromise;
@@ -154,18 +184,62 @@ async function getEmbeddingContext(modelsDir?: string): Promise<LlamaEmbeddingCo
  */
 function normalizeBaseUrl(baseUrl: string | undefined): string {
   const trimmed = baseUrl?.trim();
-  if (!trimmed) throw new Error("Embedding base_url is required");
+  if (!trimmed) {
+    throw new Error("Embedding base_url is required");
+  }
   return trimmed.replace(/\/+$/u, "");
 }
 
 function inputTypeFor(kind: EmbeddingInputType | undefined): string | undefined {
-  if (kind === "query") return embeddingConfig.query_input_type ?? embeddingConfig.input_type;
-  if (kind === "document") return embeddingConfig.document_input_type ?? embeddingConfig.input_type;
+  if (kind === "query") {
+    return embeddingConfig.query_input_type ?? embeddingConfig.input_type;
+  }
+  if (kind === "document") {
+    return embeddingConfig.document_input_type ?? embeddingConfig.input_type;
+  }
   return embeddingConfig.input_type;
 }
 
-async function embedRemote(text: string, kind?: EmbeddingInputType): Promise<number[] | null> {
-  if (!embeddingConfig.model) throw new Error("Embedding model is required");
+function isEmbeddingsRequired(): boolean {
+  return embeddingConfig.required === true;
+}
+
+function logEmbeddingDegraded(reason: string): void {
+  if (embeddingFailureLogged) {
+    return;
+  }
+
+  embeddingFailureLogged = true;
+  console.warn(`[embeddings] Embedding provider degraded (${reason}). Memory will use keyword-only retrieval.`);
+}
+
+function failureReason(error: unknown): string {
+  if (error instanceof Error && error.name === "AbortError") {
+    return "remote request timed out";
+  }
+  if (error instanceof Error && error.message.startsWith("Embedding request failed: HTTP")) {
+    return "remote request failed";
+  }
+  if (error instanceof Error && error.message.includes("required")) {
+    return "configuration incomplete";
+  }
+  return "provider unavailable";
+}
+
+function handleEmbeddingFailure(error: unknown): null {
+  llmAvailable = false;
+  if (isEmbeddingsRequired()) {
+    throw new EmbeddingRequiredError();
+  }
+
+  logEmbeddingDegraded(failureReason(error));
+  return null;
+}
+
+async function embedRemote(text: string, kind?: EmbeddingInputType): Promise<number[]> {
+  if (!embeddingConfig.model) {
+    throw new Error("Embedding model is required");
+  }
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), embeddingConfig.timeout_ms);
@@ -174,16 +248,22 @@ async function embedRemote(text: string, kind?: EmbeddingInputType): Promise<num
       model: embeddingConfig.model,
       input: text,
     };
-    if (embeddingConfig.dimensions !== undefined) body.dimensions = embeddingConfig.dimensions;
+    if (embeddingConfig.dimensions !== undefined) {
+      body.dimensions = embeddingConfig.dimensions;
+    }
     const inputType = inputTypeFor(kind);
-    if (inputType) body.input_type = inputType;
+    if (inputType) {
+      body.input_type = inputType;
+    }
 
     const headers: Record<string, string> = {
       accept: "application/json",
       "content-type": "application/json",
       ...(embeddingConfig.headers ?? {}),
     };
-    if (embeddingConfig.api_key) headers.authorization = `Bearer ${embeddingConfig.api_key}`;
+    if (embeddingConfig.api_key) {
+      headers.authorization = `Bearer ${embeddingConfig.api_key}`;
+    }
 
     const response = await fetch(`${normalizeBaseUrl(embeddingConfig.base_url)}/embeddings`, {
       method: "POST",
@@ -192,8 +272,7 @@ async function embedRemote(text: string, kind?: EmbeddingInputType): Promise<num
       signal: controller.signal,
     });
     if (!response.ok) {
-      const detail = await response.text().catch(() => "");
-      throw new Error(`Embedding request failed: HTTP ${response.status}${detail ? ` ${detail.slice(0, 200)}` : ""}`);
+      throw new Error(`Embedding request failed: HTTP ${response.status}`);
     }
 
     const parsed = await response.json() as { data?: Array<{ embedding?: unknown }> };
@@ -203,9 +282,6 @@ async function embedRemote(text: string, kind?: EmbeddingInputType): Promise<num
     }
     llmAvailable = true;
     return embedding;
-  } catch (err) {
-    llmAvailable = false;
-    throw err;
   } finally {
     clearTimeout(timeout);
   }
@@ -221,16 +297,28 @@ export async function embed(
   }
 
   if (embeddingConfig.provider === "openai-compatible") {
-    return embedRemote(text, kind);
+    try {
+      return await embedRemote(text, kind);
+    } catch (error) {
+      return handleEmbeddingFailure(error);
+    }
   }
 
-  const ctx = await getEmbeddingContext(modelsDir);
-  if (ctx === null) {
-    return null;
+  if (llmAvailable === false) {
+    return handleEmbeddingFailure(new Error("Embedding provider unavailable"));
   }
 
-  const result = await ctx.getEmbeddingFor(text);
-  return Array.from(result.vector);
+  try {
+    const ctx = await getEmbeddingContext(modelsDir);
+    if (ctx === null) {
+      return handleEmbeddingFailure(new Error("Embedding provider unavailable"));
+    }
+
+    const result = await ctx.getEmbeddingFor(text);
+    return Array.from(result.vector);
+  } catch (error) {
+    return handleEmbeddingFailure(error);
+  }
 }
 
 /**
@@ -263,17 +351,24 @@ export async function embedBatch(
 /**
  * Pre-load the embedding model at startup.
  *
- * Best-effort: if node-llama-cpp is not installed, logs a warning and
- * continues. Bryti still works with keyword-only search.
+ * Best-effort unless embeddings are required. Optional failures log degraded
+ * mode and continue with keyword-only search.
  *
  * @param modelsDir Directory to store/load the model
  */
 export async function warmupEmbeddings(modelsDir?: string): Promise<void> {
   if (embeddingConfig.provider === "openai-compatible") {
     llmAvailable = Boolean(embeddingConfig.base_url && embeddingConfig.model);
+    if (isEmbeddingsRequired()) {
+      await embed("embedding warmup", modelsDir, "query");
+    }
     return;
   }
-  await getEmbeddingContext(modelsDir);
+
+  const ctx = await getEmbeddingContext(modelsDir);
+  if (ctx === null && isEmbeddingsRequired()) {
+    throw new EmbeddingRequiredError();
+  }
 }
 
 /**

@@ -1,206 +1,610 @@
-/**
- * Trust levels and runtime permissions.
- *
- * Three capability levels: Safe (local data the agent owns), Guarded
- * (external content processed through worker isolation), and Elevated
- * (direct external access: network, shell, unreviewed extensions).
- *
- * Elevated tools require explicit user approval on first use. Approvals
- * are persisted to disk so they survive restarts.
- */
-
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-/**
- * Capability levels, ordered from least to most privileged.
- *
- * - `safe`: local data the agent owns outright (core memory, SQLite, session
- *   files). No user approval needed.
- * - `guarded`: external content that arrives through the worker isolation
- *   boundary. The worker runs in a separate session with scoped tools, so
- *   untrusted content never reaches the main agent directly. No explicit
- *   approval needed, but the boundary itself is the protection.
- * - `elevated`: direct external access without isolation — network requests,
- *   shell execution, unreviewed extension code. Requires explicit user approval
- *   before the tool may run.
- */
 export type CapabilityLevel = "safe" | "guarded" | "elevated";
-
-/**
- * Specific capabilities a tool may require. Used in permission prompts
- * to tell the user *what* the tool wants access to.
- */
 export type Capability = "network" | "filesystem" | "shell";
+export type ApprovalDuration = "always" | "once";
+export type ApprovalKind = "tool" | "invocation";
 
-/**
- * Tool capability declaration. Tools that need elevated access declare
- * their capabilities here.
- */
 export interface ToolCapabilities {
-  /** Overall trust level required */
   level: CapabilityLevel;
-  /** Specific capabilities needed (for elevated tools) */
   capabilities?: Capability[];
-  /** Human-readable reason shown in the permission prompt */
   reason?: string;
 }
 
-/**
- * Persistent approval record.
- */
-interface ApprovalRecord {
-  /** Tool name */
-  tool: string;
-  /** When the approval was granted */
-  grantedAt: string;
-  /** "always" or "once" */
-  duration: "always" | "once";
+export interface ApprovalProvenance {
+  userId?: string;
+  threadId?: string;
+  platform?: string;
+  channelId?: string;
+  automationId?: string;
+  channelThreadId?: string;
+  source?: string;
 }
 
-// ---------------------------------------------------------------------------
-// Trust store (file-backed)
-// ---------------------------------------------------------------------------
+export interface ApprovalRecord {
+  id: string;
+  kind: ApprovalKind;
+  tool: string;
+  grantedAt: string;
+  duration: ApprovalDuration;
+  argsHash?: string;
+  argsSummary?: string;
+  expiresAt?: string;
+  provenance?: ApprovalProvenance;
+}
+
+export interface ListedApproval {
+  id?: string;
+  kind?: ApprovalKind;
+  tool: string;
+  duration: ApprovalDuration;
+  grantedAt?: string;
+  argsHash?: string;
+  argsSummary?: string;
+  expiresAt?: string;
+  provenance?: ApprovalProvenance;
+}
 
 export interface TrustStore {
-  /** Check if a tool is approved for elevated access. */
   isApproved(toolName: string): boolean;
-
-  /** Grant approval for a tool. "always" persists to disk; "once" is session-only. */
-  approve(toolName: string, duration: "always" | "once"): void;
-
-  /** Revoke approval for a tool. */
+  hasToolApproval(toolName: string): boolean;
+  approve(toolName: string, duration: ApprovalDuration, provenance?: ApprovalProvenance, expiresAt?: string): ApprovalRecord;
   revoke(toolName: string): void;
-
-  /** List all approved tools. */
-  listApproved(): Array<{ tool: string; duration: "always" | "once" }>;
-
-  /** Consume a one-time approval (returns true if it existed). */
+  listApproved(): ListedApproval[];
   consumeOnce(toolName: string): boolean;
+  approveInvocation(
+    toolName: string,
+    args: unknown,
+    duration: ApprovalDuration,
+    provenance?: ApprovalProvenance,
+    expiresAt?: string,
+  ): ApprovalRecord;
+  isInvocationApproved(toolName: string, args: unknown, provenance?: ApprovalProvenance): boolean;
+  consumeInvocationOnce(toolName: string, args: unknown, provenance?: ApprovalProvenance): boolean;
+  revokeGrant(grantId: string): boolean;
 }
 
-/**
- * Create a trust store backed by a JSON file. Pre-approved tools from config
- * are always allowed; runtime approvals are stored in trust-approvals.json.
- */
+const toolCapabilityRegistry = new Map<string, ToolCapabilities>();
+const pendingApprovals = new Map<string, string>();
+const REDACTED = "[redacted]";
+const SUMMARY_LIMIT = 1_000;
+const SECRET_KEY_PATTERN = /(?:api[_-]?key|authorization|bearer|client[_-]?secret|credential|password|private[_-]?key|secret|token)/i;
+const TOKEN_VALUE_PATTERN = /\b(?:Bearer\s+)?[A-Za-z0-9_-]{24,}\.[A-Za-z0-9._-]{10,}\b|\b(?:sk|pk|ghp|gho|ghu|github_pat)_[A-Za-z0-9_]{16,}\b/;
+
+function truncateText(text: string, maxChars = SUMMARY_LIMIT): string {
+  if (text.length <= maxChars) {
+    return text;
+  }
+  const omitted = text.length - maxChars;
+  return `${text.slice(0, maxChars)}... [truncated, ${omitted} chars omitted]`;
+}
+
+function stableValue(value: unknown, seen: WeakSet<object>): unknown {
+  if (value === undefined) {
+    return "[undefined]";
+  }
+  if (value === null) {
+    return null;
+  }
+  if (typeof value === "bigint") {
+    return value.toString();
+  }
+  if (typeof value === "number") {
+    if (Number.isNaN(value)) {
+      return "[NaN]";
+    }
+    if (!Number.isFinite(value)) {
+      return value.toString();
+    }
+    return value;
+  }
+  if (typeof value === "string" || typeof value === "boolean") {
+    return value;
+  }
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+  if (Array.isArray(value)) {
+    if (seen.has(value)) {
+      return "[Circular]";
+    }
+    seen.add(value);
+    const items = value.map((item) => stableValue(item, seen));
+    seen.delete(value);
+    return items;
+  }
+  if (typeof value === "object") {
+    if (seen.has(value)) {
+      return "[Circular]";
+    }
+    seen.add(value);
+    const objectValue = value as Record<string, unknown>;
+    const result = Object.create(null) as Record<string, unknown>;
+    for (const key of Object.keys(objectValue).sort()) {
+      result[key] = stableValue(objectValue[key], seen);
+    }
+    seen.delete(value);
+    return result;
+  }
+  return String(value);
+}
+
+function sanitizeUrlText(text: string): string {
+  try {
+    const url = new URL(text);
+    if (url.username) {
+      url.username = REDACTED;
+    }
+    if (url.password) {
+      url.password = REDACTED;
+    }
+    for (const key of [...url.searchParams.keys()]) {
+      if (SECRET_KEY_PATTERN.test(key)) {
+        url.searchParams.set(key, REDACTED);
+      }
+    }
+    return url.toString();
+  } catch {
+    return text;
+  }
+}
+
+function sanitizeString(text: string): string {
+  const urlSafe = sanitizeUrlText(text);
+  if (TOKEN_VALUE_PATTERN.test(urlSafe)) {
+    return REDACTED;
+  }
+  return urlSafe;
+}
+
+function sanitizedValue(value: unknown, seen: WeakSet<object>, keyName?: string): unknown {
+  if (keyName && SECRET_KEY_PATTERN.test(keyName)) {
+    return REDACTED;
+  }
+  if (typeof value === "string") {
+    return sanitizeString(value);
+  }
+  if (value === null || value === undefined || typeof value === "boolean" || typeof value === "number") {
+    return value;
+  }
+  if (typeof value === "bigint") {
+    return value.toString();
+  }
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+  if (Array.isArray(value)) {
+    if (seen.has(value)) {
+      return "[Circular]";
+    }
+    seen.add(value);
+    const items = value.map((item) => sanitizedValue(item, seen));
+    seen.delete(value);
+    return items;
+  }
+  if (typeof value === "object") {
+    if (seen.has(value)) {
+      return "[Circular]";
+    }
+    seen.add(value);
+    const objectValue = value as Record<string, unknown>;
+    const result = Object.create(null) as Record<string, unknown>;
+    for (const key of Object.keys(objectValue).sort()) {
+      result[key] = sanitizedValue(objectValue[key], seen, key);
+    }
+    seen.delete(value);
+    return result;
+  }
+  return String(value);
+}
+
+export function canonicalizeToolArgs(args: unknown): string {
+  return JSON.stringify(stableValue(args, new WeakSet<object>()));
+}
+
+export function hashToolArgs(args: unknown): string {
+  return crypto.createHash("sha256").update(canonicalizeToolArgs(args)).digest("hex");
+}
+
+export function summarizeToolArgs(args: unknown, maxChars = SUMMARY_LIMIT): string {
+  const sanitized = sanitizedValue(args, new WeakSet<object>());
+  return truncateText(JSON.stringify(sanitized), maxChars);
+}
+
+export function extractToolDestination(args: unknown): string | undefined {
+  if (!args || typeof args !== "object") {
+    return undefined;
+  }
+  const record = args as Record<string, unknown>;
+  const candidateKeys = ["url", "uri", "href", "endpoint", "host", "hostname", "path", "file", "filename", "command"];
+  for (const key of candidateKeys) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim()) {
+      return truncateText(sanitizeString(value), 300);
+    }
+  }
+  return undefined;
+}
+
+function makeGrantId(toolName: string, kind: ApprovalKind, argsHash?: string): string {
+  const hashPart = argsHash ? argsHash.slice(0, 16) : crypto.randomBytes(8).toString("hex");
+  return `${kind}:${toolName}:${hashPart}:${crypto.randomUUID()}`;
+}
+
+function isRecordValid(record: ApprovalRecord): boolean {
+  if (!record.expiresAt) {
+    return true;
+  }
+  return Date.parse(record.expiresAt) > Date.now();
+}
+
+const PROVENANCE_KEYS = [
+  "userId",
+  "threadId",
+  "platform",
+  "channelId",
+  "channelThreadId",
+  "automationId",
+  "source",
+] as const;
+
+function normalizeProvenance(provenance?: ApprovalProvenance): ApprovalProvenance | undefined {
+  if (!provenance) {
+    return undefined;
+  }
+  const result: ApprovalProvenance = {};
+  for (const key of PROVENANCE_KEYS) {
+    const value = provenance[key];
+    if (value) {
+      result[key] = value;
+    }
+  }
+  if (Object.keys(result).length === 0) {
+    return undefined;
+  }
+  return result;
+}
+
+function matchesProvenance(record: ApprovalRecord, provenance?: ApprovalProvenance): boolean {
+  const stored = record.provenance;
+  const current = normalizeProvenance(provenance);
+  if (!stored) {
+    return !current;
+  }
+  for (const key of PROVENANCE_KEYS) {
+    if (stored[key] && stored[key] !== current?.[key]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function normalizeRecord(raw: unknown): ApprovalRecord | null {
+  if (!raw || typeof raw !== "object") {
+    return null;
+  }
+  const value = raw as Record<string, unknown>;
+  const tool = value.tool;
+  const duration = value.duration;
+  if (typeof tool !== "string") {
+    return null;
+  }
+  if (duration !== "always" && duration !== "once") {
+    return null;
+  }
+  const kind = value.kind === "invocation" ? "invocation" : "tool";
+  const argsHash = typeof value.argsHash === "string" ? value.argsHash : undefined;
+  if (kind === "invocation" && !argsHash) {
+    return null;
+  }
+  let provenance: ApprovalProvenance | undefined;
+  if (value.provenance && typeof value.provenance === "object") {
+    provenance = normalizeProvenance(value.provenance as ApprovalProvenance);
+  }
+  return {
+    id: typeof value.id === "string" ? value.id : makeGrantId(tool, kind, argsHash),
+    kind,
+    tool,
+    grantedAt: typeof value.grantedAt === "string" ? value.grantedAt : new Date().toISOString(),
+    duration,
+    argsHash,
+    argsSummary: typeof value.argsSummary === "string" ? value.argsSummary : undefined,
+    expiresAt: typeof value.expiresAt === "string" ? value.expiresAt : undefined,
+    provenance,
+  };
+}
+
+function invocationKey(toolName: string, args: unknown, provenance?: ApprovalProvenance): string {
+  const scope = normalizeProvenance(provenance);
+  return [
+    toolName,
+    hashToolArgs(args),
+    scope?.userId ?? "",
+    scope?.threadId ?? "",
+    scope?.platform ?? "",
+    scope?.channelId ?? "",
+    scope?.channelThreadId ?? "",
+    scope?.automationId ?? "",
+    scope?.source ?? "",
+  ].join("\u0000");
+}
+
 export function createTrustStore(dataDir: string, preApproved: string[] = []): TrustStore {
   const filePath = path.join(dataDir, "trust-approvals.json");
   const preApprovedSet = new Set(preApproved);
-  const onceApprovals = new Set<string>();
+  const onceToolApprovals = new Map<string, ApprovalRecord>();
+  const onceInvocationApprovals = new Map<string, ApprovalRecord>();
 
   function loadPersistedApprovals(): Map<string, ApprovalRecord> {
-    if (!fs.existsSync(filePath)) return new Map();
+    if (!fs.existsSync(filePath)) {
+      return new Map();
+    }
     try {
-      const data = JSON.parse(fs.readFileSync(filePath, "utf-8")) as ApprovalRecord[];
-      return new Map(data.map((r) => [r.tool, r]));
+      const parsed = JSON.parse(fs.readFileSync(filePath, "utf-8")) as unknown;
+      if (!Array.isArray(parsed)) {
+        return new Map();
+      }
+      const result = new Map<string, ApprovalRecord>();
+      let changed = false;
+      for (const raw of parsed) {
+        const record = normalizeRecord(raw);
+        if (!record) {
+          changed = true;
+          continue;
+        }
+        if (!isRecordValid(record)) {
+          changed = true;
+          continue;
+        }
+        result.set(record.id, record);
+      }
+      if (changed) {
+        savePersistedApprovals(result);
+      }
+      return result;
     } catch {
       return new Map();
     }
   }
 
   function savePersistedApprovals(approvals: Map<string, ApprovalRecord>): void {
-    const data = [...approvals.values()];
+    fs.mkdirSync(dataDir, { recursive: true });
+    const data = [...approvals.values()]
+      .filter((record) => record.duration === "always")
+      .filter(isRecordValid)
+      .sort((left, right) => left.grantedAt.localeCompare(right.grantedAt));
     fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf-8");
+  }
+
+  function findToolRecord(toolName: string): ApprovalRecord | undefined {
+    const once = onceToolApprovals.get(toolName);
+    if (once && isRecordValid(once)) {
+      return once;
+    }
+    if (once) {
+      onceToolApprovals.delete(toolName);
+    }
+    for (const record of loadPersistedApprovals().values()) {
+      if (record.kind === "tool" && record.tool === toolName && isRecordValid(record)) {
+        return record;
+      }
+    }
+    return undefined;
+  }
+
+  function findInvocationRecord(toolName: string, args: unknown, provenance?: ApprovalProvenance): ApprovalRecord | undefined {
+    const key = invocationKey(toolName, args, provenance);
+    const once = onceInvocationApprovals.get(key);
+    if (once && isRecordValid(once) && matchesProvenance(once, provenance)) {
+      return once;
+    }
+    if (once) {
+      onceInvocationApprovals.delete(key);
+    }
+    const argsHash = hashToolArgs(args);
+    for (const record of loadPersistedApprovals().values()) {
+      if (record.kind !== "invocation") {
+        continue;
+      }
+      if (record.tool !== toolName || record.argsHash !== argsHash) {
+        continue;
+      }
+      if (!matchesProvenance(record, provenance)) {
+        continue;
+      }
+      if (isRecordValid(record)) {
+        return record;
+      }
+    }
+    return undefined;
   }
 
   return {
     isApproved(toolName: string): boolean {
-      if (preApprovedSet.has(toolName)) return true;
-      if (onceApprovals.has(toolName)) return true;
-      const persisted = loadPersistedApprovals();
-      return persisted.has(toolName);
+      return this.hasToolApproval(toolName);
     },
 
-    approve(toolName: string, duration: "always" | "once"): void {
-      if (duration === "once") {
-        onceApprovals.add(toolName);
-        return;
+    hasToolApproval(toolName: string): boolean {
+      if (preApprovedSet.has(toolName)) {
+        return true;
       }
-      const persisted = loadPersistedApprovals();
-      persisted.set(toolName, {
+      return Boolean(findToolRecord(toolName));
+    },
+
+    approve(toolName: string, duration: ApprovalDuration, provenance?: ApprovalProvenance, expiresAt?: string): ApprovalRecord {
+      const record: ApprovalRecord = {
+        id: makeGrantId(toolName, "tool"),
+        kind: "tool",
         tool: toolName,
         grantedAt: new Date().toISOString(),
-        duration: "always",
-      });
+        duration,
+        expiresAt,
+        provenance: normalizeProvenance(provenance),
+      };
+      if (duration === "once") {
+        onceToolApprovals.set(toolName, record);
+        return record;
+      }
+      const persisted = loadPersistedApprovals();
+      persisted.set(record.id, record);
       savePersistedApprovals(persisted);
+      return record;
     },
 
     revoke(toolName: string): void {
-      onceApprovals.delete(toolName);
+      onceToolApprovals.delete(toolName);
+      for (const [key, record] of onceInvocationApprovals) {
+        if (record.tool === toolName) {
+          onceInvocationApprovals.delete(key);
+        }
+      }
       const persisted = loadPersistedApprovals();
-      if (persisted.delete(toolName)) {
+      let changed = false;
+      for (const [id, record] of persisted) {
+        if (record.tool === toolName) {
+          persisted.delete(id);
+          changed = true;
+        }
+      }
+      if (changed) {
         savePersistedApprovals(persisted);
       }
     },
 
-    listApproved(): Array<{ tool: string; duration: "always" | "once" }> {
-      const result: Array<{ tool: string; duration: "always" | "once" }> = [];
+    listApproved(): ListedApproval[] {
+      const result: ListedApproval[] = [];
       for (const tool of preApprovedSet) {
-        result.push({ tool, duration: "always" });
+        result.push({ tool, duration: "always", kind: "tool", provenance: { source: "config" } });
       }
-      for (const tool of onceApprovals) {
-        if (!preApprovedSet.has(tool)) {
-          result.push({ tool, duration: "once" });
+      for (const record of onceToolApprovals.values()) {
+        if (isRecordValid(record) && !preApprovedSet.has(record.tool)) {
+          result.push(record);
         }
       }
-      const persisted = loadPersistedApprovals();
-      for (const [tool, record] of persisted) {
-        if (!preApprovedSet.has(tool) && !onceApprovals.has(tool)) {
-          result.push({ tool, duration: record.duration });
+      for (const record of onceInvocationApprovals.values()) {
+        if (isRecordValid(record)) {
+          result.push(record);
         }
+      }
+      for (const record of loadPersistedApprovals().values()) {
+        if (preApprovedSet.has(record.tool) && record.kind === "tool") {
+          continue;
+        }
+        result.push(record);
       }
       return result;
     },
 
     consumeOnce(toolName: string): boolean {
-      if (onceApprovals.has(toolName)) {
-        onceApprovals.delete(toolName);
+      const record = onceToolApprovals.get(toolName);
+      if (!record || !isRecordValid(record)) {
+        onceToolApprovals.delete(toolName);
+        return false;
+      }
+      onceToolApprovals.delete(toolName);
+      return true;
+    },
+
+    approveInvocation(
+      toolName: string,
+      args: unknown,
+      duration: ApprovalDuration,
+      provenance?: ApprovalProvenance,
+      expiresAt?: string,
+    ): ApprovalRecord {
+      const argsHash = hashToolArgs(args);
+      const record: ApprovalRecord = {
+        id: makeGrantId(toolName, "invocation", argsHash),
+        kind: "invocation",
+        tool: toolName,
+        grantedAt: new Date().toISOString(),
+        duration,
+        argsHash,
+        argsSummary: summarizeToolArgs(args),
+        expiresAt,
+        provenance: normalizeProvenance(provenance),
+      };
+      if (duration === "once") {
+        onceInvocationApprovals.set(invocationKey(toolName, args, provenance), record);
+        return record;
+      }
+      const persisted = loadPersistedApprovals();
+      persisted.set(record.id, record);
+      savePersistedApprovals(persisted);
+      return record;
+    },
+
+    isInvocationApproved(toolName: string, args: unknown, provenance?: ApprovalProvenance): boolean {
+      return Boolean(findInvocationRecord(toolName, args, provenance));
+    },
+
+    consumeInvocationOnce(toolName: string, args: unknown, provenance?: ApprovalProvenance): boolean {
+      const key = invocationKey(toolName, args, provenance);
+      const record = onceInvocationApprovals.get(key);
+      if (record && isRecordValid(record) && matchesProvenance(record, provenance)) {
+        onceInvocationApprovals.delete(key);
+        return true;
+      }
+      if (record) {
+        onceInvocationApprovals.delete(key);
+      }
+
+      const argsHash = hashToolArgs(args);
+      for (const [storedKey, storedRecord] of onceInvocationApprovals) {
+        if (storedRecord.tool !== toolName || storedRecord.argsHash !== argsHash) {
+          continue;
+        }
+        if (!isRecordValid(storedRecord) || !matchesProvenance(storedRecord, provenance)) {
+          if (!isRecordValid(storedRecord)) {
+            onceInvocationApprovals.delete(storedKey);
+          }
+          continue;
+        }
+        onceInvocationApprovals.delete(storedKey);
         return true;
       }
       return false;
     },
+
+    revokeGrant(grantId: string): boolean {
+      let revoked = false;
+      for (const [key, record] of onceToolApprovals) {
+        if (record.id === grantId) {
+          onceToolApprovals.delete(key);
+          revoked = true;
+        }
+      }
+      for (const [key, record] of onceInvocationApprovals) {
+        if (record.id === grantId) {
+          onceInvocationApprovals.delete(key);
+          revoked = true;
+        }
+      }
+      const persisted = loadPersistedApprovals();
+      if (persisted.delete(grantId)) {
+        savePersistedApprovals(persisted);
+        revoked = true;
+      }
+      return revoked;
+    },
   };
 }
 
-// ---------------------------------------------------------------------------
-// Capability registry
-// ---------------------------------------------------------------------------
-
-/** Map of tool name -> capabilities. Tools not in the registry are Safe. */
-const toolCapabilityRegistry = new Map<string, ToolCapabilities>();
-
-/**
- * Register a tool's capability requirements.
- */
 export function registerToolCapabilities(toolName: string, capabilities: ToolCapabilities): void {
   toolCapabilityRegistry.set(toolName, capabilities);
 }
 
-/**
- * Get a tool's declared capabilities. Returns Safe if not registered.
- */
 export function getToolCapabilities(toolName: string): ToolCapabilities {
   return toolCapabilityRegistry.get(toolName) ?? { level: "safe" };
 }
 
-// ---------------------------------------------------------------------------
-// Permission check
-// ---------------------------------------------------------------------------
-
 export interface PermissionCheckResult {
   allowed: boolean;
-  /** If not allowed, a message to show the user via the agent. */
   blockReason?: string;
 }
 
-/**
- * Check whether a tool call should be allowed. Safe and guarded tools always
- * pass; elevated tools require explicit user approval.
- */
 export function checkPermission(
   toolName: string,
   trustStore: TrustStore,
@@ -211,9 +615,7 @@ export function checkPermission(
     return { allowed: true };
   }
 
-  // Elevated: check approval
-  if (trustStore.isApproved(toolName)) {
-    // Consume one-time approvals
+  if (trustStore.hasToolApproval(toolName)) {
     trustStore.consumeOnce(toolName);
     return { allowed: true };
   }
@@ -225,58 +627,19 @@ export function checkPermission(
     allowed: false,
     blockReason:
       `Permission required: "${toolName}" needs ${capList}. ${reason} ` +
-      `Ask the user: "Can I use ${toolName}? It needs ${capList}." ` +
-      `If they approve, I'll remember the permission.`,
+      `Ask the user to approve the actual operation and arguments before running it.`,
   };
 }
 
-// ---------------------------------------------------------------------------
-// Pending approval tracking
-// ---------------------------------------------------------------------------
-
-// File-backed approvals (trust-approvals.json) persist across restarts because
-// they represent deliberate, considered user decisions: "always allow this tool".
-// Pending approvals, by contrast, are transient per-session state: the agent
-// asked for permission in this conversation, the user hasn't replied yet. There
-// is no value in carrying that half-finished handshake across a restart, and
-// doing so could surface stale permission prompts after an unrelated restart.
-// The in-process Map is therefore intentional and correct for pending state.
-/** Tools waiting for user approval. Set by the agent when a tool is blocked. */
-const pendingApprovals = new Map<string, string>();
-
-/**
- * Mark a tool as pending approval for `userId`.
- *
- * This is a text-based approval handshake for channels that don't support
- * inline buttons: the agent tells the user what it wants to do, sets a
- * pending entry here, and the next message from that user is tested against
- * an affirmative word list by checkPendingApproval().
- *
- * The key lives only in the in-process `pendingApprovals` Map. It is
- * intentionally not persisted to disk: if the process restarts between the
- * agent's request and the user's reply, the pending state is lost and the
- * user simply needs to ask again. This avoids stale approval prompts
- * surviving across restarts.
- */
 export function setPendingApproval(userId: string, toolName: string): void {
   pendingApprovals.set(userId, toolName);
 }
 
-/**
- * Check whether the user's message completes a pending approval handshake.
- *
- * Returns the tool name that was approved if `userMessage` is an affirmative
- * word and there is a pending entry for `userId`; returns null if the message
- * is negative (clears the pending state), or if it is neither (leaves the
- * pending state intact so the conversation can continue).
- *
- * The affirmative and negative word lists are intentionally short to avoid
- * false positives: only unambiguous single-word replies are treated as
- * approval signals.
- */
 export function checkPendingApproval(userId: string, userMessage: string): string | null {
   const toolName = pendingApprovals.get(userId);
-  if (!toolName) return null;
+  if (!toolName) {
+    return null;
+  }
 
   const lower = userMessage.toLowerCase().trim();
   const affirmative = [
@@ -290,25 +653,15 @@ export function checkPendingApproval(userId: string, userMessage: string): strin
     return toolName;
   }
 
-  const negative = ["no", "n", "nope", "deny", "cancel", "nee"];
+  const negative = ["no", "n", "nope", "deny", "cancel", "stop", "nee"];
   if (negative.includes(lower)) {
     pendingApprovals.delete(userId);
     return null;
   }
 
-  // Not a clear yes/no; leave the pending state but don't block conversation
   return null;
 }
 
-/**
- * Check whether the user's message is an "always approve" grant rather than
- * a one-time "yes".
- *
- * Only exact matches of "always" or "always allow" qualify. Phrases like
- * "yes always" or "sure always" do NOT match here; they fall through to the
- * normal affirmative check in checkPendingApproval() and result in a one-time
- * approval. This keeps the always-grant intentional and explicit.
- */
 export function isAlwaysApproval(userMessage: string): boolean {
   const lower = userMessage.toLowerCase().trim();
   return lower === "always" || lower === "always allow";

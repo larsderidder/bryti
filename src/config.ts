@@ -51,6 +51,8 @@ export interface ModelEntry {
 export interface EmbeddingsConfig {
   /** local uses node-llama-cpp; openai-compatible calls /v1/embeddings. */
   provider: "local" | "openai-compatible";
+  /** Fail startup and recall instead of keyword-only fallback when unavailable. */
+  required?: boolean;
   /** Base URL for OpenAI-compatible providers, for example http://127.0.0.1:11434/v1. */
   base_url?: string;
   api_key?: string;
@@ -558,6 +560,7 @@ function memoryFromConfig(substituted: Record<string, unknown>): Config["memory"
   return {
     embeddings: {
       provider,
+      required: embeddingsRaw.required === true,
       base_url: optionalString(embeddingsRaw.base_url),
       api_key: optionalString(embeddingsRaw.api_key),
       headers: stringRecord(embeddingsRaw.headers),

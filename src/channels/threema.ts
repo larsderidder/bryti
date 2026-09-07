@@ -6,6 +6,8 @@ import type { IncomingMessage as HttpIncomingMessage, ServerResponse } from "nod
 import os from "node:os";
 import path from "node:path";
 import nacl from "tweetnacl";
+import { deliveryNotSent, deliveryUnknown, isDeliveryError } from "./delivery.js";
+import type { DeliveryError } from "./delivery.js";
 import type { ApprovalResult, AudioAttachment, ChannelBridge, IncomingMessage, SendOpts } from "./types.js";
 
 const TEXT_MESSAGE_TYPE = 0x01;
@@ -159,6 +161,37 @@ function createCodedError(message: string, code: string): Error & { code: string
   const error = new Error(message) as Error & { code: string };
   error.code = code;
   return error;
+}
+
+
+function errorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return String(error);
+}
+
+function preserveErrorCode(deliveryError: DeliveryError, error: unknown): DeliveryError {
+  const code = (error as { code?: unknown } | null | undefined)?.code;
+  if (typeof code === "string") {
+    (deliveryError as DeliveryError & { code?: string }).code = code;
+  }
+  return deliveryError;
+}
+
+function classifyThreemaNotSent(error: unknown, retryable: boolean): DeliveryError {
+  return preserveErrorCode(deliveryNotSent(errorMessage(error), { retryable, cause: error }), error);
+}
+
+function classifyThreemaUnknown(error: unknown): DeliveryError {
+  return preserveErrorCode(deliveryUnknown(errorMessage(error), { cause: error }), error);
+}
+
+function classifyThreemaLocalSendError(error: unknown): Error {
+  if (isDeliveryError(error)) {
+    return error;
+  }
+  return classifyThreemaNotSent(error, false);
 }
 
 function parseKeyHex(raw: string): string {
@@ -552,12 +585,22 @@ export class ThreemaBridge implements ChannelBridge {
   }
 
   async sendMessage(channelId: string, text: string, _opts?: SendOpts): Promise<string> {
-    const publicKey = await this.getPublicKey(channelId);
+    let publicKey: Uint8Array;
+    try {
+      publicKey = await this.getPublicKey(channelId);
+    } catch (error) {
+      throw classifyThreemaNotSent(error, true);
+    }
+
     const chunks = chunkTextByUtf8Bytes(text);
     let lastMessageId = "";
 
     for (const chunk of chunks) {
-      lastMessageId = await this.sendEncryptedPayload(channelId, publicKey, encodeTextMessage(chunk, this.cryptoOps.randomBytes(1)));
+      try {
+        lastMessageId = await this.sendEncryptedPayload(channelId, publicKey, encodeTextMessage(chunk, this.cryptoOps.randomBytes(1)));
+      } catch (error) {
+        throw classifyThreemaUnknown(error);
+      }
     }
 
     return lastMessageId;
@@ -568,14 +611,14 @@ export class ThreemaBridge implements ChannelBridge {
     try {
       stats = fs.statSync(audioPath);
     } catch (error) {
-      throw new Error(`Threema audio file not found: ${(error as Error).message}`);
+      throw classifyThreemaLocalSendError(new Error(`Threema audio file not found: ${(error as Error).message}`));
     }
 
     if (!stats.isFile()) {
-      throw new Error("Threema audio path is not a file");
+      throw classifyThreemaLocalSendError(new Error("Threema audio path is not a file"));
     }
     if (stats.size > MAX_BLOB_BYTES) {
-      throw createCodedError("Threema blob too large", "THREEMA_BLOB_TOO_LARGE");
+      throw classifyThreemaLocalSendError(createCodedError("Threema blob too large", "THREEMA_BLOB_TOO_LARGE"));
     }
 
     const fileContent = new Uint8Array(fs.readFileSync(audioPath));
@@ -587,14 +630,20 @@ export class ThreemaBridge implements ChannelBridge {
       nonce: THREEMA_FILE_BLOB_NONCE,
       key: blobKey,
     });
-    const blobId = (await this.httpClient.uploadBlob({
-      blob: encryptedBlob,
-      from: this.config.gatewayId,
-      secret: this.config.secret,
-    })).trim().toLowerCase();
+
+    let blobId: string;
+    try {
+      blobId = (await this.httpClient.uploadBlob({
+        blob: encryptedBlob,
+        from: this.config.gatewayId,
+        secret: this.config.secret,
+      })).trim().toLowerCase();
+    } catch (error) {
+      throw classifyThreemaNotSent(error, true);
+    }
 
     if (!hasValidHex(blobId, 32)) {
-      throw new Error("Invalid Threema blob ID");
+      throw classifyThreemaLocalSendError(new Error("Invalid Threema blob ID"));
     }
 
     const payload = encodeFileMessage({
@@ -607,8 +656,18 @@ export class ThreemaBridge implements ChannelBridge {
       ...(opts?.caption ? { d: opts.caption } : {}),
     }, this.cryptoOps.randomBytes(1));
 
-    const publicKey = await this.getPublicKey(channelId);
-    return this.sendEncryptedPayload(channelId, publicKey, payload);
+    let publicKey: Uint8Array;
+    try {
+      publicKey = await this.getPublicKey(channelId);
+    } catch (error) {
+      throw classifyThreemaNotSent(error, true);
+    }
+
+    try {
+      return await this.sendEncryptedPayload(channelId, publicKey, payload);
+    } catch (error) {
+      throw classifyThreemaUnknown(error);
+    }
   }
 
   async editMessage(_channelId: string, _messageId: string, _text: string): Promise<void> {

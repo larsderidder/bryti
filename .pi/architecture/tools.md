@@ -42,3 +42,13 @@ Agent-written Python/Bash scripts, not TypeScript extensions.
 - Tool activation is additive so supported providers can preserve their prompt-cache prefix
 - Quarantined extension tools are excluded from both the initial active set and the searchable catalog
 - Grouped by: standard groups, workers, and opt-in direct web access (based on config)
+
+## Execution and delivery receipts
+
+- `src/work/store.ts` stores accepted input and separate execution/delivery outcomes in `data/work/receipts.db`. Only queued work is replayed; interrupted execution is not repeated. `/work [id]` exposes receipts only to their owner.
+- `src/channels/outbound-queue.ts` persists the final response before acknowledging completed execution. Startup reconciles staged responses before generating interruption notices. Only definitely-unsent text is retried; ambiguous sends remain `unknown`. Optional voice is forwarded without replaying caller-owned media.
+- Projections persist their originating user, platform, channel, Bryti thread, and channel topic. Scheduler occurrences settle from confirmed receipts, not enqueue success. Failed or uncertain occurrences generate a durable notice and remain paused for explicit review rather than repeating possible side effects.
+- `src/workers/recovery.ts` stores immutable owner routing under `data/work/worker-owners/`, outside worker-writable output directories. Completion notifications are automatic; abandoned workers are interrupted. Owner records retire after durable notification acceptance; result files remain available.
+- `src/trust/wrapper.ts` checks first-use arguments. Exact-argument grants include conversation/automation scope and expiry; `/trust` lists grants and `/trust revoke <id>` revokes one.
+- Optional embeddings degrade to keyword recall during outages. Set `memory.embeddings.required: true` to fail instead.
+- `src/durable-file.ts` atomically replaces worker and outbound JSON records, flushing both contents and the directory entry before acknowledgement.

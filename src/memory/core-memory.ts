@@ -23,6 +23,10 @@ const CORE_MEMORY_MAX_BYTES = 4096;
 const CORE_MEMORY_FULL_MESSAGE =
   "Core memory is full (4KB limit). Move less important information to archival memory using memory_archival_insert.";
 
+function coreMemoryFits(content: string): boolean {
+  return Buffer.byteLength(content, "utf8") <= CORE_MEMORY_MAX_BYTES;
+}
+
 function readFile(filePath: string): string {
   if (!fs.existsSync(filePath)) {
     return "";
@@ -101,7 +105,7 @@ export function createCoreMemory(dataDir: string): CoreMemory {
       }
 
       const updatedContent = buildContent(updatedLines);
-      if (Buffer.byteLength(updatedContent, "utf8") > CORE_MEMORY_MAX_BYTES) {
+      if (!coreMemoryFits(updatedContent)) {
         return { ok: false, error: CORE_MEMORY_FULL_MESSAGE };
       }
 
@@ -135,6 +139,10 @@ export function createCoreMemory(dataDir: string): CoreMemory {
       ];
 
       const updatedContent = buildContent(updatedLines);
+      if (!coreMemoryFits(updatedContent)) {
+        return { ok: false, error: CORE_MEMORY_FULL_MESSAGE };
+      }
+
       writeFile(filePath, updatedContent);
 
       return { ok: true };

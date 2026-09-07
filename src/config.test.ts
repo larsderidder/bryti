@@ -65,6 +65,22 @@ models:
     expect(loadConfig().agent.model).toBe("openai-codex/gpt-6-astra");
   });
 
+  it("parses required embedding policy", () => {
+    fs.writeFileSync(path.join(tempDir, "config.yml"), `
+telegram:
+  token: test-token
+memory:
+  embeddings:
+    required: true
+models:
+  providers:
+    - name: openai-codex
+      api: openai-codex-responses
+      models: []
+`);
+    expect(loadConfig().memory.embeddings.required).toBe(true);
+  });
+
   it("should apply defaults", () => {
     const configContent = `
 agent:
@@ -90,6 +106,7 @@ cron: []
     const config = loadConfig();
 
     expect(config.tools.web_search.enabled).toBe(true);
+    expect(config.memory.embeddings.required).toBe(false);
     expect(config.tools.fetch_url.timeout_ms).toBe(10000);
     expect(config.tools.fetch_url.backend).toBe("readability");
     expect(config.tools.fetch_url.require_https).toBe(true);

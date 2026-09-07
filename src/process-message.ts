@@ -62,6 +62,8 @@ import {
   runPromptWithActivityWatchdog,
 } from "./prompt-lifecycle.js";
 import { acquireSessionTurn } from "./compaction/proactive.js";
+import type { WorkStore } from "./work/store.js";
+import { isDeliveryError } from "./channels/delivery.js";
 
 // ---------------------------------------------------------------------------
 // AppState
@@ -101,6 +103,9 @@ export interface AppState {
    * Falls back to process.exit(RESTART_EXIT_CODE) when null.
    */
   requestRestart: (() => void) | null;
+  /** Durable accepted-work receipts, shared with the queue and delivery adapters. */
+  workStore?: WorkStore;
+  deliveryTargets?: Map<string, IncomingMessage>;
 }
 
 // ---------------------------------------------------------------------------
@@ -271,32 +276,51 @@ async function prepareVoiceMessage(state: AppState, msg: IncomingMessage): Promi
   }
 }
 
-function sendOptsFor(msg: IncomingMessage): { channelThreadId?: string } {
-  return msg.channelThreadId ? { channelThreadId: msg.channelThreadId } : {};
+function sendOptsFor(msg: IncomingMessage): import("./channels/types.js").SendOpts {
+  return { channelThreadId: msg.channelThreadId, workIds: msg.workIds };
 }
 
 async function sendAssistantResponse(state: AppState, msg: IncomingMessage, text: string): Promise<void> {
   const bridge = getBridge(state, msg.platform);
-  if (
-    msg.replyMode === "voice" &&
-    state.config.voice?.enabled &&
-    state.config.voice.reply_with_voice &&
-    state.voiceService &&
-    bridge.sendVoice
-  ) {
+  const ids = msg.workIds ?? [];
+  if (msg.replyMode === "voice" && state.config.voice?.enabled && state.config.voice.reply_with_voice
+    && state.voiceService && bridge.sendVoice) {
     let audioPath = "";
+    let sending = false;
     try {
       audioPath = await state.voiceService.synthesize(text);
+      sending = true;
       await bridge.sendVoice(msg.channelId, audioPath, sendOptsFor(msg));
-      cleanupOutgoingAudioFile(state, audioPath);
+      state.workStore?.recordResponse(ids, "delivered");
       return;
-    } catch (err) {
-      if (audioPath) cleanupOutgoingAudioFile(state, audioPath);
-      console.warn(`[voice] Synthesis/send failed for ${msg.userId}, falling back to text:`, (err as Error).message);
+    } catch (error) {
+      if (sending && (!isDeliveryError(error) || error.outcome === "unknown")) {
+        state.workStore?.recordResponse(ids, "unknown", "Voice delivery could not be confirmed");
+        throw error;
+      }
+      console.warn(`[voice] Voice was not sent for ${msg.userId}; falling back to text`);
+    } finally {
+      if (audioPath) {
+        cleanupOutgoingAudioFile(state, audioPath);
+      }
     }
   }
 
-  await bridge.sendMessage(msg.channelId, text, sendOptsFor(msg));
+  // The durable bridge acknowledges execution only after persisting the reply.
+  // Calls without that bridge are acknowledged here once the send settles.
+  try {
+    await bridge.sendMessage(msg.channelId, text, sendOptsFor(msg));
+    state.workStore?.recordResponse(ids, "delivered");
+  } catch (error) {
+    if (!isDeliveryError(error) || error.outcome === "unknown") {
+      state.workStore?.recordResponse(ids, "unknown", "Response delivery could not be confirmed");
+    } else if (error.retryable) {
+      state.workStore?.recordResponse(ids, "pending");
+    } else {
+      state.workStore?.recordResponse(ids, "failed", "Response delivery was rejected");
+    }
+    throw error;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -304,12 +328,13 @@ async function sendAssistantResponse(state: AppState, msg: IncomingMessage, text
 // ---------------------------------------------------------------------------
 
 /**
- * Find the bridge for a platform, falling back to the first available one.
+ * Find the exact bridge for a platform. Never substitute a different destination.
  */
 export function getBridge(state: AppState, platform?: string): ChannelBridge {
   if (platform) {
     const match = state.bridges.find((b) => b.platform === platform);
     if (match) return match;
+    throw new Error(`Channel is unavailable: ${platform}`);
   }
   return state.bridges[0];
 }
@@ -367,6 +392,8 @@ export async function getOrLoadSession(
   const { userId, channelId, platform } = msg;
   const threadId = msg.threadId ?? DEFAULT_THREAD_ID;
   const sessionKey = getSessionKey(userId, threadId);
+  state.deliveryTargets ??= new Map();
+  state.deliveryTargets.set(sessionKey, msg);
   const existing = state.sessions.get(sessionKey);
   if (existing) return existing;
 
@@ -405,6 +432,10 @@ export async function getOrLoadSession(
     state.coreMemory,
     userId,
     (triggered) => {
+      if (state.workStore) {
+        // Trigger activation is durable; the scheduler owns its receipt and delivery.
+        return;
+      }
       pendingWorkerTriggers.push(...triggered);
       if (!workerTriggerTimer) {
         workerTriggerTimer = setTimeout(flushWorkerTriggers, 5_000);
@@ -412,18 +443,36 @@ export async function getOrLoadSession(
       }
     },
     async (reason: string) => {
-      await triggerRestart(state, { userId, channelId, platform, text: "", raw: null }, reason);
+      await triggerRestart(state, state.deliveryTargets?.get(sessionKey) ?? msg, reason);
     },
     projectionStore,
+    () => state.deliveryTargets?.get(sessionKey) ?? msg,
   );
 
   const trustContext: TrustWrapperContext = {
     config: state.config,
     modelInfra,
-    getLastUserMessage: () => state.lastUserMessages.get(userId),
+    get source() {
+      const target = state.deliveryTargets?.get(sessionKey) ?? msg;
+      const source = {
+        threadId: target.threadId,
+        platform: target.platform,
+        channelId: target.channelId,
+        channelThreadId: target.channelThreadId,
+        source: "user",
+        automationId: undefined as string | undefined,
+      };
+      if (isInternalMessage(target)) {
+        source.source = "automation";
+        source.automationId = target.workId;
+      }
+      return source;
+    },
+    getLastUserMessage: () => state.lastUserMessages.get(sessionKey),
     onApprovalNeeded: async (prompt, approvalKey) => {
-      const bridge = getBridge(state, platform);
-      return bridge.sendApprovalRequest(channelId, prompt, approvalKey, undefined, sendOptsFor(msg));
+      const target = state.deliveryTargets?.get(sessionKey) ?? msg;
+      const bridge = getBridge(state, target.platform);
+      return bridge.sendApprovalRequest(target.channelId, prompt, approvalKey, undefined, { channelThreadId: target.channelThreadId });
     },
   };
   const wrappedTools = wrapToolsWithTrustChecks(
@@ -475,13 +524,13 @@ export async function getOrLoadSession(
   }
 
   userSession.onCompactionComplete = () => {
-    const channelId = String(state.config.telegram.allowed_users[0] ?? userId);
+    const target = state.deliveryTargets?.get(sessionKey) ?? msg;
     const compactionMsg: IncomingMessage = {
-      channelId,
-      userId,
-      platform,
-      threadId,
-      channelThreadId: msg.channelThreadId,
+      channelId: target.channelId,
+      userId: target.userId,
+      platform: target.platform,
+      threadId: target.threadId,
+      channelThreadId: target.channelThreadId,
       text:
         "[System: context was automatically compacted. If you were in the middle of a task " +
         "for the user, continue where you left off. If not, say nothing (NOOP).]",
@@ -524,11 +573,17 @@ export async function processMessage(
   originalMsg: IncomingMessage,
 ): Promise<void> {
   let msg = originalMsg;
+  if (msg.raw && typeof msg.raw === "object" && "type" in msg.raw && msg.raw.type === "recovery_notice") {
+    await sendAssistantResponse(state, msg, msg.text);
+    return;
+  }
 
   const wasCommand = await handleSlashCommand(msg, {
     config: state.config,
     coreMemory: state.coreMemory,
     historyManager: state.historyManager,
+    trustStore: state.trustStore,
+    workStore: state.workStore,
     disposeSession: (userId: string, threadId = DEFAULT_THREAD_ID) => {
       const sessionKey = getSessionKey(userId, threadId);
       const existing = state.sessions.get(sessionKey);
@@ -560,11 +615,15 @@ export async function processMessage(
   };
 
   const voicePreparedMsg = await prepareVoiceMessage(state, msg);
-  if (!voicePreparedMsg) return;
+  if (!voicePreparedMsg) {
+    state.workStore?.finish(msg.workIds ?? [], "failed", "Voice input could not be processed");
+    return;
+  }
   msg = voicePreparedMsg;
 
   const MAX_MESSAGE_LENGTH = 10_000;
   if (msg.text.length > MAX_MESSAGE_LENGTH) {
+    state.workStore?.finish(msg.workIds ?? [], "failed", "Input exceeds the message limit");
     await getBridge(state, msg.platform).sendMessage(
       msg.channelId,
       `That message is too long (${msg.text.length.toLocaleString()} characters). ` +
@@ -584,7 +643,9 @@ export async function processMessage(
     );
   }
 
-  state.lastUserMessages.set(msg.userId, msg.text);
+  if (!isInternalMessage(msg)) {
+    state.lastUserMessages.set(getSessionKey(msg.userId, msg.threadId ?? DEFAULT_THREAD_ID), msg.text);
+  }
 
   await getBridge(state, msg.platform).sendTyping(msg.channelId, sendOptsFor(msg));
 
@@ -639,7 +700,7 @@ export async function processMessage(
     });
 
     const isUserMessage = !isSchedulerMessage;
-    if (isUserMessage) {
+    if (isUserMessage && !state.workStore) {
       writePendingCheckpoint(state.config, msg);
     }
 
@@ -682,12 +743,13 @@ export async function processMessage(
     // is unreliable (partially updated). Evict it from the cache so the next
     // message reloads from the JSONL file (the source of truth).
     if (promptResult.status === "timeout") {
+      state.workStore?.finish(msg.workIds ?? [], "interrupted", "Prompt inactivity timeout; not replayed");
       console.log(`[agent] Evicting session for ${sessionKey} after timeout abort`);
       try {
         await getBridge(state, msg.platform).sendMessage(
           msg.channelId,
-          "This request took too long without any activity, so I stopped it. Please resend your message.",
-          sendOptsFor(msg),
+          "This request took too long without any activity, so I stopped it. Some actions may already have happened. Ask me to check the outcome before retrying.",
+          { channelThreadId: msg.channelThreadId },
         );
       } catch {
         // Best-effort — don't let a send failure mask the eviction
@@ -757,7 +819,14 @@ export async function processMessage(
       );
     }
 
+    if (lastAssistant?.stopReason === "aborted") {
+      state.workStore?.finish(msg.workIds ?? [], "interrupted", "Model turn was aborted; not replayed");
+      userSession.dispose();
+      state.sessions.delete(sessionKey);
+      return;
+    }
     if (lastAssistant?.stopReason === "error") {
+      state.workStore?.finish(msg.workIds ?? [], "failed", "Model returned an error");
       const errorMsg = String(lastAssistant.errorMessage ?? "Unknown model error");
       console.error("Model error:", errorMsg);
       await getBridge(state, msg.platform).sendMessage(
@@ -773,7 +842,7 @@ export async function processMessage(
     // Filter out any NOOP entries — only suppress if ALL entries are NOOP.
     const visibleTexts = allResponseTexts.filter((t) => t !== SILENT_REPLY_TOKEN);
 
-    if (allResponseTexts.length > 0 && visibleTexts.length === 0) {
+    if (visibleTexts.length === 0 && extractResponseText(lastAssistant).trim() === SILENT_REPLY_TOKEN) {
       console.log(`[agent] Silent reply from ${msg.userId}, suppressing message`);
     } else if (visibleTexts.length > 0) {
       const combinedText = visibleTexts.join("\n\n");
@@ -786,27 +855,63 @@ export async function processMessage(
       console.log(
         `[agent] No text response from ${msg.userId} after user message, re-prompting`,
       );
-      await promptWithFallback(
-        session,
-        "You just completed tool calls but didn't reply to the user. Respond now with a brief confirmation of what you did.",
-        state.config,
-        userSession.modelRegistry,
-        msg.userId,
-      );
+      const followUpResult = await runPromptWithActivityWatchdog({
+        sessionKey,
+        subscribe: (listener) => session.subscribe(listener),
+        abort: () => session.abort(),
+        operation: (controls) => promptWithFallback(
+          session,
+          "You just completed tool calls but didn't reply to the user. Respond now with a brief confirmation of what you did.",
+          state.config,
+          userSession.modelRegistry,
+          msg.userId,
+          undefined,
+          controls,
+        ),
+      });
+      if (followUpResult.status === "timeout") {
+        state.workStore?.finish(msg.workIds ?? [], "interrupted", "Follow-up prompt timed out; not replayed");
+        userSession.dispose();
+        state.sessions.delete(sessionKey);
+        try {
+          await getBridge(state, msg.platform).sendMessage(msg.channelId,
+            "I stopped waiting for the final response. Some actions may already have happened. Ask me to check the outcome before retrying.",
+            { channelThreadId: msg.channelThreadId });
+        } catch {
+          // The interrupted work receipt remains available for recovery.
+        }
+        return;
+      }
       const followUpMsg = toAssistantMessage(
         session.messages.filter((m) => m.role === "assistant").pop(),
       );
+      if (followUpMsg?.stopReason === "aborted") {
+        state.workStore?.finish(msg.workIds ?? [], "interrupted", "Follow-up prompt was aborted; not replayed");
+        userSession.dispose();
+        state.sessions.delete(sessionKey);
+        return;
+      }
+      if (followUpMsg?.stopReason === "error") {
+        throw new Error("Model follow-up failed");
+      }
       const followUpText = extractResponseText(followUpMsg, { showThinking: state.config.response?.show_thinking === true });
       if (followUpText.trim() && followUpText.trim() !== SILENT_REPLY_TOKEN) {
         await state.historyManager.append({ role: "assistant", content: followUpText });
         await sendAssistantResponse(state, msg, followUpText);
       }
     } else {
+      state.workStore?.finish(msg.workIds ?? [], "failed", "Scheduled work produced neither a response nor an explicit silent acknowledgement");
       console.log(
         `[agent] No text response from ${msg.userId} (scheduler turn), suppressing`,
       );
     }
   } catch (error) {
+    const ids = msg.workIds ?? [];
+    if (state.workStore && ids.some((id) => state.workStore!.get(id)?.execution === "completed")) {
+      // Execution already finished. Delivery owns retry or unknown-send handling.
+      return;
+    }
+    state.workStore?.finish(ids, "failed", "Message processing failed");
     const err = error as Error;
     console.error("Error processing message:", err);
     await getBridge(state, msg.platform).sendMessage(

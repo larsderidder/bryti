@@ -24,6 +24,7 @@ import type { WorkerRegistry } from "./registry.js";
 import type { ProjectionStore } from "../projection/store.js";
 import { createBrytiSettingsManager, createModelInfra, resolveModel, resolveFirstModel } from "../model-infra.js";
 import { attachWorkerRunTracker, type WorkerProgress, type WorkerRuntimePaths } from "./tracker.js";
+import { writeWorkerStatus } from "./recovery.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -77,7 +78,7 @@ function buildWorkerSystemPrompt(task: string, workerDir: string): string {
 
 export interface WorkerStatusFile {
   worker_id: string;
-  status: "queued" | "running" | "complete" | "failed" | "timeout" | "cancelled";
+  status: "queued" | "running" | "complete" | "failed" | "timeout" | "cancelled" | "interrupted";
   task: string;
   started_at: string;
   completed_at: string | null;
@@ -90,6 +91,7 @@ export interface WorkerStatusFile {
   progress?: WorkerProgress;
 }
 
+
 /**
  * Write (or overwrite) the status.json file in the worker directory.
  *
@@ -99,15 +101,13 @@ export interface WorkerStatusFile {
  * reading this file from disk. Writing is best-effort: failures are swallowed
  * so they never abort a completion or timeout handler.
  */
-export function writeStatusFile(workerDir: string, data: WorkerStatusFile): void {
+export function writeStatusFile(workerDir: string, data: WorkerStatusFile): boolean {
   try {
-    fs.writeFileSync(
-      path.join(workerDir, "status.json"),
-      JSON.stringify(data, null, 2),
-      "utf-8",
-    );
+    writeWorkerStatus(workerDir, data);
+    return true;
   } catch {
-    // Best-effort — don't crash the completion handler
+    console.warn("[workers] Status persistence failed; previous recovery record was retained");
+    return false;
   }
 }
 

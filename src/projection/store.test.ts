@@ -255,6 +255,76 @@ describe("createProjectionStore", () => {
     expect(p!.recurrence).toBeNull();
   });
 
+
+  it("stores the originating scheduler target", () => {
+    const id = store.add({
+      summary: "Targeted thing",
+      resolved_when: isoHoursFromNow(1),
+      resolution: "exact",
+      target: {
+        userId: "user1",
+        channelId: "topic-1",
+        platform: "telegram",
+        threadId: "thread-a",
+        channelThreadId: "77",
+      },
+    });
+
+    const projection = store.getById(id);
+    expect(projection).toMatchObject({
+      target_user_id: "user1",
+      target_channel_id: "topic-1",
+      target_platform: "telegram",
+      target_thread_id: "thread-a",
+      target_channel_thread_id: "77",
+    });
+  });
+
+  it("rejects explicit targets for a different projection owner", () => {
+    expect(() => store.add({
+      summary: "Wrong owner",
+      target: { userId: "another-user", channelId: "user1", platform: "telegram" },
+    })).toThrow(/owner/i);
+  });
+
+  it("marks an accepted delivery work id and excludes it from due checks", () => {
+    const id = store.add({
+      summary: "Accepted occurrence",
+      resolved_when: isoHoursFromNow(0),
+      resolution: "exact",
+    });
+
+    expect(store.markDeliveryWork(id, "projection:user1:work")).toBe(true);
+    expect(store.getById(id)?.delivery_work_id).toBe("projection:user1:work");
+    expect(store.getAwaitingDelivery().map((p) => p.id)).toContain(id);
+    expect(store.getExactDue(5).map((p) => p.id)).not.toContain(id);
+  });
+
+  it("does not auto-expire accepted occurrences", () => {
+    const id = store.add({
+      summary: "Accepted old occurrence",
+      resolved_when: isoHoursFromNow(-2),
+      resolution: "exact",
+    });
+
+    store.markDeliveryWork(id, "projection:user1:old");
+    expect(store.autoExpire(0)).toBe(0);
+    expect(store.getById(id)?.status).toBe("pending");
+  });
+
+  it("does not rearm missed accepted recurring occurrences", () => {
+    const id = store.add({
+      summary: "Accepted recurring occurrence",
+      resolved_when: isoHoursFromNow(-5),
+      resolution: "exact",
+      recurrence: "* * * * *",
+    });
+
+    store.markDeliveryWork(id, "projection:user1:recurring");
+    expect(store.rearmMissed("UTC")).toEqual([]);
+    expect(store.getById(id)?.delivery_work_id).toBe("projection:user1:recurring");
+  });
+
   // ---------------------------------------------------------------------------
   // checkTriggers
   // ---------------------------------------------------------------------------

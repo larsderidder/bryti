@@ -5,7 +5,7 @@
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { Static } from "typebox";
 import { Type } from "typebox";
-import type { DependencyConditionType, ProjectionResolution, ProjectionStore } from "./store.js";
+import type { DependencyConditionType, ProjectionResolution, ProjectionStore, ProjectionTarget } from "./store.js";
 
 // ---------------------------------------------------------------------------
 // Tool schemas
@@ -113,6 +113,7 @@ type GetProjectionsInput = Static<typeof getProjectionsSchema>;
 type ResolveProjectionInput = Static<typeof resolveProjectionSchema>;
 type UpdateProjectionInput = Static<typeof updateProjectionSchema>;
 type LinkProjectionInput = Static<typeof linkProjectionSchema>;
+type ProjectionTargetGetter = () => ProjectionTarget | undefined | null;
 
 // ---------------------------------------------------------------------------
 // Tool factory
@@ -150,9 +151,14 @@ function toUtcDatetime(naive: string, timezone: string | undefined): string {
 
 /**
  * Create projection tools. When timezone is set, naive datetimes from the
- * agent are converted to UTC before storage.
+ * agent are converted to UTC before storage. getTarget is evaluated for each
+ * projection_create call so reminders keep the latest active reply target.
  */
-export function createProjectionTools(store: ProjectionStore, timezone?: string): AgentTool<any>[] {
+export function createProjectionTools(
+  store: ProjectionStore,
+  timezone?: string,
+  getTarget?: ProjectionTargetGetter,
+): AgentTool<any>[] {
   const projectTool: AgentTool<typeof projectSchema> = {
     name: "projection_create",
     label: "projection_create",
@@ -190,6 +196,9 @@ export function createProjectionTools(store: ProjectionStore, timezone?: string)
           }
         }
 
+
+        const target = getTarget?.() ?? undefined;
+
         const id = store.add({
           summary,
           raw_when,
@@ -199,6 +208,7 @@ export function createProjectionTools(store: ProjectionStore, timezone?: string)
           trigger_on_fact,
           context,
           linked_ids,
+          target,
           depends_on: depends_on?.map((dep) => ({
             subject_id: dep.projection_id,
             condition: dep.condition,

@@ -299,6 +299,24 @@ describe("TelegramBridge", () => {
     await bridge.stop();
   });
 
+
+  it("classifies Telegram API rejection as permanent not-sent delivery", async () => {
+    const bridge = new TelegramBridge("test-token", [67890]);
+    await bridge.start();
+
+    const bot = grammyMocks.MockBot.instances[0];
+    bot.api.sendMessage.mockRejectedValueOnce({
+      error_code: 403,
+      description: "Forbidden: bot was blocked by the user",
+    });
+
+    await expect(bridge.sendMessage("12345", "hello")).rejects.toMatchObject({
+      outcome: "not_sent",
+      retryable: false,
+    });
+    await bridge.stop();
+  });
+
   it("sends voice replies through Telegram sendVoice without deleting the file", async () => {
     const bridge = new TelegramBridge("test-token", [67890]);
     await bridge.start();

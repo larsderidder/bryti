@@ -397,9 +397,14 @@ describe("WebE2EEBridge", () => {
     await registerDevice();
     await bridge.start();
 
-    await expect(bridge.sendMessage("wed_test", "hello")).rejects.toThrow(
+    const send = bridge.sendMessage("wed_test", "hello");
+    await expect(send).rejects.toThrow(
       "web_e2ee device is offline: wed_test",
     );
+    await expect(send).rejects.toMatchObject({
+      outcome: "not_sent",
+      retryable: true,
+    });
 
     await bridge.stop();
   });
@@ -412,9 +417,14 @@ describe("WebE2EEBridge", () => {
     const audioPath = path.join(tempDir, "reply.ogg");
     fs.writeFileSync(audioPath, "voice reply bytes");
 
-    await expect(bridge.sendVoice!("wed_test", audioPath)).rejects.toThrow(
+    const send = bridge.sendVoice!("wed_test", audioPath);
+    await expect(send).rejects.toThrow(
       "web_e2ee device is offline: wed_test",
     );
+    await expect(send).rejects.toMatchObject({
+      outcome: "not_sent",
+      retryable: true,
+    });
 
     expect(fs.existsSync(audioPath)).toBe(true);
     await bridge.stop();

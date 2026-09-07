@@ -18,6 +18,7 @@ import makeWASocket, {
 import type { ILogger } from "@whiskeysockets/baileys/lib/Utils/logger.js";
 import { Boom } from "@hapi/boom";
 import qrcode from "qrcode-terminal";
+import { deliveryNotSent, deliveryUnknown, isDeliveryError } from "./delivery.js";
 import type { ApprovalResult, ChannelBridge, IncomingMessage, SendOpts } from "./types.js";
 import { withTimeout } from "../util/timeout.js";
 
@@ -33,6 +34,17 @@ const MAX_MESSAGE_LENGTH = 4000;
 const WHATSAPP_CONNECT_TIMEOUT_MS = 60_000;
 const WHATSAPP_SEND_TIMEOUT_MS = 30_000;
 const WHATSAPP_MEDIA_DOWNLOAD_TIMEOUT_MS = 30_000;
+
+
+function classifyWhatsAppSendError(error: unknown): Error {
+  if (isDeliveryError(error)) {
+    return error;
+  }
+  if (error instanceof Error) {
+    return deliveryUnknown(error.message, { cause: error });
+  }
+  return deliveryUnknown(String(error), { cause: error });
+}
 
 export class WhatsAppBridge implements ChannelBridge {
   readonly name = "whatsapp";
@@ -238,7 +250,7 @@ export class WhatsAppBridge implements ChannelBridge {
 
   async sendMessage(channelId: string, text: string, _opts?: SendOpts): Promise<string> {
     if (!this.socket || this.connectionState !== "open") {
-      throw new Error("WhatsApp not connected");
+      throw deliveryNotSent("WhatsApp not connected", { retryable: true });
     }
 
     const formatted = formatForWhatsApp(text);
@@ -246,12 +258,16 @@ export class WhatsAppBridge implements ChannelBridge {
 
     let lastMessageId = "";
     for (const chunk of chunks) {
-      const sent = await withTimeout(
-        this.socket.sendMessage(channelId, { text: chunk }),
-        WHATSAPP_SEND_TIMEOUT_MS,
-        "WhatsApp sendMessage",
-      );
-      lastMessageId = sent?.key?.id ?? "";
+      try {
+        const sent = await withTimeout(
+          this.socket.sendMessage(channelId, { text: chunk }),
+          WHATSAPP_SEND_TIMEOUT_MS,
+          "WhatsApp sendMessage",
+        );
+        lastMessageId = sent?.key?.id ?? "";
+      } catch (error) {
+        throw classifyWhatsAppSendError(error);
+      }
 
       // Small delay between chunks to avoid rate limiting
       if (chunks.length > 1) {

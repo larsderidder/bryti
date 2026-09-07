@@ -49,7 +49,9 @@ import { WhatsAppBridge } from "./channels/whatsapp.js";
 import { ThreemaBridge } from "./channels/threema.js";
 import { WebE2EEBridge } from "./channels/web_e2ee.js";
 import { withDurableOutbound } from "./channels/outbound-queue.js";
-import { createScheduler } from "./scheduler.js";
+import { createScheduler, isTargetAllowed } from "./scheduler.js";
+import { createWorkStore } from "./work/store.js";
+import { collectWorkerEvents, acknowledgeWorkerEvent } from "./workers/recovery.js";
 import { MessageQueue } from "./message-queue.js";
 import { getActiveThread } from "./threads.js";
 import type { IncomingMessage, ChannelBridge } from "./channels/types.js";
@@ -119,6 +121,13 @@ async function startApp(onRequestRestart?: () => void): Promise<RunningApp> {
   const historyManager = createHistoryManager(config.data_dir);
   const usageTracker = createUsageTracker(config.data_dir);
   const trustStore = createTrustStore(config.data_dir, config.trust.approved_tools);
+  const workStore = createWorkStore(config.data_dir);
+  const recoveredWork = workStore.recover();
+  const outboundOptions = {
+    onOutcome: (event: import("./channels/outbound-queue.js").OutboundOutcomeEvent) => {
+      workStore.recordResponse(event.workIds, event.state, event.error);
+    },
+  };
   const voiceService = createVoiceService(config);
 
   // ---------------------------------------------------------------------------
@@ -134,12 +143,12 @@ async function startApp(onRequestRestart?: () => void): Promise<RunningApp> {
       mode: config.telegram.mode,
       allowedGroups: config.telegram.allowed_groups,
     });
-    bridges.push(withDurableOutbound(telegram, config.data_dir));
+    bridges.push(withDurableOutbound(telegram, config.data_dir, outboundOptions));
   }
 
   if (config.whatsapp.enabled) {
     const whatsapp = new WhatsAppBridge(config.data_dir, config.whatsapp.allowed_users);
-    bridges.push(withDurableOutbound(whatsapp, config.data_dir));
+    bridges.push(withDurableOutbound(whatsapp, config.data_dir, outboundOptions));
   }
 
   if (config.threema.enabled) {
@@ -153,12 +162,12 @@ async function startApp(onRequestRestart?: () => void): Promise<RunningApp> {
       callbackPort: config.threema.callback.port,
       callbackPath: config.threema.callback.path,
     });
-    bridges.push(threema);
+    bridges.push(withDurableOutbound(threema, config.data_dir, outboundOptions));
   }
 
   if (config.web_e2ee.enabled) {
     const webE2EE = new WebE2EEBridge(config.data_dir, config.web_e2ee);
-    bridges.push(webE2EE);
+    bridges.push(withDurableOutbound(webE2EE, config.data_dir, outboundOptions));
   }
 
   if (bridges.length === 0) {
@@ -182,12 +191,16 @@ async function startApp(onRequestRestart?: () => void): Promise<RunningApp> {
     recoveredSessions: new Set(),
     voiceService,
     requestRestart: onRequestRestart ?? null,
+    workStore,
   };
 
   const queue = new MessageQueue(
     (msg) => processMessage(state, msg),
     async (msg) => {
       console.log(...formatQueueFullLog(msg));
+      if (msg.raw && typeof msg.raw === "object" && "type" in msg.raw) {
+        return;
+      }
       const bridge = getBridge(state, msg.platform);
       await bridge.sendMessage(
         msg.channelId,
@@ -197,6 +210,7 @@ async function startApp(onRequestRestart?: () => void): Promise<RunningApp> {
     undefined,
     undefined,
     (userId) => getActiveThread(config.data_dir, userId),
+    { store: workStore, paused: true },
   );
 
   // ---------------------------------------------------------------------------
@@ -216,9 +230,48 @@ async function startApp(onRequestRestart?: () => void): Promise<RunningApp> {
   await Promise.all(bridges.map((b) => b.start()));
   console.log(`Channels: ${bridges.map((b) => b.name).join(", ")}`);
 
+  // Execution was paused until all transports could deliver recovery notices.
+  for (const record of recoveredWork.queued) {
+    if (!isTargetAllowed(config, record.message)) {
+      workStore.claim([record.id]);
+      workStore.finish([record.id], "failed", "Destination is no longer authorized");
+    }
+  }
+  for (const record of recoveredWork.interrupted) {
+    if (workStore.get(record.id)?.execution !== "interrupted") {
+      continue;
+    }
+    if (isTargetAllowed(config, record.message)) {
+      queue.enqueue({
+        ...record.message,
+        workId: `recovery:${record.message.workIds?.[0] ?? record.id}`,
+        workIds: undefined,
+        images: undefined,
+        audio: undefined,
+        replyMode: "text",
+        text: "Bryti restarted while working on a request. That work was marked interrupted and was not repeated, because some actions may already have happened. Ask me to check its outcome before trying it again.",
+        raw: { type: "recovery_notice" },
+      });
+    }
+  }
+  const recoverWorkers = (recoverInterrupted = false) => {
+    for (const msg of collectWorkerEvents(config.data_dir, recoverInterrupted)) {
+      if (!isTargetAllowed(config, msg)) {
+        continue;
+      }
+      if (workStore.get(msg.workId!) || queue.enqueue(msg)) {
+        acknowledgeWorkerEvent(config.data_dir, msg.workId!);
+      }
+    }
+  };
+  recoverWorkers(true);
+  queue.start();
+  const workerRecoveryTimer = setInterval(() => recoverWorkers(), 30_000);
+  workerRecoveryTimer.unref();
+
   const scheduler = createScheduler(config, async (msg: IncomingMessage) => {
-    queue.enqueue(msg);
-  });
+    return queue.enqueue(msg);
+  }, workStore);
   scheduler.start();
   state.scheduler = scheduler;
 
@@ -290,14 +343,19 @@ async function startApp(onRequestRestart?: () => void): Promise<RunningApp> {
       stopped = true;
       console.log("Shutting down...");
       state.scheduler.stop();
+      clearInterval(workerRecoveryTimer);
+      queue.stop();
       eventsWatcher.stop();
       for (const job of compactionJobs) job.stop();
+      await Promise.all([...state.sessions.values()].map((session) => session.session.abort()));
+      await queue.waitForIdle();
       await Promise.all(state.bridges.map((b) => b.stop()));
       for (const [userId, userSession] of state.sessions) {
         console.log(`Disposing session for user ${userId}`);
         userSession.dispose();
       }
       await disposeEmbeddings();
+      workStore.close();
     },
   };
 }

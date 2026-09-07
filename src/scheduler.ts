@@ -1,30 +1,26 @@
 /**
- * Scheduler: three job types, all driving the agent via synthetic messages.
+ * Scheduler: config cron jobs, projection reminders, and reflection.
  *
- * 1. Config-driven jobs (startConfigJobs): cron entries from config.yml. The
- *    operator defines the schedule and the message text. Fire unconditionally
- *    regardless of active-hours config.
- *
- * 2. Projection daily review (startProjectionJobs — daily): fires at 08:00 UTC
- *    every day. Sends the agent a broad "what's coming up?" prompt listing all
- *    projections due in the next 7 days. The agent decides what (if anything)
- *    to surface to the user.
- *
- * 3. Projection exact-time check (startProjectionJobs — every 5 min): precise
- *    trigger for projections with a specific datetime. Checks for anything due
- *    within the next 15 minutes. Skips silently outside active hours.
- *
- * All three types construct a synthetic IncomingMessage and pass it to the
- * onMessage callback, which feeds it into the main agent loop exactly as if
- * a real user had sent it.
+ * Scheduled projection delivery is durable. The scheduler assigns a stable
+ * work id for each projection occurrence, enqueues one synthetic message per
+ * occurrence, then waits for the work receipt before rearming or resolving the
+ * projection. Enqueue acceptance is not treated as execution or delivery.
  */
 
 import { Cron } from "croner";
 import type { Config } from "./config.js";
-import type { IncomingMessage } from "./channels/types.js";
-import { createProjectionStore, formatProjectionsForPrompt, runReflection } from "./projection/index.js";
+import type { IncomingMessage, Platform } from "./channels/types.js";
+import {
+  createProjectionStore,
+  formatProjectionsForPrompt,
+  runReflection,
+  type Projection,
+  type ProjectionStore,
+} from "./projection/index.js";
 import { isActiveNow } from "./active-hours.js";
 import { getUserTimezone } from "./time.js";
+import { createDeviceStore } from "./web-e2ee/device-store.js";
+import { createWorkStore, type WorkRecord, type WorkStore } from "./work/store.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -34,23 +30,224 @@ import { getUserTimezone } from "./time.js";
  * Given a cron expression, calculate the next fire time after `after` and
  * return it as a UTC datetime string suitable for SQLite ("YYYY-MM-DD HH:MM").
  * Returns null if the expression is invalid or produces no next occurrence.
- *
- * Implementation note: croner does not expose a pure "next occurrence"
- * function without constructing a live job. This creates a temporary Cron
- * instance, reads the next run time, then immediately stops it to avoid
- * leaking a running interval.
  */
 function nextCronOccurrence(cronExpr: string, after: Date, timezone = "UTC"): string | null {
   try {
     const job = new Cron(cronExpr, { timezone, startAt: after });
     const next = job.nextRun(after);
     job.stop();
-    if (!next) return null;
-    // Store as UTC datetime string (the projection store always works in UTC)
+    if (!next) {
+      return null;
+    }
     return next.toISOString().slice(0, 16).replace("T", " ");
   } catch {
     return null;
   }
+}
+
+function runNonOverlapping(name: string, fn: () => Promise<void>): () => Promise<void> {
+  let running = false;
+  return async () => {
+    if (running) {
+      console.warn(`[scheduler] Skipping overlapping ${name} run`);
+      return;
+    }
+    running = true;
+    try {
+      await fn();
+    } finally {
+      running = false;
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Delivery targets
+// ---------------------------------------------------------------------------
+
+export interface SchedulerTarget {
+  userId: string;
+  channelId: string;
+  platform: Platform;
+  threadId?: string;
+  channelThreadId?: string;
+}
+
+function targetKey(target: SchedulerTarget): string {
+  return JSON.stringify([
+    target.userId,
+    target.channelId,
+    target.platform,
+    target.threadId ?? null,
+    target.channelThreadId ?? null,
+  ]);
+}
+
+function addTarget(targets: Map<string, SchedulerTarget>, target: SchedulerTarget): void {
+  targets.set(targetKey(target), target);
+}
+
+/** Return configured fallback delivery targets that are authorized for use. */
+export function getSchedulerTargets(config: Config): SchedulerTarget[] {
+  const targets = new Map<string, SchedulerTarget>();
+
+  if (config.telegram.token) {
+    for (const id of config.telegram.allowed_users) {
+      const userId = String(id);
+      addTarget(targets, { userId, channelId: userId, platform: "telegram" });
+    }
+
+    if (config.telegram.mode === "group") {
+      for (const user of config.telegram.allowed_users) {
+        for (const group of config.telegram.allowed_groups ?? []) {
+          addTarget(targets, {
+            userId: String(user),
+            channelId: String(group),
+            platform: "telegram",
+          });
+        }
+      }
+    }
+  }
+
+  if (config.whatsapp.enabled) {
+    for (const id of config.whatsapp.allowed_users) {
+      const userId = String(id);
+      addTarget(targets, { userId, channelId: userId, platform: "whatsapp" });
+    }
+  }
+
+  if (config.threema.enabled) {
+    for (const id of config.threema.allowed_senders) {
+      const userId = String(id);
+      addTarget(targets, { userId, channelId: userId, platform: "threema" });
+    }
+  }
+
+  if (config.web_e2ee.enabled) {
+    try {
+      const deviceStore = createDeviceStore(config.data_dir);
+      for (const device of deviceStore.list()) {
+        if (device.status !== "active") {
+          continue;
+        }
+        addTarget(targets, {
+          userId: device.deviceId,
+          channelId: device.deviceId,
+          platform: "web_e2ee",
+        });
+      }
+    } catch (err) {
+      console.warn(`[web_e2ee] Could not load scheduler targets: ${(err as Error).message}`);
+    }
+  }
+
+  return [...targets.values()];
+}
+
+function targetsByUserId(targets: SchedulerTarget[]): Map<string, SchedulerTarget[]> {
+  const grouped = new Map<string, SchedulerTarget[]>();
+  for (const target of targets) {
+    const existing = grouped.get(target.userId) ?? [];
+    existing.push(target);
+    grouped.set(target.userId, existing);
+  }
+  return grouped;
+}
+
+export function targetFromProjection(projection: Projection): SchedulerTarget | null {
+  if (!projection.target_user_id || !projection.target_channel_id || !projection.target_platform) {
+    return null;
+  }
+
+  return {
+    userId: projection.target_user_id,
+    channelId: projection.target_channel_id,
+    platform: projection.target_platform as Platform,
+    threadId: projection.target_thread_id ?? undefined,
+    channelThreadId: projection.target_channel_thread_id ?? undefined,
+  };
+}
+
+export function isTargetAllowed(config: Config, target: SchedulerTarget): boolean {
+  if (target.platform === "telegram") {
+    if (!config.telegram.token) {
+      return false;
+    }
+    const allowedUser = config.telegram.allowed_users.map(String).includes(target.userId);
+    if (!allowedUser) {
+      return false;
+    }
+    if (target.channelId === target.userId) {
+      return true;
+    }
+    return config.telegram.mode === "group"
+      && (config.telegram.allowed_groups ?? []).map(String).includes(target.channelId);
+  }
+
+  if (target.platform === "whatsapp") {
+    return config.whatsapp.enabled
+      && target.channelId === target.userId
+      && config.whatsapp.allowed_users.includes(target.userId);
+  }
+
+  if (target.platform === "threema") {
+    return config.threema.enabled
+      && target.channelId === target.userId
+      && config.threema.allowed_senders.includes(target.userId);
+  }
+
+  if (target.platform === "web_e2ee") {
+    if (!config.web_e2ee.enabled || target.channelId !== target.userId) {
+      return false;
+    }
+    try {
+      return Boolean(createDeviceStore(config.data_dir).getActive(target.channelId));
+    } catch (err) {
+      console.warn(`[web_e2ee] Could not validate scheduler target ${target.channelId}: ${(err as Error).message}`);
+      return false;
+    }
+  }
+
+  return false;
+}
+
+function targetForProjection(
+  config: Config,
+  ownerUserId: string,
+  projection: Projection,
+  fallbackTarget: SchedulerTarget,
+): SchedulerTarget | null {
+  const storedTarget = targetFromProjection(projection);
+  if (!storedTarget) {
+    if (!isTargetAllowed(config, fallbackTarget)) {
+      return null;
+    }
+    return fallbackTarget;
+  }
+
+  if (storedTarget.userId !== ownerUserId) {
+    return null;
+  }
+  if (!isTargetAllowed(config, storedTarget)) {
+    return null;
+  }
+  return storedTarget;
+}
+
+export function groupDueByTarget(
+  due: Projection[],
+  fallbackTarget: SchedulerTarget,
+): Map<string, { target: SchedulerTarget; projections: Projection[] }> {
+  const grouped = new Map<string, { target: SchedulerTarget; projections: Projection[] }>();
+  for (const projection of due) {
+    const target = targetFromProjection(projection) ?? fallbackTarget;
+    const key = targetKey(target);
+    const entry = grouped.get(key) ?? { target, projections: [] };
+    entry.projections.push(projection);
+    grouped.set(key, entry);
+  }
+  return grouped;
 }
 
 // ---------------------------------------------------------------------------
@@ -59,44 +256,43 @@ function nextCronOccurrence(cronExpr: string, after: Date, timezone = "UTC"): st
 
 const DAILY_REVIEW_TAG = "__daily_review__";
 
-/**
- * Ensure a daily review projection exists for each known user.
- *
- * The daily review used to be a hardcoded cron job. Now it's a regular
- * recurring projection so the user (and the agent) can modify its schedule
- * with projection_update, just like any other recurring reminder.
- *
- * On first boot (or after a migration), this creates the projection if one
- * doesn't already exist. The tag is used to identify it idempotently.
- */
 function bootstrapDailyReview(config: Config): void {
   const mem = config.agent_def.memory;
-  if (!mem.daily_review) return;
+  if (!mem.daily_review) {
+    return;
+  }
 
-  const schedule = typeof mem.daily_review === "string"
-    ? mem.daily_review
-    : "0 8 * * *";
+  let schedule = "0 8 * * *";
+  if (typeof mem.daily_review === "string") {
+    schedule = mem.daily_review;
+  }
 
-  const knownUsers = getKnownUsers(config);
-  for (const userId of knownUsers) {
+  const targets = getSchedulerTargets(config);
+  const groupedTargets = targetsByUserId(targets);
+  for (const [userId, userTargets] of groupedTargets) {
+    const fallbackTarget = userTargets[0];
+    if (!fallbackTarget) {
+      continue;
+    }
     const store = createProjectionStore(userId, config.data_dir);
     try {
-      // Check if a daily review projection already exists (tagged), or if there's
-      // already a recurring morning projection the user set up themselves.
       const pending = store.getUpcoming(365);
       const hasTaggedReview = pending.some(
         (p) => p.recurrence && p.context?.includes(DAILY_REVIEW_TAG),
       );
-      if (hasTaggedReview) continue;
+      if (hasTaggedReview) {
+        continue;
+      }
 
-      // If the user already has recurring projections in the morning window,
-      // they've set up their own routine. Don't add a redundant daily review.
       const hasMorningRecurrence = pending.some((p) => {
-        if (!p.recurrence) return false;
-        // Check if the cron fires between 06:00-10:00 UTC (morning window)
+        if (!p.recurrence) {
+          return false;
+        }
         const userTz = getUserTimezone(config);
         const nextRun = nextCronOccurrence(p.recurrence, new Date(), userTz);
-        if (!nextRun) return false;
+        if (!nextRun) {
+          return false;
+        }
         const hour = parseInt(nextRun.split(" ")[1]?.split(":")[0] ?? "99", 10);
         return hour >= 6 && hour <= 10;
       });
@@ -113,10 +309,11 @@ function bootstrapDailyReview(config: Config): void {
       }
 
       const id = store.add({
-        summary: "Daily review — check upcoming events, projections, and anything that needs attention today",
+        summary: "Daily review, check upcoming events, projections, and anything that needs attention today",
         resolved_when: next,
         resolution: "exact",
         recurrence: schedule,
+        target: fallbackTarget,
         context:
           `${DAILY_REVIEW_TAG}\n` +
           `Use projection_list to see what's coming up this week. ` +
@@ -137,70 +334,166 @@ function bootstrapDailyReview(config: Config): void {
 // ---------------------------------------------------------------------------
 
 export interface Scheduler {
-  /** Start all jobs (config-driven and projection-driven). */
   start(): void;
-
-  /** Stop all running jobs. */
   stop(): void;
+}
+
+type SchedulerMessageCallback = (msg: IncomingMessage) => Promise<void | boolean> | void | boolean;
+
+export function scheduledWorkId(ownerUserId: string, projection: Projection): string {
+  const scheduledWhen = projection.resolved_when ?? "unscheduled";
+  return `projection:${ownerUserId}:${projection.id}:${scheduledWhen}`;
+}
+
+function shouldSettleReceipt(receipt: WorkRecord | null): boolean {
+  if (!receipt) {
+    return false;
+  }
+  if (receipt.execution !== "completed") {
+    return false;
+  }
+  return receipt.delivery === "delivered" || receipt.delivery === "none";
+}
+
+function settleProjection(store: ProjectionStore, projection: Projection, timezone: string): void {
+  if (projection.recurrence) {
+    let scheduledTime = new Date();
+    if (projection.resolved_when) {
+      scheduledTime = new Date(projection.resolved_when + "Z");
+    }
+    const next = nextCronOccurrence(projection.recurrence, scheduledTime, timezone);
+    if (next) {
+      store.rearm(projection.id, next);
+      console.log(`[projections] Rearmed recurring projection ${projection.id} -> next: ${next}`);
+      return;
+    }
+    store.resolve(projection.id, "passed");
+    console.warn(`[projections] Recurring projection ${projection.id} produced no next occurrence, marked passed`);
+    return;
+  }
+
+  store.resolve(projection.id, "passed");
+}
+
+function projectionReminderText(projection: Projection): string {
+  const formatted = formatProjectionsForPrompt([projection], 1);
+  return `[Scheduled reminder]\n\nThe following reminder is due now:\n\n` +
+    `${formatted}\n\n` +
+    `For this item:\n` +
+    `1. Search your memory for related context with memory_archival_search.\n` +
+    `2. Execute any actions described in the reminder, such as checking email or calendar.\n` +
+    `3. Send the user a helpful, natural message with your findings.\n\n` +
+    `Only reply NOOP if the reminder is purely informational and requires no action or message.`;
 }
 
 // ---------------------------------------------------------------------------
 // Factory
 // ---------------------------------------------------------------------------
 
-/**
- * Return all user IDs that are authorised to use the bot.
- *
- * Combines Telegram, WhatsApp, and Threema allow-lists into a single deduplicated
- * list of string IDs. This is the canonical source of "known users" for
- * scheduler jobs — more reliable than scanning session directories (which
- * only exist after first contact) and consistent with the auth layer.
- */
-function getKnownUsers(config: Config): string[] {
-  const ids = new Set<string>();
-  for (const id of config.telegram.allowed_users) {
-    ids.add(String(id));
-  }
-  if (config.whatsapp.enabled) {
-    for (const id of config.whatsapp.allowed_users) {
-      ids.add(String(id));
-    }
-  }
-  if (config.threema.enabled) {
-    for (const id of config.threema.allowed_senders) {
-      ids.add(String(id));
-    }
-  }
-  return [...ids];
-}
-
-/**
- * Create the scheduler.
- *
- * @param config      App config (for config.yml cron jobs and the default channel).
- * @param onMessage   Callback to inject synthetic messages into the agent loop.
- */
 export function createScheduler(
   config: Config,
-  onMessage: (msg: IncomingMessage) => Promise<void>,
+  onMessage: SchedulerMessageCallback,
+  suppliedWorkStore?: WorkStore,
 ): Scheduler {
   const cronJobs = new Map<string, Cron>();
+  const workStore = suppliedWorkStore ?? createWorkStore(config.data_dir);
+  const ownsWorkStore = !suppliedWorkStore;
 
-  function defaultPlatform(): IncomingMessage["platform"] {
-    if (config.telegram.allowed_users.length > 0) return "telegram";
-    if (config.whatsapp.enabled && config.whatsapp.allowed_users.length > 0) return "whatsapp";
-    if (config.threema.enabled && config.threema.allowed_senders.length > 0) return "threema";
-    return "telegram";
+  function defaultTarget(): SchedulerTarget | null {
+    return getSchedulerTargets(config)[0] ?? null;
   }
 
-  function defaultChannelId(): string {
-    const telegramUser = config.telegram.allowed_users[0];
-    if (telegramUser) return String(telegramUser);
-    const whatsappUser = config.whatsapp.allowed_users[0];
-    if (config.whatsapp.enabled && whatsappUser) return String(whatsappUser);
-    const threemaUser = config.threema.allowed_senders[0];
-    if (config.threema.enabled && threemaUser) return String(threemaUser);
-    return "cron";
+  async function enqueueScheduledMessage(store: ProjectionStore, ownerUserId: string, projection: Projection, target: SchedulerTarget): Promise<void> {
+    const workId = scheduledWorkId(ownerUserId, projection);
+    const msg: IncomingMessage = {
+      channelId: target.channelId,
+      userId: target.userId,
+      threadId: target.threadId,
+      channelThreadId: target.channelThreadId,
+      text: projectionReminderText(projection),
+      platform: target.platform,
+      workId,
+      workIds: [workId],
+      raw: { type: "projection_exact_check" },
+    };
+
+    const accepted = await onMessage(msg);
+    if (accepted === false) {
+      console.warn(`[projections] enqueue rejected for projection ${projection.id} (${workId})`);
+      return;
+    }
+
+    try {
+      workStore.accept(msg);
+    } catch (err) {
+      console.error(`[projections] work receipt acceptance failed for ${projection.id}:`, (err as Error).message);
+      return;
+    }
+
+    const receipt = workStore.get(workId);
+    if (!receipt) {
+      console.error(`[projections] no work receipt after accepted enqueue for ${projection.id}: ${workId}`);
+      return;
+    }
+
+    if (!store.markDeliveryWork(projection.id, workId)) {
+      console.warn(`[projections] could not mark delivery work id for projection ${projection.id}: ${workId}`);
+    }
+  }
+
+
+  function recoverAcceptedOccurrenceLinks(store: ProjectionStore, userId: string): void {
+    for (const projection of store.getPendingExact()) {
+      if (projection.delivery_work_id) {
+        continue;
+      }
+      const workId = scheduledWorkId(userId, projection);
+      if (!workStore.get(workId)) {
+        continue;
+      }
+      if (store.markDeliveryWork(projection.id, workId)) {
+        console.log(`[projections] user=${userId} recovered delivery marker for projection ${projection.id} (${workId})`);
+      }
+    }
+  }
+
+  async function reconcileAcceptedOccurrences(store: ProjectionStore, userId: string, timezone: string): Promise<void> {
+    const awaiting = store.getAwaitingDelivery();
+    for (const projection of awaiting) {
+      const workId = projection.delivery_work_id;
+      if (!workId) {
+        continue;
+      }
+      const receipt = workStore.get(workId);
+      if (!shouldSettleReceipt(receipt)) {
+        if (receipt && (receipt.execution === "failed" || receipt.execution === "interrupted"
+          || (receipt.execution === "completed" && ["failed", "unknown"].includes(receipt.delivery)))) {
+          const noticeId = `blocked:${workId}`;
+          if (!workStore.get(noticeId) && isTargetAllowed(config, receipt.message)) {
+            let description = "This reminder is blocked pending review.";
+            if (projection.recurrence) {
+              description = "This recurring schedule is paused pending review.";
+            }
+            const notice: IncomingMessage = {
+              ...receipt.message,
+              workId: noticeId,
+              workIds: [noticeId],
+              images: undefined,
+              audio: undefined,
+              replyMode: "text",
+              text: `Reminder: ${projection.summary}\n${description}\nExecution: ${receipt.execution}. Delivery: ${receipt.delivery}.\nNo actions were automatically repeated. Use /work ${workId} to inspect the receipt. After checking the outcome, explicitly cancel this reminder or ask for a new occurrence.`,
+              raw: { type: "recovery_notice" },
+            };
+            if (await onMessage(notice) !== false) {
+              workStore.accept(notice);
+            }
+          }
+        }
+        continue;
+      }
+      settleProjection(store, projection, timezone);
+      console.log(`[projections] user=${userId} settled delivered projection occurrence ${projection.id} (${workId})`);
+    }
   }
 
   function startConfigJobs(): void {
@@ -210,27 +503,34 @@ export function createScheduler(
       try {
         const job = new Cron(
           cronJob.schedule,
-          async () => {
+          runNonOverlapping(key, async () => {
             console.log(`[scheduler] Config job triggered: ${cronJob.schedule}`);
-            const channelId = defaultChannelId();
-            // raw.type identifies this as a scheduler message. processMessage() in
-        // index.ts checks for this field to skip crash-recovery checkpoints
-        // that only make sense for real user messages.
-        const msg: IncomingMessage = {
-              channelId,
-              userId: "cron",
+            const target = defaultTarget();
+            if (!target) {
+              console.warn(`[scheduler] Config job skipped because no authorized target is configured: ${cronJob.schedule}`);
+              return;
+            }
+            const msg: IncomingMessage = {
+              channelId: target.channelId,
+              userId: target.userId,
+              threadId: target.threadId,
+              channelThreadId: target.channelThreadId,
               text: cronJob.message,
-              platform: defaultPlatform(),
+              platform: target.platform,
               raw: { type: "cron", schedule: cronJob.schedule },
             };
-            await onMessage(msg);
-          },
+            const accepted = await onMessage(msg);
+            if (accepted === false) {
+              console.warn(`[scheduler] Config job enqueue rejected: ${cronJob.schedule}`);
+            }
+          }),
           { timezone: "UTC" },
         );
         cronJobs.set(key, job);
-        const preview = cronJob.message.length > 50
-          ? `${cronJob.message.substring(0, 50)}...`
-          : cronJob.message;
+        let preview = cronJob.message;
+        if (cronJob.message.length > 50) {
+          preview = `${cronJob.message.substring(0, 50)}...`;
+        }
         console.log(`[scheduler] Config job scheduled: ${cronJob.schedule} -> ${preview}`);
       } catch (err) {
         console.error(`[scheduler] Failed to schedule config job: ${cronJob.schedule}`, err);
@@ -238,34 +538,32 @@ export function createScheduler(
     }
   }
 
-  /**
-   * Exact-time projection check: every 5 minutes, fires timed projections.
-   *
-   * This is the single scheduling mechanism for all projections. The daily
-   * review is a regular recurring projection (bootstrapped on first boot),
-   * not a separate cron job.
-   *
-   * Each user gets their own independent store, message, and onMessage call.
-   * Known users are derived from config (telegram.allowed_users +
-   * whatsapp.allowed_users) so new users are picked up on the next restart.
-   */
   function startExactTimeCheck(): void {
-    const knownUsers = getKnownUsers(config);
-    if (knownUsers.length === 0) return;
+    const targets = getSchedulerTargets(config);
+    const groupedTargets = targetsByUserId(targets);
+    if (targets.length === 0) {
+      return;
+    }
 
     const exactJob = new Cron(
       "*/5 * * * *",
-      async () => {
+      runNonOverlapping("projection-exact", async () => {
         if (!isActiveNow(config.active_hours)) {
-          return; // Silent skip — fires every 5 min, no need to log each one
+          return;
         }
 
-        for (const userId of knownUsers) {
+        for (const [userId, userTargets] of groupedTargets) {
+          const fallbackTarget = userTargets[0];
+          if (!fallbackTarget) {
+            continue;
+          }
           const store = createProjectionStore(userId, config.data_dir);
           try {
-            store.evaluateDependencies();
-            // Rearm missed recurring projections before expiring anything
             const userTz = getUserTimezone(config);
+            recoverAcceptedOccurrenceLinks(store, userId);
+            await reconcileAcceptedOccurrences(store, userId, userTz);
+            store.evaluateDependencies();
+
             const rearmed = store.rearmMissed(userTz);
             if (rearmed.length > 0) {
               console.log(`[projections] user=${userId} rearmed ${rearmed.length} missed recurring projection(s): ${rearmed.join(", ")}`);
@@ -274,114 +572,59 @@ export function createScheduler(
             if (expired > 0) {
               console.log(`[projections] user=${userId} auto-expired ${expired} stale projection(s)`);
             }
+
             const due = store.getExactDue(5);
             if (due.length === 0) {
               continue;
             }
             console.log(`[projections] user=${userId} exact-time check: ${due.length} item(s) due`);
-            const formatted = formatProjectionsForPrompt(due, 10);
 
-            // Settle each projection: rearm recurring ones, mark one-offs as passed.
-            // Use the projection's scheduled time (not `now`) as the base for
-            // computing the next occurrence.  The lookahead window fires
-            // projections up to 15 min early, so using `now` would compute the
-            // *same* occurrence again (e.g., 08:45 → next cron at 09:00 today →
-            // fires again at 08:50).  Using `resolved_when` ensures the next
-            // occurrence is always in the future relative to the intended time.
-            for (const p of due) {
-              if (p.recurrence) {
-                const scheduledTime = p.resolved_when ? new Date(p.resolved_when + "Z") : new Date();
-                const next = nextCronOccurrence(p.recurrence, scheduledTime, userTz);
-                if (next) {
-                  store.rearm(p.id, next);
-                  console.log(`[projections] Rearmed recurring projection ${p.id} → next: ${next}`);
-                } else {
-                  // Cron produced no future occurrence — treat as one-off.
-                  store.resolve(p.id, "passed");
-                  console.warn(`[projections] Recurring projection ${p.id} produced no next occurrence, marked passed`);
-                }
-              } else {
-                store.resolve(p.id, "passed");
+            for (const projection of due) {
+              const target = targetForProjection(config, userId, projection, fallbackTarget);
+              if (!target) {
+                console.warn(`[projections] user=${userId} projection ${projection.id} has no valid scheduler target, leaving pending`);
+                continue;
               }
-            }
-
-            // raw.type marks this as a scheduler message so processMessage() can
-            // distinguish it from a real user message and skip crash checkpoints.
-            const msg: IncomingMessage = {
-              channelId: userId,
-              userId,
-              text:
-                `[Scheduled reminder]\n\nThe following reminder(s) are due now:\n\n` +
-                `${formatted}\n\n` +
-                `For each item:\n` +
-                `1. Search your memory for related context (use memory_archival_search)\n` +
-                `2. Execute any actions described in the reminder (check email, check calendar, etc.)\n` +
-                `3. Send the user a helpful, natural message with your findings\n\n` +
-                `Only reply NOOP if the reminder is purely informational and requires no action or message.`,
-              platform: defaultPlatform(),
-              raw: { type: "projection_exact_check" },
-            };
-            try {
-              await onMessage(msg);
-            } catch (err) {
-              console.error(`[projections] exact-time check failed for ${userId}:`, (err as Error).message);
+              try {
+                await enqueueScheduledMessage(store, userId, projection, target);
+              } catch (err) {
+                console.error(`[projections] exact-time enqueue failed for ${userId}/${projection.id}:`, (err as Error).message);
+              }
             }
           } finally {
             store.close();
           }
         }
-      },
+      }),
       { timezone: "UTC" },
     );
     cronJobs.set("projection-exact", exactJob);
-    console.log(`[projections] Exact-time check scheduled every 5 minutes for ${knownUsers.length} user(s)`);
+    console.log(`[projections] Exact-time check scheduled every 5 minutes for ${targets.length} target(s)`);
   }
 
-  /**
-   * Reflection cron: every 30 minutes, scan recent conversation for future
-   * references the agent missed. Writes projections directly to SQLite
-   * without touching the agent loop. Skips when there are no new messages.
-   *
-   * Backoff: consecutive LLM failures (provider outage) cause exponential
-   * backoff capped at 8 hours. This avoids log noise and pointless API calls
-   * during outages. The backoff resets on the next successful run.
-   *
-   *   failures  backoff before next attempt
-   *   1         30 min  (normal interval, no extra wait)
-   *   2         1 h
-   *   3         2 h
-   *   4         4 h
-   *   5+        8 h
-   */
   function startReflectionJob(): void {
-    const knownUsers = getKnownUsers(config);
-    if (knownUsers.length === 0) {
+    const targets = getSchedulerTargets(config);
+    const groupedTargets = targetsByUserId(targets);
+    if (targets.length === 0) {
       return;
     }
 
     const BASE_INTERVAL_MS = 30 * 60 * 1000;
     const MAX_BACKOFF_MS = 8 * 60 * 60 * 1000;
-
-    // Per-user backoff state. Each user has their own failure count and backoff
-    // window so a flaky per-user history file doesn't stall every other user.
     const failureCount = new Map<string, number>();
     const backoffUntil = new Map<string, number>();
 
     const job = new Cron(
       "*/30 * * * *",
-      async () => {
-        for (const userId of knownUsers) {
+      runNonOverlapping("projection-reflection", async () => {
+        for (const userId of groupedTargets.keys()) {
           const until = backoffUntil.get(userId) ?? 0;
-          // During a backoff window, skip silently — the cron still fires every
-          // 30 min so recovery is detected promptly once the window expires.
           if (Date.now() < until) {
             continue;
           }
 
           try {
             const result = await runReflection(config, userId, 30);
-
-            // Success: clear per-user backoff state.
             const prevFailures = failureCount.get(userId) ?? 0;
             if (prevFailures > 0) {
               console.log(`[reflection] user=${userId} recovered after ${prevFailures} consecutive failure(s)`);
@@ -390,7 +633,6 @@ export function createScheduler(
             }
 
             if (result.skipped) {
-              // Only log at debug level — this fires often and is usually a no-op
               continue;
             }
             if (result.projectionsAdded > 0) {
@@ -403,7 +645,6 @@ export function createScheduler(
           } catch (err) {
             const failures = (failureCount.get(userId) ?? 0) + 1;
             failureCount.set(userId, failures);
-            // Exponential backoff: 30m * 2^(failures-1), capped at 8h.
             const delayMs = Math.min(
               BASE_INTERVAL_MS * Math.pow(2, failures - 1),
               MAX_BACKOFF_MS,
@@ -416,37 +657,18 @@ export function createScheduler(
             );
           }
         }
-      },
+      }),
       { timezone: "UTC" },
     );
     cronJobs.set("projection-reflection", job);
-    console.log(`[projections] Reflection pass scheduled every 30 minutes for ${knownUsers.length} user(s)`);
+    console.log(`[projections] Reflection pass scheduled every 30 minutes for ${targets.length} target(s)`);
   }
 
   return {
     start(): void {
       startConfigJobs();
 
-      // Projection and reflection jobs are opt-in via the agent definition.
-      //
-      // daily_review: the 08:00 UTC "what's coming up?" pass. Personal
-      //   assistant feature. A devops monitor has no morning briefing concept.
-      //
-      // projection_exact_check: the every-5-min precise trigger. Enabled
-      //   whenever the projections tool group is active (i.e. when the agent
-      //   definition includes projections at all). The scheduler doesn't have
-      //   direct visibility into tool groups, but daily_review=false and
-      //   reflection=true is the operational pattern, so we use that as the
-      //   signal: always start the exact-time check unless we have no
-      //   projection jobs at all.
-      //
-      // reflection: the every-30-min pass that extracts projections from
-      //   conversation history. Useful for both personal assistants (scheduling)
-      //   and operational agents (learning patterns).
       const mem = config.agent_def.memory;
-
-      // Bootstrap the daily review projection if enabled. The exact-time
-      // check fires it like any other recurring projection.
       if (mem.daily_review) {
         bootstrapDailyReview(config);
       }
@@ -468,6 +690,9 @@ export function createScheduler(
       }
       const count = cronJobs.size;
       cronJobs.clear();
+      if (ownsWorkStore) {
+        workStore.close();
+      }
       if (count > 0) {
         console.log(`[scheduler] Stopped ${count} jobs`);
       }

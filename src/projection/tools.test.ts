@@ -50,6 +50,41 @@ describe("ProjectionTools dependencies", () => {
     expect(deps[0].condition_type).toBe("status_change");
   });
 
+
+  it("stores the latest target from the target getter", async () => {
+    let currentTarget = {
+      userId: "user1",
+      channelId: "first-channel",
+      platform: "telegram",
+      threadId: "first-thread",
+    };
+    tools = createProjectionTools(store, "UTC", () => currentTarget);
+    currentTarget = {
+      userId: "user1",
+      channelId: "second-channel",
+      platform: "telegram",
+      threadId: "second-thread",
+    };
+    const projectTool = tools.find((t) => t.name === "projection_create");
+    expect(projectTool).toBeDefined();
+
+    const result = await projectTool!.execute(
+      "call-target",
+      { summary: "Targeted reminder", when: "2026-02-19T10:00" },
+      undefined,
+      undefined,
+      undefined as any,
+    );
+
+    const id = (result.details as any).id as string;
+    expect(store.getById(id)).toMatchObject({
+      target_user_id: "user1",
+      target_channel_id: "second-channel",
+      target_platform: "telegram",
+      target_thread_id: "second-thread",
+    });
+  });
+
   it("projection_link links existing projections", async () => {
     const subjectId = store.add({ summary: "Call" });
     const observerId = store.add({ summary: "Follow-up email" });

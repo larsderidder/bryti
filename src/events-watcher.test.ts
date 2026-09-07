@@ -2,7 +2,7 @@
  * Tests for the events watcher.
  *
  * Focuses on processEventFile logic: validation, user allowlist enforcement,
- * delete-before-enqueue ordering, and the instance file write/remove cycle.
+ * durable-acceptance ordering, and the instance file write/remove cycle.
  * The fs.watch integration is not tested here — that's OS-level behaviour.
  */
 
@@ -28,6 +28,7 @@ function makeConfig(dataDir: string, allowedUsers: number[] = [123, 456]): Confi
     whatsapp: { enabled: false, allowed_users: [] },
     threema: { enabled: false, gateway_id: "", secret: "", private_key_path: "", allowed_senders: [], api_base_url: "https://msgapi.threema.ch", callback: { host: "127.0.0.1", port: 8787, path: "/threema/callback" } },
     data_dir: dataDir,
+    web_e2ee: { enabled: false },
   } as unknown as Config;
 }
 
@@ -49,6 +50,7 @@ describe("createEventsWatcher", () => {
 
   beforeEach(() => {
     tmpDir = makeTmpDir();
+    vi.spyOn(os, "homedir").mockReturnValue(tmpDir);
     eventsDir = path.join(tmpDir, "events");
     enqueued.length = 0;
     enqueue = (msg) => enqueued.push(msg);
@@ -59,6 +61,7 @@ describe("createEventsWatcher", () => {
     // Clean up any instance file written during tests
     const instancePath = path.join(os.homedir(), ".pi", "agent", "bryti-instance.json");
     try { fs.unlinkSync(instancePath); } catch { /* already gone */ }
+    vi.restoreAllMocks();
   });
 
   describe("start / stop", () => {
@@ -90,6 +93,7 @@ describe("createEventsWatcher", () => {
         whatsapp: { enabled: true, allowed_users: ["31612345678"] },
         threema: { enabled: false, gateway_id: "", secret: "", private_key_path: "", allowed_senders: [], api_base_url: "https://msgapi.threema.ch", callback: { host: "127.0.0.1", port: 8787, path: "/threema/callback" } },
         data_dir: tmpDir,
+        web_e2ee: { enabled: false },
       } as unknown as Config;
       const watcher = createEventsWatcher(config, enqueue);
       watcher.start();
@@ -132,7 +136,7 @@ describe("createEventsWatcher", () => {
       expect((enqueued[0].raw as any).source).toBe("external");
     });
 
-    it("deletes the file before calling enqueue", () => {
+    it("deletes the file only after enqueue accepts it", () => {
       fs.mkdirSync(eventsDir, { recursive: true });
       const filePath = writeEventFile(eventsDir, "test.json", {
         userId: "123",
@@ -149,7 +153,32 @@ describe("createEventsWatcher", () => {
       watcher.start();
       watcher.stop();
 
-      expect(fileExistedDuringEnqueue).toBe(false);
+      expect(fileExistedDuringEnqueue).toBe(true);
+      expect(fs.existsSync(filePath)).toBe(false);
+    });
+
+    it("retains rejected events and uses a stable work identity on retry", () => {
+      fs.mkdirSync(eventsDir, { recursive: true });
+      const file = writeEventFile(eventsDir, "rejected.json", { userId: "123", text: "keep me" });
+      const attempts: IncomingMessage[] = [];
+      const rejecting = (msg: IncomingMessage) => { attempts.push(msg); return false; };
+      const watcher = createEventsWatcher(makeConfig(tmpDir), rejecting);
+      watcher.start();
+      watcher.stop();
+      expect(fs.existsSync(file)).toBe(true);
+      watcher.start();
+      watcher.stop();
+      expect(attempts[0].workId).toBeTruthy();
+      expect(attempts[1].workId).toBe(attempts[0].workId);
+    });
+
+    it("retains an event when durable acceptance throws", () => {
+      fs.mkdirSync(eventsDir, { recursive: true });
+      const file = writeEventFile(eventsDir, "failed.json", { userId: "123", text: "keep me" });
+      const watcher = createEventsWatcher(makeConfig(tmpDir), () => { throw new Error("disk unavailable"); });
+      expect(() => watcher.start()).not.toThrow();
+      watcher.stop();
+      expect(fs.existsSync(file)).toBe(true);
     });
 
     it("rejects events for unknown userIds and deletes the file", () => {
@@ -237,6 +266,7 @@ describe("createEventsWatcher", () => {
         whatsapp: { enabled: true, allowed_users: ["31612345678"] },
         threema: { enabled: false, gateway_id: "", secret: "", private_key_path: "", allowed_senders: [], api_base_url: "https://msgapi.threema.ch", callback: { host: "127.0.0.1", port: 8787, path: "/threema/callback" } },
         data_dir: tmpDir,
+        web_e2ee: { enabled: false },
       } as unknown as Config;
 
       fs.mkdirSync(eventsDir, { recursive: true });
@@ -251,6 +281,7 @@ describe("createEventsWatcher", () => {
 
       expect(enqueued).toHaveLength(1);
       expect(enqueued[0].text).toBe("from whatsapp");
+      expect(enqueued[0].platform).toBe("whatsapp");
     });
 
     it("produces raw.type = 'event'", () => {

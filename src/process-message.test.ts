@@ -23,6 +23,8 @@ import type { ChannelBridge, IncomingMessage } from "./channels/types.js";
 import type { UserSession } from "./agent.js";
 import type { Config } from "./config.js";
 import { tryCompact } from "./compaction/proactive.js";
+import { createWorkStore } from "./work/store.js";
+import { deliveryNotSent } from "./channels/delivery.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -435,7 +437,7 @@ describe("processMessage pipeline", () => {
     const state = makeState(config, session, tmpDir);
     const bridge = state.bridges[0] as ReturnType<typeof makeBridge>;
     bridge.sendVoice = vi.fn(async () => {
-      throw new Error("send failed");
+      throw deliveryNotSent("Voice rejected before upload", { retryable: false });
     });
     state.voiceService = {
       transcribe: vi.fn(async () => "unused"),
@@ -707,5 +709,96 @@ describe("processMessage pipeline", () => {
 
     expect(bridge.sent.some((s) => s.text.includes("went wrong"))).toBe(true);
     expect(abortSpy).not.toHaveBeenCalled();
+  });
+
+  it("also bounds the follow-up prompt when the model initially produces no reply", async () => {
+    vi.useFakeTimers();
+    const session = makeUserSession("12345", []);
+    let release!: () => void;
+    vi.spyOn(session.session, "prompt").mockResolvedValueOnce(undefined).mockImplementation(() => new Promise<void>((resolve) => { release = resolve; }));
+    const state = makeState(config, session, tmpDir);
+    const abort = vi.spyOn(session.session, "abort");
+    const processing = processMessage(state, incomingMsg("hello"));
+    await vi.advanceTimersByTimeAsync(6 * 60 * 1000);
+    try {
+      expect(abort).toHaveBeenCalled();
+      expect(state.sessions.has("12345")).toBe(false);
+    } finally {
+      release();
+      await processing;
+    }
+  });
+
+  it("does not label an aborted model turn as completed execution", async () => {
+    const session = makeUserSession("12345", []);
+    vi.spyOn(session.session, "prompt").mockImplementation(async () => {
+      (session.session.messages as unknown[]).push({ ...assistantMsg("Partial answer"), stopReason: "aborted" });
+    });
+    const state = makeState(config, session, tmpDir);
+    const workStore = createWorkStore(tmpDir);
+    state.workStore = workStore;
+    const { record } = workStore.accept(incomingMsg("hello"));
+    workStore.claim([record.id]);
+    try {
+      await processMessage(state, record.message);
+      expect(workStore.get(record.id)?.execution).toBe("interrupted");
+      expect((state.bridges[0] as ReturnType<typeof makeBridge>).sent).toEqual([]);
+    } finally {
+      workStore.close();
+    }
+  });
+
+  it("delivers recovery notices directly without asking the model to resume work", async () => {
+    const session = makeUserSession("12345", []);
+    const prompt = vi.spyOn(session.session, "prompt");
+    const state = makeState(config, session, tmpDir);
+    const workStore = createWorkStore(tmpDir);
+    state.workStore = workStore;
+    const { record } = workStore.accept({ ...incomingMsg("Work was interrupted and was not repeated."), raw: { type: "recovery_notice" } });
+    workStore.claim([record.id]);
+    try {
+      await processMessage(state, record.message);
+      expect(prompt).not.toHaveBeenCalled();
+      expect(workStore.get(record.id)).toMatchObject({ execution: "completed", delivery: "delivered" });
+    } finally {
+      workStore.close();
+    }
+  });
+
+  it("records failed model execution even though the user receives an error message", async () => {
+    const session = makeUserSession("12345", []);
+    vi.spyOn(session.session, "prompt").mockRejectedValue(new Error("provider failed"));
+    const state = makeState(config, session, tmpDir);
+    const workStore = createWorkStore(tmpDir);
+    state.workStore = workStore;
+    const { record } = workStore.accept(incomingMsg("hello"));
+    workStore.claim([record.id]);
+    try {
+      await processMessage(state, record.message);
+      expect(workStore.get(record.id)?.execution).toBe("failed");
+    } finally {
+      workStore.close();
+    }
+  });
+
+  it("keeps successful execution distinct from an uncertain response delivery", async () => {
+    const session = makeUserSession("12345", []);
+    vi.spyOn(session.session, "prompt").mockImplementation(async () => {
+      (session.session.messages as unknown[]).push(assistantMsg("Done"));
+    });
+    const state = makeState(config, session, tmpDir);
+    const bridge = state.bridges[0];
+    const send = vi.spyOn(bridge, "sendMessage").mockRejectedValue(new Error("connection closed after dispatch"));
+    const workStore = createWorkStore(tmpDir);
+    state.workStore = workStore;
+    const { record } = workStore.accept(incomingMsg("hello"));
+    workStore.claim([record.id]);
+    try {
+      await processMessage(state, record.message);
+      expect(workStore.get(record.id)).toMatchObject({ execution: "completed", delivery: "unknown" });
+      expect(send).toHaveBeenCalledOnce();
+    } finally {
+      workStore.close();
+    }
   });
 });

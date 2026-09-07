@@ -32,6 +32,10 @@ export interface IncomingMessage {
   channelThreadId?: string;
   /** Platform-specific message ID when available. */
   messageId?: string;
+  /** Stable accepted-work identity, assigned by Bryti rather than platform payloads. */
+  workId?: string;
+  /** Receipt identities when several accepted messages share one prompt. */
+  workIds?: string[];
   /** Message text content */
   text: string;
   /** Which platform this came from */
@@ -54,6 +58,7 @@ export function isInternalMessage(msg: IncomingMessage): boolean {
     || type === "cron"
     || type === "projection_exact_check"
     || type === "event"
+    || type === "recovery_notice"
     || type === "restart_verification";
 }
 
@@ -61,6 +66,8 @@ export interface SendOpts {
   parseMode?: "markdown" | "html" | "plain";
   /** Platform-specific thread/topic ID inside channel, when replying in grouped channels. */
   channelThreadId?: string;
+  /** Accepted work whose final response this delivery carries. */
+  workIds?: string[];
 }
 
 /**

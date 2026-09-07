@@ -14,9 +14,8 @@
  * File format:
  *   { "userId": "123456789", "text": "...", "source": "pi-session" }
  *
- * On receipt the file is deleted. Invalid files are also deleted (with a
- * warning) so they don't accumulate. The watcher is best-effort: if a file
- * lands while bryti is down it will be processed on the next startup scan.
+ * Files are deleted after durable queue acceptance. Rejected work stays on disk
+ * for a later scan. Invalid requests are deleted with a warning.
  *
  * Security: userId is validated against the allowed-users list from config.
  * Files with unknown userIds are rejected and deleted.
@@ -27,6 +26,8 @@ import os from "node:os";
 import path from "node:path";
 import type { Config } from "./config.js";
 import type { IncomingMessage } from "./channels/types.js";
+import crypto from "node:crypto";
+import { getSchedulerTargets } from "./scheduler.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -39,9 +40,13 @@ interface EventFile {
   text: string;
   /** Optional: identifies who sent the event (for logging). */
   source?: string;
+  platform?: IncomingMessage["platform"];
+  channelId?: string;
+  threadId?: string;
+  channelThreadId?: string;
 }
 
-type EnqueueFn = (msg: IncomingMessage) => void;
+type EnqueueFn = (msg: IncomingMessage) => boolean | void;
 
 export interface EventsWatcher {
   start(): void;
@@ -93,26 +98,18 @@ function removeInstanceFile(): void {
 }
 
 function allowedUsers(config: Config): Set<string> {
-  const ids = new Set<string>();
-  for (const id of config.telegram.allowed_users) {
-    ids.add(String(id));
-  }
-  if (config.whatsapp.enabled) {
-    for (const id of config.whatsapp.allowed_users) {
-      ids.add(String(id));
-    }
-  }
-  return ids;
+  return new Set(getSchedulerTargets(config).map((target) => target.userId));
 }
 
 /**
  * Parse, validate, and process a single event file.
- * Deletes the file after processing (success or failure).
+ * Deletes accepted or invalid files; retains work when acceptance fails.
  */
 function processEventFile(
   filePath: string,
   allowed: Set<string>,
   enqueue: EnqueueFn,
+  config: Config,
 ): void {
   let raw: string;
   try {
@@ -149,20 +146,35 @@ function processEventFile(
   }
 
   const source = event.source ?? "external";
-  console.log(`[events] Received from ${source} for user ${event.userId}: ${event.text.slice(0, 80)}${event.text.length > 80 ? "…" : ""}`);
-
-  // Delete first so a crash during enqueue doesn't cause a double-fire on restart.
-  tryDelete(filePath);
+  const targets = getSchedulerTargets(config).filter((target) => {
+    return target.userId === event.userId
+      && target.channelId === (event.channelId ?? event.userId)
+      && (!event.platform || target.platform === event.platform);
+  });
+  if (targets.length !== 1) {
+    console.warn(`[events] Event destination is unavailable or ambiguous: ${path.basename(filePath)}`);
+    tryDelete(filePath);
+    return;
+  }
+  const target = targets[0];
+  console.log(`[events] Received notification for ${target.platform}:${event.userId}`);
 
   const msg: IncomingMessage = {
-    channelId: event.userId,
-    userId: event.userId,
+    ...target,
+    threadId: event.threadId,
+    channelThreadId: event.channelThreadId,
     text: event.text,
-    platform: "telegram",
+    workId: `event:${crypto.createHash("sha256").update(path.basename(filePath)).update(raw).digest("hex")}`,
     raw: { type: "event", source },
   };
 
-  enqueue(msg);
+  try {
+    if (enqueue(msg) !== false) {
+      tryDelete(filePath);
+    }
+  } catch {
+    console.warn(`[events] Acceptance failed; retaining ${path.basename(filePath)}`);
+  }
 }
 
 function tryDelete(filePath: string): void {
@@ -187,6 +199,7 @@ export function createEventsWatcher(config: Config, enqueue: EnqueueFn): EventsW
   const allowed = allowedUsers(config);
   let watcher: fs.FSWatcher | null = null;
   let debounce: ReturnType<typeof setTimeout> | null = null;
+  let retryTimer: ReturnType<typeof setInterval> | null = null;
 
   function scanExisting(): void {
     let files: string[];
@@ -196,7 +209,7 @@ export function createEventsWatcher(config: Config, enqueue: EnqueueFn): EventsW
       return;
     }
     for (const file of files) {
-      processEventFile(path.join(dir, file), allowed, enqueue);
+      processEventFile(path.join(dir, file), allowed, enqueue, config);
     }
   }
 
@@ -225,6 +238,8 @@ export function createEventsWatcher(config: Config, enqueue: EnqueueFn): EventsW
       scanExisting();
 
       watcher = fs.watch(dir, { persistent: false }, onFsEvent);
+      retryTimer = setInterval(scanExisting, 30_000);
+      retryTimer.unref();
       watcher.on("error", (err) => {
         console.error(`[events] Watcher error: ${err.message}`);
       });
@@ -232,6 +247,10 @@ export function createEventsWatcher(config: Config, enqueue: EnqueueFn): EventsW
     },
 
     stop(): void {
+      if (retryTimer) {
+        clearInterval(retryTimer);
+        retryTimer = null;
+      }
       if (debounce) {
         clearTimeout(debounce);
         debounce = null;

@@ -23,7 +23,8 @@ import type { MemoryStore } from "../memory/store.js";
 import { embed } from "../memory/embeddings.js";
 import { toolError, toolSuccess } from "../tools/result.js";
 import type { WorkerEntry, WorkerRegistry } from "./registry.js";
-import type { ProjectionStore } from "../projection/store.js";
+import type { ProjectionStore, ProjectionTarget } from "../projection/store.js";
+import { registerWorkerOwner } from "./recovery.js";
 import {
   spawnWorkerSession,
   writeStatusFile,
@@ -128,6 +129,7 @@ export function createWorkerTools(
   isWorkerSession = false,
   projectionStore?: ProjectionStore,
   onTrigger?: WorkerTriggerCallback,
+  getTarget?: () => ProjectionTarget,
 ): AgentTool<any>[] {
   // Build description dynamically to include configured worker types
   const types = config.tools.workers.types ?? {};
@@ -236,8 +238,7 @@ export function createWorkerTools(
     description:
       "Dispatch a background worker to perform a long-running task (research, content gathering, etc.). " +
       "Returns immediately — the worker runs in the background. " +
-      "After dispatching, create a projection with trigger_on_fact matching the worker completion fact " +
-      "(e.g. 'worker <id> complete') so you are notified when results are ready. " +
+      "Completion and interruption notifications are delivered automatically to the originating conversation. " +
       "Workers always have fetch_url for Argus extraction and can use web_search when configured. They write results to result.md. " +
       `Max ${config.tools.workers.max_concurrent} concurrent workers.` +
       typesSuffix,
@@ -328,7 +329,7 @@ export function createWorkerTools(
       }
 
       const queuePosition = registry.queuePosition(workerId);
-      writeStatusFile(workerDir, {
+      const saved = writeStatusFile(workerDir, {
         worker_id: workerId,
         status,
         task,
@@ -339,6 +340,20 @@ export function createWorkerTools(
         result_path: resultPath,
         queue_position: queuePosition,
       });
+      if (!saved) {
+        registry.remove(workerId);
+        pendingLaunches.delete(workerId);
+        return toolError("Worker status could not be persisted. No worker was started.");
+      }
+      try {
+        if (getTarget) {
+          registerWorkerOwner(config.data_dir, workerId, getTarget());
+        }
+      } catch {
+        registry.remove(workerId);
+        pendingLaunches.delete(workerId);
+        return toolError("Worker owner could not be persisted. No worker was started.");
+      }
 
       if (shouldStartNow) {
         startWorker(entry, launchSpec);
@@ -351,9 +366,7 @@ export function createWorkerTools(
         ...(queuePosition ? { queue_position: queuePosition } : {}),
         result_path: relativeResult,
         trigger_hint: `worker ${workerId} complete`,
-        note: shouldStartNow
-          ? `Worker dispatched. Create a projection with trigger_on_fact: "worker ${workerId} complete" to be notified when results are ready. Read results with read path: ${relativeResult}`
-          : `Worker queued at position ${queuePosition}. It will start automatically when a running worker finishes. Read results with read path: ${relativeResult}`,
+        note: `Worker accepted. Completion notifications are automatic. Read results with read path: ${relativeResult}`,
       });
     },
   };

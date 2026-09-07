@@ -19,6 +19,7 @@ import {
   type PairingCompleteRequest,
   type WebE2EEAudioMimeType,
 } from "../web-e2ee/protocol.js";
+import { deliveryNotSent, deliveryUnknown, isDeliveryError } from "./delivery.js";
 import type { ApprovalResult, AudioAttachment, ChannelBridge, IncomingMessage, SendOpts } from "./types.js";
 
 type MessageHandler = (msg: IncomingMessage) => Promise<void>;
@@ -120,6 +121,48 @@ function readOutgoingAudioFile(audioPath: string): Buffer {
     throw new Error(`web_e2ee voice reply exceeds ${WEB_E2EE_MAX_AUDIO_BYTES} bytes`);
   }
   return fs.readFileSync(audioPath);
+}
+
+
+function classifyWebE2EEDeliveryError(error: unknown): Error {
+  if (isDeliveryError(error)) {
+    return error;
+  }
+
+  let message = String(error);
+  if (error instanceof Error) {
+    message = error.message;
+  }
+
+  if (message.startsWith("web_e2ee device is offline:")) {
+    return deliveryNotSent(message, { retryable: true, cause: error });
+  }
+  if (message.startsWith("Unknown web_e2ee device:")) {
+    return deliveryNotSent(message, { retryable: false, cause: error });
+  }
+  if (message.startsWith("web_e2ee device is not active:")) {
+    return deliveryNotSent(message, { retryable: false, cause: error });
+  }
+  if (message === "web_e2ee bridge not started" || message === "web_e2ee websocket server not started") {
+    return deliveryNotSent(message, { retryable: true, cause: error });
+  }
+  if (message.startsWith("Unsupported web_e2ee voice reply extension:")) {
+    return deliveryNotSent(message, { retryable: false, cause: error });
+  }
+  if (message.startsWith("web_e2ee voice reply file is missing:")) {
+    return deliveryNotSent(message, { retryable: false, cause: error });
+  }
+  if (message === "web_e2ee voice reply path is not a file") {
+    return deliveryNotSent(message, { retryable: false, cause: error });
+  }
+  if (message === "web_e2ee voice reply file is empty") {
+    return deliveryNotSent(message, { retryable: false, cause: error });
+  }
+  if (message.startsWith("web_e2ee voice reply exceeds")) {
+    return deliveryNotSent(message, { retryable: false, cause: error });
+  }
+
+  return deliveryUnknown(message, { cause: error });
 }
 
 function mapDecryptedEventToIncomingMessage(dataDir: string, event: DecryptedMessageEvent): IncomingMessage {
@@ -283,27 +326,35 @@ export class WebE2EEBridge implements ChannelBridge {
   }
 
   async sendMessage(channelId: string, text: string, _opts?: SendOpts): Promise<string> {
-    this.assertStarted();
-    if (!this.wsServer) {
-      throw new Error("web_e2ee websocket server not started");
+    try {
+      this.assertStarted();
+      if (!this.wsServer) {
+        throw new Error("web_e2ee websocket server not started");
+      }
+      return await this.wsServer.sendEncryptedText(channelId, text);
+    } catch (error) {
+      throw classifyWebE2EEDeliveryError(error);
     }
-    return await this.wsServer.sendEncryptedText(channelId, text);
   }
 
   async sendVoice(channelId: string, audioPath: string, _opts?: { caption?: string }): Promise<string> {
-    this.assertStarted();
-    if (!this.wsServer) {
-      throw new Error("web_e2ee websocket server not started");
-    }
+    try {
+      this.assertStarted();
+      if (!this.wsServer) {
+        throw new Error("web_e2ee websocket server not started");
+      }
 
-    const mimeType = getOutgoingAudioMimeType(audioPath);
-    const bytes = readOutgoingAudioFile(audioPath);
-    return await this.wsServer.sendEncryptedPayload(channelId, {
-      kind: "audio",
-      mimeType,
-      dataBase64: bytes.toString("base64"),
-      fileName: path.basename(audioPath),
-    });
+      const mimeType = getOutgoingAudioMimeType(audioPath);
+      const bytes = readOutgoingAudioFile(audioPath);
+      return await this.wsServer.sendEncryptedPayload(channelId, {
+        kind: "audio",
+        mimeType,
+        dataBase64: bytes.toString("base64"),
+        fileName: path.basename(audioPath),
+      });
+    } catch (error) {
+      throw classifyWebE2EEDeliveryError(error);
+    }
   }
 
   async editMessage(_channelId: string, _messageId: string, _text: string): Promise<void> {

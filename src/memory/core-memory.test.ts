@@ -76,6 +76,38 @@ describe("CoreMemory", () => {
     expect(coreMemory.read()).toBe("");
   });
 
+  it("allows replace to reach the exact byte limit with multibyte text", () => {
+    coreMemory.append("Preferences", "x");
+    const heading = "## Preferences\n";
+    const suffix = "é";
+    const fillerBytes = 4096 - Buffer.byteLength(heading, "utf8") - Buffer.byteLength(suffix, "utf8");
+    const replacement = `${"a".repeat(fillerBytes)}${suffix}`;
+
+    const result = coreMemory.replace("Preferences", "x", replacement);
+
+    expect(result).toEqual({ ok: true });
+    expect(Buffer.byteLength(coreMemory.read(), "utf8")).toBe(4096);
+    expect(coreMemory.read().endsWith(suffix)).toBe(true);
+  });
+
+  it("rejects replace above the byte limit without changing existing data", () => {
+    coreMemory.append("Preferences", "x");
+    const before = coreMemory.read();
+    const heading = "## Preferences\n";
+    const suffix = "é";
+    const fillerBytes = 4096 - Buffer.byteLength(heading, "utf8") - Buffer.byteLength(suffix, "utf8");
+    const replacement = `${"a".repeat(fillerBytes)}${suffix}a`;
+
+    const result = coreMemory.replace("Preferences", "x", replacement);
+
+    expect(result).toEqual({
+      ok: false,
+      error:
+        "Core memory is full (4KB limit). Move less important information to archival memory using memory_archival_insert.",
+    });
+    expect(coreMemory.read()).toBe(before);
+  });
+
   it("persists content across instances", () => {
     coreMemory.append("Preferences", "Likes coffee");
 

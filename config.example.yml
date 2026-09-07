@@ -212,6 +212,9 @@ models:
 # memory:
 #   embeddings:
 #     provider: openai-compatible
+#     # Optional by default: provider outages retain keyword-only recall.
+#     # Set true to reject startup/search when embeddings are unavailable.
+#     required: false
 #     base_url: http://127.0.0.1:11434/v1
 #     model: nomic-embed-text
 #     api_key: ${EMBEDDINGS_API_KEY}

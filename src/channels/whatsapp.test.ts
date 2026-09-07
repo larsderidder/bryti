@@ -1,6 +1,17 @@
 import { describe, expect, it, vi } from "vitest";
 import { WhatsAppBridge } from "./whatsapp.js";
 
+describe("WhatsApp delivery classification", () => {
+  it("classifies disconnected sends as retryable not-sent delivery", async () => {
+    const bridge = new WhatsAppBridge("/tmp/bryti-whatsapp-test", ["31612345678"]);
+
+    await expect(bridge.sendMessage("31612345678@s.whatsapp.net", "hello")).rejects.toMatchObject({
+      outcome: "not_sent",
+      retryable: true,
+    });
+  });
+});
+
 describe("WhatsApp approval reactions", () => {
   function bridgeWithPendingApproval() {
     const bridge = new WhatsAppBridge("/tmp/bryti-whatsapp-test", ["31612345678"]);

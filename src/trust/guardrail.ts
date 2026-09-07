@@ -171,7 +171,11 @@ export async function evaluateToolCall(
   try {
     const auth = await modelRegistry.getApiKeyAndHeaders(model);
     if (!auth.ok) {
-      return { verdict: "ASK", reason: `Auth error for guardrail model: ${auth.error}` };
+      let error = "unknown";
+      if ("error" in auth && typeof auth.error === "string") {
+        error = auth.error;
+      }
+      return { verdict: "ASK", reason: `Auth error for guardrail model: ${error}` };
     }
     const result = await withTimeout(
       completeSimple(model, {

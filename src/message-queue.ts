@@ -17,6 +17,7 @@
 
 import { isInternalMessage, type IncomingMessage } from "./channels/types.js";
 import { DEFAULT_THREAD_ID, getSessionKey } from "./threads.js";
+import type { WorkStore } from "./work/store.js";
 
 const MAX_DEPTH = 10;
 // 2-3 seconds is the sweet spot: fast enough that the user experiences a
@@ -102,6 +103,10 @@ export class MessageQueue {
   private readonly maxDepth: number;
   private readonly mergeWindowMs: number;
   private readonly rateLimiter: RateLimiter;
+  private paused: boolean;
+  private accepting = true;
+  private readonly queuedIds = new Set<string>();
+  private readonly drains = new Set<Promise<void>>();
 
   constructor(
     processFn: ProcessFn,
@@ -109,19 +114,24 @@ export class MessageQueue {
     maxDepth = MAX_DEPTH,
     mergeWindowMs = MERGE_WINDOW_MS,
     private readonly activeThread: (userId: string) => string = () => DEFAULT_THREAD_ID,
+    private readonly durability: { store?: WorkStore; paused?: boolean } = {},
   ) {
     this.processFn = processFn;
     this.rejectFn = rejectFn;
     this.maxDepth = maxDepth;
     this.mergeWindowMs = mergeWindowMs;
     this.rateLimiter = new RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
+    this.paused = durability.paused ?? false;
   }
 
   /**
    * Enqueue a message, resolving its thread before choosing the session queue.
    * Drains immediately when idle. Rate-limited per user (10 messages/minute).
    */
-  enqueue(msg: IncomingMessage): void {
+  enqueue(msg: IncomingMessage): boolean {
+    if (!this.accepting) {
+      return false;
+    }
     const threadId = msg.threadId ?? this.activeThread(msg.userId);
     msg = { ...msg, threadId };
     const key = getSessionKey(msg.userId, threadId);
@@ -131,7 +141,7 @@ export class MessageQueue {
     if (!isInternal && !this.rateLimiter.check(msg.userId)) {
       console.warn(`[queue] Rate limit exceeded for user ${msg.userId}`);
       this.rejectFn(msg).catch((err) => console.error("rejectFn error:", err));
-      return;
+      return false;
     }
 
     let q = this.queues.get(key);
@@ -146,14 +156,63 @@ export class MessageQueue {
       // not silently dropped, but it is not queued either. The caller decides
       // how to respond (e.g., send "I'm busy" to the user).
       this.rejectFn(msg).catch((err) => console.error("rejectFn error:", err));
+      return false;
+    }
+
+    if (this.durability.store) {
+      const accepted = this.durability.store.accept(msg);
+      if (!accepted.created) {
+        return true;
+      }
+      msg = accepted.record.message;
+      this.queuedIds.add(accepted.record.id);
+    }
+    q.entries.push({ msg, arrivedAt: Date.now() });
+    this.scheduleDrain(key);
+    return true;
+  }
+
+  /** Restore accepted input after the caller reconciles interrupted work. */
+  start(): void {
+    for (const record of this.durability.store?.queued() ?? []) {
+      if (this.queuedIds.has(record.id)) {
+        continue;
+      }
+      const msg = record.message;
+      const key = getSessionKey(msg.userId, msg.threadId ?? DEFAULT_THREAD_ID);
+      let queue = this.queues.get(key);
+      if (!queue) {
+        queue = { entries: [], processing: false };
+        this.queues.set(key, queue);
+      }
+      queue.entries.push({ msg, arrivedAt: Date.parse(record.createdAt) });
+      this.queuedIds.add(record.id);
+    }
+    this.paused = false;
+    for (const key of this.queues.keys()) {
+      this.scheduleDrain(key);
+    }
+  }
+
+  /** Stop admission and leave not-yet-started work persisted for recovery. */
+  stop(): void {
+    this.accepting = false;
+    this.paused = true;
+  }
+
+  async waitForIdle(): Promise<void> {
+    while (this.drains.size > 0) {
+      await Promise.all([...this.drains]);
+    }
+  }
+
+  private scheduleDrain(key: string): void {
+    if (this.paused || this.queues.get(key)?.processing) {
       return;
     }
-
-    q.entries.push({ msg, arrivedAt: Date.now() });
-
-    if (!q.processing) {
-      this.drain(key).catch((err) => console.error("Queue drain error:", err));
-    }
+    const drain = this.drain(key).catch((err) => console.error("Queue drain error:", err));
+    this.drains.add(drain);
+    void drain.finally(() => this.drains.delete(drain));
   }
 
   /**
@@ -165,17 +224,39 @@ export class MessageQueue {
 
     q.processing = true;
 
-    while (q.entries.length > 0) {
-      const batch = this.takeMergeBatch(q);
-      const merged = this.mergeEntries(batch);
-      try {
-        await this.processFn(merged);
-      } catch (err) {
-        console.error("processMessage error:", err);
+    try {
+      while (!this.paused && q.entries.length > 0) {
+        const batch = this.takeMergeBatch(q);
+        const merged = this.mergeEntries(batch);
+        const ids = merged.workIds ?? [];
+        if (this.durability.store && !this.durability.store.claim(ids)) {
+          const waiting = batch.filter((entry) => {
+            return entry.msg.workIds?.every((id) => this.durability.store!.get(id)?.execution === "queued");
+          });
+          q.entries.unshift(...waiting);
+          for (const id of ids) {
+            if (this.durability.store.get(id)?.execution !== "queued") {
+              this.queuedIds.delete(id);
+            }
+          }
+          console.warn(`[queue] Batch already claimed; retained ${waiting.length} queued entries`);
+          continue;
+        }
+        try {
+          await this.processFn(merged);
+          this.durability.store?.finish(ids, "completed");
+        } catch (err) {
+          this.durability.store?.finish(ids, "failed", "Message processing failed");
+          console.error("processMessage error:", err);
+        } finally {
+          for (const id of ids) {
+            this.queuedIds.delete(id);
+          }
+        }
       }
+    } finally {
+      q.processing = false;
     }
-
-    q.processing = false;
   }
 
   /**
@@ -226,6 +307,7 @@ export class MessageQueue {
     return {
       ...entries[0].msg,
       text: texts.join("\n"),
+      workIds: entries.flatMap((entry) => entry.msg.workIds ?? []),
       ...(allImages.length > 0 ? { images: allImages } : {}),
       ...(allAudio.length > 0 ? { audio: allAudio } : {}),
       ...(replyMode ? { replyMode } : {}),

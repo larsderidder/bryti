@@ -1,62 +1,32 @@
-/**
- * Trust-aware tool wrapper.
- *
- * Wraps tool execute() with permission checks and the LLM guardrail.
- * Elevated tools first need tool-level approval, then each invocation
- * goes through the guardrail (ALLOW / ASK / BLOCK). Safe and guarded
- * tools pass through without checks.
- */
-
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import {
+  canonicalizeToolArgs,
   checkPermission,
-  setPendingApproval,
+  extractToolDestination,
   getToolCapabilities,
+  setPendingApproval,
+  hashToolArgs,
+  summarizeToolArgs,
+  type ApprovalProvenance,
   type TrustStore,
 } from "./store.js";
-import { evaluateToolCall, type GuardrailResult } from "./guardrail.js";
+import { evaluateToolCall, type GuardrailInput, type GuardrailResult } from "./guardrail.js";
 import type { Config } from "../config.js";
 import type { ApprovalResult } from "../channels/types.js";
 import type { ModelInfra } from "../model-infra.js";
 
-/**
- * Callback for interactive approval requests. Sends a prompt to the user
- * (inline buttons or text) and resolves with their decision.
- */
 export type ApprovalCallback = (prompt: string, approvalKey: string) => Promise<ApprovalResult>;
+export type GuardrailEvaluator = (input: GuardrailInput) => Promise<GuardrailResult>;
 
-/**
- * Context needed for guardrail evaluation.
- */
 export interface TrustWrapperContext {
   config: Config;
-  /** The last user message (for guardrail context). */
   getLastUserMessage: () => string | undefined;
-  /** If provided, approval requests use this instead of text-based blocking. */
   onApprovalNeeded?: ApprovalCallback;
-  /**
-   * Pre-initialised model infrastructure to pass to the guardrail. When
-   * provided the guardrail reuses the existing ModelRegistry instead of
-   * creating a second one. Omit only in tests or standalone callers.
-   */
   modelInfra?: ModelInfra;
+  evaluateToolCall?: GuardrailEvaluator;
+  source?: Omit<ApprovalProvenance, "userId">;
 }
 
-function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}
-
-// TOOL_DESCRIPTIONS is shown to the user inside approval prompts so they see
-// plain English rather than internal tool names. It is NOT passed to the LLM
-// guardrail; the guardrail receives the tool's own `.description` property
-// from the tool definition instead.
-/**
- * Human-readable labels for elevated tools, shown instead of raw tool names
- * in user-facing approval prompts.
- */
 const TOOL_DESCRIPTIONS: Record<string, string> = {
   system_restart: "Restart to pick up changes",
   shell_exec: "Run a shell command",
@@ -65,8 +35,21 @@ const TOOL_DESCRIPTIONS: Record<string, string> = {
   fetch_url: "Fetch and extract text from a web page in the main conversation",
 };
 
+const ALWAYS_APPROVAL_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
 function humanToolDescription(toolName: string, reason?: string): string {
   return TOOL_DESCRIPTIONS[toolName] ?? reason ?? "Perform an action that needs your permission";
+}
+
+function nextAlwaysApprovalExpiry(): string {
+  return new Date(Date.now() + ALWAYS_APPROVAL_TTL_MS).toISOString();
 }
 
 function denied(toolName: string): AgentToolResult<unknown> {
@@ -78,9 +61,121 @@ function denied(toolName: string): AgentToolResult<unknown> {
   } as AgentToolResult<unknown>;
 }
 
-/**
- * Wrap a tool's execute function with trust check + LLM guardrail.
- */
+function aborted(toolName: string): AgentToolResult<unknown> {
+  return {
+    content: [{
+      type: "text" as const,
+      text: `Permission flow for ${toolName} was aborted before execution. Tell the user the action was not taken.`,
+    }],
+  } as AgentToolResult<unknown>;
+}
+
+function blocked(reason: string): AgentToolResult<unknown> {
+  return {
+    content: [{
+      type: "text" as const,
+      text: `Blocked: ${reason}. Tell the user this action was blocked for safety and explain why.`,
+    }],
+  } as AgentToolResult<unknown>;
+}
+
+function buildProvenance(userId: string, context?: TrustWrapperContext): ApprovalProvenance {
+  return {
+    userId,
+    threadId: context?.source?.threadId,
+    platform: context?.source?.platform,
+    channelId: context?.source?.channelId,
+    channelThreadId: context?.source?.channelThreadId,
+    automationId: context?.source?.automationId,
+    source: context?.source?.source ?? "agent",
+  };
+}
+
+function buildOperationSummary(toolName: string, params: unknown): string {
+  const destination = extractToolDestination(params);
+  if (destination) {
+    return `${toolName} destination ${destination}`;
+  }
+  return toolName;
+}
+
+function buildApprovalPrompt(
+  heading: string,
+  toolName: string,
+  reason: string,
+  params: unknown,
+  capsReason?: string,
+): string {
+  const description = humanToolDescription(toolName, capsReason);
+  const operation = buildOperationSummary(toolName, params);
+  const argsSummary = summarizeToolArgs(params);
+  return [
+    `<b>${escapeHtml(heading)}</b>`,
+    "",
+    escapeHtml(description),
+    `Operation: ${escapeHtml(operation)}`,
+    `Arguments: ${escapeHtml(argsSummary)}`,
+    `Check: ${escapeHtml(reason)}`,
+    "Approval scope: Allow once runs only this call. Always stores this exact argument set for 30 days, scoped to the current user, source, platform, channel, topic, and thread when known.",
+  ].join("\n");
+}
+
+async function runGuardrail(
+  tool: AgentTool<any>,
+  params: unknown,
+  context?: TrustWrapperContext,
+  signal?: AbortSignal,
+): Promise<AbortableResult<GuardrailResult>> {
+  if (!context?.config) {
+    return { verdict: "ASK", reason: "Guardrail unavailable." };
+  }
+  const input: GuardrailInput = {
+    toolName: tool.name,
+    args: canonicalizeToolArgs(params),
+    userMessage: context.getLastUserMessage?.(),
+    toolDescription: tool.description,
+  };
+  try {
+    if (context.evaluateToolCall) {
+      return await awaitAbortable(context.evaluateToolCall(input), signal);
+    }
+    return await awaitAbortable(evaluateToolCall(context.config, input, context.modelInfra), signal);
+  } catch {
+    return { verdict: "ASK", reason: "Guardrail unavailable." };
+  }
+}
+
+function signalAborted(signal?: AbortSignal): boolean {
+  return Boolean(signal?.aborted);
+}
+
+const ABORTED_PROMISE = Symbol("aborted promise");
+type AbortableResult<T> = T | typeof ABORTED_PROMISE;
+
+async function awaitAbortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<AbortableResult<T>> {
+  if (!signal) {
+    return await promise;
+  }
+  if (signal.aborted) {
+    promise.catch(() => {});
+    return ABORTED_PROMISE;
+  }
+
+  let cleanup = () => {};
+  const abortPromise = new Promise<typeof ABORTED_PROMISE>((resolve) => {
+    const onAbort = () => resolve(ABORTED_PROMISE);
+    signal.addEventListener("abort", onAbort, { once: true });
+    cleanup = () => signal.removeEventListener("abort", onAbort);
+  });
+  promise.catch(() => {});
+
+  try {
+    return await Promise.race([promise, abortPromise]);
+  } finally {
+    cleanup();
+  }
+}
+
 export function wrapToolWithTrustCheck<T extends AgentTool<any>>(
   tool: T,
   trustStore: TrustStore,
@@ -92,111 +187,105 @@ export function wrapToolWithTrustCheck<T extends AgentTool<any>>(
   const wrappedExecute: typeof originalExecute = async (toolCallId, params, signal, onUpdate) => {
     const caps = getToolCapabilities(tool.name);
 
-    // Safe and guarded tools: always execute
     if (caps.level === "safe" || caps.level === "guarded") {
       return originalExecute.call(tool, toolCallId, params, signal, onUpdate);
     }
 
-    // Elevated: first check if the tool itself is approved
-    const permResult = checkPermission(tool.name, trustStore);
-    if (!permResult.allowed) {
-      const description = humanToolDescription(tool.name, caps.reason);
-      const prompt =
-        `⚡ <b>Permission request</b>\n\n` +
-        `${escapeHtml(description)}`;
+    const provenance = buildProvenance(userId, context);
+    if (signalAborted(signal)) {
+      return aborted(tool.name);
+    }
+    if (trustStore.consumeInvocationOnce(tool.name, params, provenance)) {
+      if (signalAborted(signal)) {
+        return aborted(tool.name);
+      }
+      return originalExecute.call(tool, toolCallId, params, signal, onUpdate);
+    }
 
-      if (context?.onApprovalNeeded) {
-        const approvalKey = `tool:${userId}:${tool.name}`;
-        const result = await context.onApprovalNeeded(prompt, approvalKey);
+    if (trustStore.isInvocationApproved(tool.name, params, provenance)) {
+      if (signalAborted(signal)) {
+        return aborted(tool.name);
+      }
+      return originalExecute.call(tool, toolCallId, params, signal, onUpdate);
+    }
 
-        if (result === "deny") {
-          return denied(tool.name);
-        }
+    const guardrailResult = await runGuardrail(tool, params, context, signal);
+    if (guardrailResult === ABORTED_PROMISE) {
+      return aborted(tool.name);
+    }
+    if (signalAborted(signal)) {
+      return aborted(tool.name);
+    }
 
-        const duration = result === "allow_always" ? "always" : "once";
-        trustStore.approve(tool.name, duration);
-        // User just explicitly approved — skip the guardrail to avoid a
-        // second prompt for the same action.
-        return originalExecute.call(tool, toolCallId, params, signal, onUpdate);
-      } else {
-        // No inline approval available — fall back to text-based flow
+    if (guardrailResult.verdict === "BLOCK") {
+      return blocked(guardrailResult.reason);
+    }
+
+    const toolAvailable = trustStore.hasToolApproval(tool.name);
+    const needsApproval = !toolAvailable || guardrailResult.verdict === "ASK";
+    if (!needsApproval) {
+      trustStore.consumeOnce(tool.name);
+    }
+    if (needsApproval) {
+      const permission = checkPermission(tool.name, trustStore);
+      let reason = permission.blockReason ?? guardrailResult.reason;
+      let heading = "Permission request";
+      if (guardrailResult.verdict === "ASK") {
+        reason = guardrailResult.reason;
+        heading = "Confirmation needed";
+      }
+      const prompt = buildApprovalPrompt(
+        heading,
+        tool.name,
+        reason,
+        params,
+        caps.reason,
+      );
+
+      if (!context?.onApprovalNeeded) {
         setPendingApproval(userId, tool.name);
         return {
           content: [{
             type: "text" as const,
-            text: permResult.blockReason ?? `Permission denied for ${tool.name}.`,
-          }],
-        } as AgentToolResult<unknown>;
-      }
-    }
-
-    // Tool is approved. Run the LLM guardrail on the specific arguments.
-    if (context?.config) {
-      const argsStr = typeof params === "string" ? params : JSON.stringify(params);
-      let guardrailResult: GuardrailResult;
-      try {
-        guardrailResult = await evaluateToolCall(context.config, {
-          toolName: tool.name,
-          args: argsStr,
-          userMessage: context.getLastUserMessage?.(),
-          toolDescription: tool.description,
-        }, context.modelInfra);
-      } catch {
-        // Guardrail failure: fail safe to ASK
-        guardrailResult = { verdict: "ASK", reason: "Guardrail unavailable." };
-      }
-
-      if (guardrailResult.verdict === "BLOCK") {
-        return {
-          content: [{
-            type: "text" as const,
-            text: `Blocked: ${guardrailResult.reason}. ` +
-              `Tell the user this action was blocked for safety and explain why.`,
+            text: prompt.replace(/<[^>]+>/g, ""),
           }],
         } as AgentToolResult<unknown>;
       }
 
-      if (guardrailResult.verdict === "ASK") {
-        const description = humanToolDescription(tool.name, caps.reason);
-        const prompt =
-          `⚠️ <b>Confirmation needed</b>\n\n` +
-          `${escapeHtml(description)}\n` +
-          `${escapeHtml(guardrailResult.reason)}`;
+      const argsHash = hashToolArgs(params);
+      const approvalKey = `trust:${userId}:${tool.name}:${argsHash.slice(0, 16)}:${toolCallId}`;
+      const result = await awaitAbortable(context.onApprovalNeeded(prompt, approvalKey), signal);
+      if (result === ABORTED_PROMISE) {
+        return aborted(tool.name);
+      }
+      if (signalAborted(signal)) {
+        return aborted(tool.name);
+      }
+      if (result === "deny") {
+        return denied(tool.name);
+      }
 
-        if (context?.onApprovalNeeded) {
-          const approvalKey = `guardrail:${userId}:${toolCallId}`;
-          const result = await context.onApprovalNeeded(prompt, approvalKey);
-
-          if (result === "deny") {
-            return denied(tool.name);
-          }
-          // allow or allow_always: fall through to execution
-          // (guardrail "always allow" for a specific invocation isn't meaningful, treat same as once)
-        } else {
-          setPendingApproval(userId, `${tool.name}:${toolCallId}`);
-          return {
-            content: [{
-              type: "text" as const,
-              text: `Guardrail flagged this action: ${guardrailResult.reason}. ` +
-                `Ask the user to confirm: describe what you're about to do and why, ` +
-                `then ask "Should I go ahead?"`,
-            }],
-          } as AgentToolResult<unknown>;
+      if (result === "allow_always") {
+        const expiresAt = nextAlwaysApprovalExpiry();
+        if (!toolAvailable) {
+          trustStore.approve(tool.name, "always", provenance, expiresAt);
         }
+        trustStore.approveInvocation(tool.name, params, "always", provenance, expiresAt);
+      } else {
+        trustStore.approveInvocation(tool.name, params, "once", provenance);
+        trustStore.consumeInvocationOnce(tool.name, params, provenance);
       }
-
-      // ALLOW: fall through to execution
     }
 
+    if (signalAborted(signal)) {
+      return aborted(tool.name);
+    }
     return originalExecute.call(tool, toolCallId, params, signal, onUpdate);
   };
 
   return { ...tool, execute: wrappedExecute };
 }
 
-/**
- * Wrap all tools in an array with trust checks.
- */
 export function wrapToolsWithTrustChecks(
   tools: AgentTool<any>[],
   trustStore: TrustStore,

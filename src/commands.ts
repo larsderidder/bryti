@@ -1,7 +1,7 @@
 /**
  * Slash command handling and activity logging.
  *
- * Handles /clear, /memory, /log, /restart, and thread commands.
+ * Handles /clear, /memory, /log, /restart, /trust, and thread commands.
  * Builds the human-readable activity log from tool-calls.jsonl.
  */
 
@@ -13,6 +13,8 @@ import type { CoreMemory } from "./memory/core-memory.js";
 import type { HistoryManager } from "./history.js";
 import { getUserTimezone } from "./time.js";
 import { createThread, getActiveThread, listThreads, switchThread } from "./threads.js";
+import type { ListedApproval, TrustStore } from "./trust/index.js";
+import type { WorkStore } from "./work/store.js";
 
 /**
  * Human-readable labels for the /log output. Tool names never leak to the user.
@@ -97,10 +99,77 @@ export function buildActivityLog(dataDir: string, userId: string, timezone: stri
   return `Recent activity:\n${lines.join("\n")}`;
 }
 
+function formatTrustScope(record: ListedApproval): string {
+  const scope = record.provenance;
+  if (!scope) {
+    return "unknown scope";
+  }
+  const parts: string[] = [];
+  if (scope.userId) {
+    parts.push(`user ${scope.userId}`);
+  }
+  if (scope.source) {
+    parts.push(`source ${scope.source}`);
+  }
+  if (scope.platform) {
+    parts.push(`platform ${scope.platform}`);
+  }
+  if (scope.channelId) {
+    parts.push(`channel ${scope.channelId}`);
+  }
+  if (scope.channelThreadId) {
+    parts.push(`topic ${scope.channelThreadId}`);
+  }
+  if (scope.threadId) {
+    parts.push(`thread ${scope.threadId}`);
+  }
+  if (scope.automationId) {
+    parts.push(`automation ${scope.automationId}`);
+  }
+  if (parts.length === 0) {
+    return "unknown scope";
+  }
+  return parts.join(", ");
+}
+
+function formatTrustGrant(record: ListedApproval): string {
+  const id = record.id ?? "config";
+  const kind = record.kind ?? "tool";
+  const details = [`${kind}`, record.duration];
+  if (record.expiresAt) {
+    details.push(`expires ${record.expiresAt}`);
+  }
+  details.push(formatTrustScope(record));
+
+  const lines = [`- ${id} ${record.tool} (${details.join(", ")})`];
+  if (record.argsSummary) {
+    lines.push(`  args: ${record.argsSummary}`);
+  }
+  return lines.join("\n");
+}
+
+function formatTrustList(trustStore: TrustStore, userId: string): string {
+  const grants = trustStore.listApproved().filter((grant) => {
+    return grant.provenance?.userId === userId || (!grant.provenance?.userId && grant.kind !== "invocation");
+  });
+  if (grants.length === 0) {
+    return "No trust approvals on record.";
+  }
+  return [
+    "Trust approvals:",
+    ...grants.map(formatTrustGrant),
+    "",
+    "Use /trust revoke <grant id> to revoke a stored grant. Config approvals show as config and must be removed from config.yml.",
+  ].join("\n");
+}
+
 export interface SlashCommandContext {
   config: Config;
   coreMemory: CoreMemory;
   historyManager: HistoryManager;
+  /** Store for listing and revoking trust grants. */
+  trustStore?: TrustStore;
+  workStore?: WorkStore;
   /** Callback to dispose and delete a user session. */
   disposeSession: (userId: string, threadId?: string) => void;
   /** Send a message to the user. */
@@ -130,6 +199,25 @@ export async function handleSlashCommand(
   const parsed = parseSlashCommand(msg.text);
   if (!parsed) return false;
 
+  if (parsed.command === "work") {
+    let records = context.workStore?.listUnresolved(msg.userId) ?? [];
+    if (parsed.args) {
+      const record = context.workStore?.get(parsed.args);
+      records = [];
+      if (record?.message.userId === msg.userId) {
+        records.push(record);
+      }
+    }
+    const lines = records.slice(0, 20).map((record) => {
+      return `${record.id}: execution=${record.execution}, delivery=${record.delivery}\n${record.message.text.slice(0, 120)}`;
+    });
+    let text = "No matching unresolved work receipts.";
+    if (lines.length > 0) {
+      text = `Work receipts, uncertain actions are not automatically repeated:\n\n${lines.join("\n\n")}`;
+    }
+    await context.sendMessage(msg.channelId, text);
+    return true;
+  }
   if (parsed.command === "threads") {
     const threads = listThreads(context.config.data_dir, msg.userId);
     const lines = threads.map((thread) => `${thread.active ? "*" : "-"} ${thread.title}`);
@@ -186,6 +274,39 @@ export async function handleSlashCommand(
       getUserTimezone(context.config),
     );
     await context.sendMessage(msg.channelId, logText);
+    return true;
+  }
+  if (parsed.command === "trust") {
+    if (!context.trustStore) {
+      await context.sendMessage(msg.channelId, "Trust approvals are unavailable in this process.");
+      return true;
+    }
+
+    const [subcommand, ...args] = parsed.args.trim().split(/\s+/).filter(Boolean);
+    if (!subcommand || subcommand === "list") {
+      await context.sendMessage(msg.channelId, formatTrustList(context.trustStore, msg.userId));
+      return true;
+    }
+
+    if (subcommand === "revoke") {
+      const grantId = args.join(" ").trim();
+      if (!grantId) {
+        await context.sendMessage(msg.channelId, "Usage: /trust revoke <grant id>");
+        return true;
+      }
+      const grant = context.trustStore.listApproved().find((record) => record.id === grantId);
+      if (grant?.provenance?.userId === msg.userId && context.trustStore.revokeGrant(grantId)) {
+        await context.sendMessage(msg.channelId, `Revoked trust grant ${grantId}.`);
+      } else {
+        await context.sendMessage(
+          msg.channelId,
+          "No trust grant found for that id. Config approvals show as config and must be removed from config.yml.",
+        );
+      }
+      return true;
+    }
+
+    await context.sendMessage(msg.channelId, "Usage: /trust, /trust list, or /trust revoke <grant id>");
     return true;
   }
 

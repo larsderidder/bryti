@@ -34,6 +34,8 @@ export interface HybridSearchOptions {
   k?: number;
   /** Maximum results to return (default: 5) */
   limit?: number;
+  /** Throw embedding failures instead of degrading to keyword-only search. */
+  embeddingRequired?: boolean;
 }
 
 const DEFAULT_OPTIONS: Required<HybridSearchOptions> = {
@@ -41,7 +43,23 @@ const DEFAULT_OPTIONS: Required<HybridSearchOptions> = {
   keywordWeight: 0.3,
   k: 60,
   limit: 5,
+  embeddingRequired: false,
 };
+
+let embeddingFailureLogged = false;
+
+function isRequiredEmbeddingError(error: unknown): boolean {
+  return error instanceof Error && error.name === "EmbeddingRequiredError";
+}
+
+function logEmbeddingDegraded(): void {
+  if (embeddingFailureLogged) {
+    return;
+  }
+
+  embeddingFailureLogged = true;
+  console.warn("[memory-search] Embedding search degraded. Using keyword-only retrieval.");
+}
 
 /**
  * Create a hybrid search function over the given memory store.
@@ -68,16 +86,21 @@ export function createHybridSearch(
       return [];
     }
 
-    // embed() returns null when node-llama-cpp is not installed.
-    // In that case we fall back to keyword-only search.
-    const queryEmbedding = await embed(query);
+    const keywordResults = await store.searchKeyword(query, opts.limit * 2);
+    let vectorResults: ScoredResult[] = [];
 
-    const [keywordResults, vectorResults] = await Promise.all([
-      store.searchKeyword(query, opts.limit * 2),
-      queryEmbedding
-        ? store.searchVector(queryEmbedding, opts.limit * 2)
-        : Promise.resolve([]),
-    ]);
+    try {
+      const queryEmbedding = await embed(query);
+      if (queryEmbedding) {
+        vectorResults = await store.searchVector(queryEmbedding, opts.limit * 2);
+      }
+    } catch (error) {
+      if (opts.embeddingRequired || isRequiredEmbeddingError(error)) {
+        throw error;
+      }
+
+      logEmbeddingDegraded();
+    }
 
     // Handle empty results
     if (keywordResults.length === 0 && vectorResults.length === 0) {
