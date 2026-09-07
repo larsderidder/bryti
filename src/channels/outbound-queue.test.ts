@@ -121,6 +121,24 @@ describe("DurableOutboundBridge", () => {
     fs.writeFileSync(path.join(queueDir(), `${record.id}.json`), JSON.stringify(record));
   }
 
+  it.each([0, 8])("preserves legacy records with %i attempts as unknown without resending", async (attempts) => {
+    const { inner, bridge, outcomes } = make();
+    const legacy = {
+      id: "11111111-1111-4111-8111-111111111111", platform: "telegram", channelId: "chat",
+      text: "Legacy reply", attempts, createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z",
+    };
+    writeRecord(legacy);
+    try {
+      await bridge.start();
+      await bridge.drain();
+      expect(inner.sent).toEqual([]);
+      expect(records()).toEqual([expect.objectContaining({ ...legacy, kind: "message", state: "unknown", workIds: [] })]);
+      expect(outcomes).toEqual([{ workIds: [], state: "unknown", error: "legacy_delivery_unknown" }]);
+    } finally {
+      await bridge.stop();
+    }
+  });
+
   it("records pending and delivered states around a successful send", async () => {
     const { bridge, outcomes } = make();
     await bridge.start();

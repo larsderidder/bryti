@@ -355,7 +355,17 @@ export class DurableOutboundBridge implements ChannelBridge {
       }
       const filePath = path.join(this.queueDir, entry);
       try {
-        const parsed = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+        let parsed: unknown = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)
+          && !("state" in parsed) && !("workIds" in parsed) && !("kind" in parsed)) {
+          // Old records did not distinguish queued, in-flight, or ambiguous sends.
+          const migrated = { ...parsed, kind: "message", state: "unknown", workIds: [], lastError: "legacy_delivery_unknown" };
+          if (isOutboundRecord(migrated, this.platform) && entry === `${migrated.id}.json`) {
+            this.save(migrated);
+            parsed = migrated;
+            console.warn(`[outbound] Preserved legacy delivery ${migrated.id} as unknown; not replayed`);
+          }
+        }
         if (isOutboundRecord(parsed, this.platform)) {
           records.push({ ...parsed, kind: parsed.kind ?? "message" });
         } else {
