@@ -363,6 +363,29 @@ describe("Scheduler", () => {
     workStore.close();
   });
 
+  it("keeps delivery reconciliation after the agent resolves a recurring projection", async () => {
+    const config = { ...makeConfig(), data_dir: tempDir };
+    const workStore = createWorkStore(tempDir);
+    const onMessage = vi.fn().mockResolvedValue(true);
+    const id = addDueProjection(config, { summary: "Resolved before delivery", resolved_when: dueWhen(), resolution: "exact", recurrence: "0 8 * * *" });
+    const scheduler = createScheduler(config, onMessage, workStore);
+    scheduler.start();
+    await runExactCallback();
+    const store = createProjectionStore("12345", tempDir);
+    const workId = store.getById(id)!.delivery_work_id!;
+    workStore.claim([workId]);
+    store.resolve(id, "done");
+    workStore.recordResponse([workId], "unknown");
+    await runExactCallback();
+    expect(onMessage.mock.calls.some(([msg]) => msg.workId === `blocked:${workId}`)).toBe(true);
+    workStore.recordResponse([workId], "delivered");
+    await runExactCallback();
+    expect(store.getById(id)).toMatchObject({ status: "done", delivery_work_id: null });
+    store.close();
+    scheduler.stop();
+    workStore.close();
+  });
+
   it("fails closed for an invalid stored target instead of falling back", async () => {
     const config = { ...makeConfig(), data_dir: tempDir };
     const onMessage = vi.fn().mockResolvedValue(true);

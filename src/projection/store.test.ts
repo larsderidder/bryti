@@ -300,6 +300,16 @@ describe("createProjectionStore", () => {
     expect(store.getExactDue(5).map((p) => p.id)).not.toContain(id);
   });
 
+  it("links delivery even when resolution raced with queue acceptance", () => {
+    const id = store.add({ summary: "Resolved during acceptance", resolution: "exact", resolved_when: isoHoursFromNow(0) });
+    store.resolve(id, "done");
+    expect(store.markDeliveryWork(id, "occurrence")).toBe(true);
+    expect(store.getAwaitingDelivery().map((p) => p.id)).toContain(id);
+    expect(store.clearDeliveryWork(id, "different-occurrence")).toBe(false);
+    expect(store.clearDeliveryWork(id, "occurrence")).toBe(true);
+    expect(store.getById(id)?.status).toBe("done");
+  });
+
   it("does not auto-expire accepted occurrences", () => {
     const id = store.add({
       summary: "Accepted old occurrence",

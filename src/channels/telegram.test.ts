@@ -606,3 +606,56 @@ describe("approval callback data format", () => {
     expect(parts[2]).toBe("always");
   });
 });
+
+describe("approval ownership", () => {
+  beforeEach(() => {
+    grammyMocks.MockBot.instances.length = 0;
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+  });
+
+  it("denies group approvals without a requester identity", async () => {
+    const bridge = new TelegramBridge("test-token", [123], { mode: "group", allowedGroups: [-1000] });
+    await bridge.start();
+    try {
+      await expect(bridge.sendApprovalRequest("-1000", "Confirm", "missing-owner")).resolves.toBe("deny");
+      expect(grammyMocks.MockBot.instances[0].api.sendMessage).not.toHaveBeenCalled();
+    } finally {
+      await bridge.stop();
+    }
+  });
+
+  it.each([
+    { userId: 456 }, { chatId: -2000 }, { topicId: 88 }, { messageId: 202 }, { decision: "unexpected" },
+  ])("keeps the approval pending for mismatched callbacks: %j", async (mismatch) => {
+    const bridge = new TelegramBridge("test-token", [123, 456], { mode: "group", allowedGroups: [-1000, -2000] });
+    await bridge.start();
+    const resolved = vi.fn();
+    const pending = bridge.sendApprovalRequest("-1000", "Confirm action", "request", 60_000,
+      { channelThreadId: "77", approverUserId: "123" }).then(resolved);
+    await vi.advanceTimersByTimeAsync(0);
+    const handler = grammyMocks.MockBot.instances[0].handlers.get("callback_query:data")!;
+    const shortKey = crypto.createHash("sha256").update("request").digest("hex").slice(0, 12);
+    function callback(overrides: { userId?: number; chatId?: number; topicId?: number; messageId?: number; decision?: string } = {}) {
+      return {
+        from: { id: overrides.userId ?? 123 }, chat: { id: overrides.chatId ?? -1000, type: "supergroup" },
+        callbackQuery: { data: `a:${shortKey}:${overrides.decision ?? "allow"}`,
+          message: { message_id: overrides.messageId ?? 101, message_thread_id: overrides.topicId ?? 77, text: "Confirm action" } },
+        answerCallbackQuery: vi.fn(async () => {}), editMessageReplyMarkup: vi.fn(async () => {}), editMessageText: vi.fn(async () => {}),
+      };
+    }
+    try {
+      await handler(callback(mismatch));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(resolved).not.toHaveBeenCalled();
+      await handler(callback());
+      await pending;
+      expect(resolved).toHaveBeenCalledWith("allow");
+    } finally {
+      await bridge.stop();
+    }
+  });
+});

@@ -21,6 +21,8 @@ import { isActiveNow } from "./active-hours.js";
 import { getUserTimezone } from "./time.js";
 import { createDeviceStore } from "./web-e2ee/device-store.js";
 import { createWorkStore, type WorkRecord, type WorkStore } from "./work/store.js";
+import { scheduledWorkId, OBSOLETE_PROJECTION_WORK } from "./projection/occurrence.js";
+export { scheduledWorkId } from "./projection/occurrence.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -340,10 +342,6 @@ export interface Scheduler {
 
 type SchedulerMessageCallback = (msg: IncomingMessage) => Promise<void | boolean> | void | boolean;
 
-export function scheduledWorkId(ownerUserId: string, projection: Projection): string {
-  const scheduledWhen = projection.resolved_when ?? "unscheduled";
-  return `projection:${ownerUserId}:${projection.id}:${scheduledWhen}`;
-}
 
 function shouldSettleReceipt(receipt: WorkRecord | null): boolean {
   if (!receipt) {
@@ -465,6 +463,10 @@ export function createScheduler(
         continue;
       }
       const receipt = workStore.get(workId);
+      if (receipt?.execution === "failed" && receipt.error === OBSOLETE_PROJECTION_WORK) {
+        store.clearDeliveryWork(projection.id, workId);
+        continue;
+      }
       if (!shouldSettleReceipt(receipt)) {
         if (receipt && (receipt.execution === "failed" || receipt.execution === "interrupted"
           || (receipt.execution === "completed" && ["failed", "unknown"].includes(receipt.delivery)))) {
@@ -491,7 +493,11 @@ export function createScheduler(
         }
         continue;
       }
-      settleProjection(store, projection, timezone);
+      if (projection.status === "pending") {
+        settleProjection(store, projection, timezone);
+      } else {
+        store.clearDeliveryWork(projection.id, workId);
+      }
       console.log(`[projections] user=${userId} settled delivered projection occurrence ${projection.id} (${workId})`);
     }
   }

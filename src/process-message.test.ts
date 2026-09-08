@@ -25,6 +25,8 @@ import type { Config } from "./config.js";
 import { tryCompact } from "./compaction/proactive.js";
 import { createWorkStore } from "./work/store.js";
 import { deliveryNotSent } from "./channels/delivery.js";
+import { createProjectionStore } from "./projection/store.js";
+import { scheduledWorkId } from "./scheduler.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -238,6 +240,39 @@ describe("processMessage pipeline", () => {
   afterEach(() => {
     vi.useRealTimers();
     fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it.each(["cancelled", "done", "rescheduled", "cancel-during-load", "pending"] as const)("checks the current projection before prompting: %s", async (status) => {
+    const session = makeUserSession("12345", [assistantMsg("Executed")]);
+    vi.spyOn(session.session, "prompt");
+    const state = makeState(config, session, tmpDir);
+    const store = createProjectionStore("12345", tmpDir);
+    state.workStore = createWorkStore(tmpDir);
+    const id = store.add({ summary: "Scheduled action", resolution: "exact", resolved_when: "2099-01-01 10:00" });
+    const workId = scheduledWorkId("12345", store.getById(id)!);
+    const msg = { ...incomingMsg("Execute scheduled action"), workId, workIds: [workId], raw: { type: "projection_exact_check" } };
+    state.workStore.accept(msg);
+    state.workStore.claim([workId]);
+    store.markDeliveryWork(id, workId);
+    if (status === "rescheduled") {
+      store.update(id, { resolved_when: "2099-01-02 10:00" });
+    } else if (status === "cancel-during-load") {
+      state.bridges[0].sendTyping = async () => { store.resolve(id, "cancelled"); };
+    } else if (status !== "pending") {
+      store.resolve(id, status);
+    }
+    try {
+      await processMessage(state, msg);
+      if (status === "pending") {
+        expect(session.session.prompt).toHaveBeenCalledOnce();
+      } else {
+        expect(session.session.prompt).not.toHaveBeenCalled();
+      }
+      expect(state.workStore.get(workId)?.execution).toBe("failed");
+    } finally {
+      state.workStore.close();
+      store.close();
+    }
   });
 
   it("sends the assistant text response to the bridge", async () => {

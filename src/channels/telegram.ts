@@ -360,8 +360,11 @@ export class TelegramBridge implements ChannelBridge {
   private readonly allowedUsers: number[];
   private readonly allowedGroups: number[];
   private readonly mode: "dm" | "group";
-  /** Pending approval requests: approvalKey → resolve function */
-  private pendingApprovals: Map<string, (result: ApprovalResult) => void> = new Map();
+  /** Approval identity is bound to the requester and the exact message. */
+  private pendingApprovals = new Map<string, {
+    userId: string; channelId: string; channelThreadId?: string; messageId: number;
+    resolve: (result: ApprovalResult) => void;
+  }>();
   /** Media group buffer: media_group_id → accumulated entry */
   private mediaGroupBuffer: Map<string, MediaGroupEntry> = new Map();
 
@@ -587,18 +590,33 @@ export class TelegramBridge implements ChannelBridge {
 
       // Parse: "a:<shortKey>:<result>" where result is allow|always|deny
       const parts = data.split(":");
-      if (parts.length !== 3) {
+      if (parts.length !== 3 || !["allow", "always", "deny"].includes(parts[2])) {
         await ctx.answerCallbackQuery();
         return;
       }
 
       const key = parts[1];
-      const resultStr = parts[2] === "always" ? "allow_always" as ApprovalResult : parts[2] as ApprovalResult;
+      let resultStr: ApprovalResult = "deny";
+      if (parts[2] === "allow") {
+        resultStr = "allow";
+      } else if (parts[2] === "always") {
+        resultStr = "allow_always";
+      }
 
-      const resolve = this.pendingApprovals.get(key);
-      if (resolve) {
+      const pending = this.pendingApprovals.get(key);
+      if (pending) {
+        const message = ctx.callbackQuery.message;
+        let channelThreadId: string | undefined;
+        if (message && "message_thread_id" in message && message.message_thread_id !== undefined) {
+          channelThreadId = String(message.message_thread_id);
+        }
+        if (String(ctx.from?.id) !== pending.userId || String(ctx.chat?.id) !== pending.channelId
+          || message?.message_id !== pending.messageId || channelThreadId !== pending.channelThreadId) {
+          await ctx.answerCallbackQuery({ text: "Not authorized for this approval", show_alert: true });
+          return;
+        }
         this.pendingApprovals.delete(key);
-        resolve(resultStr);
+        pending.resolve(resultStr);
         // Edit the message to remove the buttons and show the result
         const label = resultStr === "allow" ? "✓ Allowed once"
           : resultStr === "allow_always" ? "✓ Always allowed"
@@ -661,6 +679,11 @@ export class TelegramBridge implements ChannelBridge {
       clearTimeout(entry.timer);
     }
     this.mediaGroupBuffer.clear();
+
+    for (const pending of this.pendingApprovals.values()) {
+      pending.resolve("deny");
+    }
+    this.pendingApprovals.clear();
 
     if (this.bot) {
       await this.bot.stop();
@@ -853,6 +876,13 @@ export class TelegramBridge implements ChannelBridge {
     opts?: SendOpts,
   ): Promise<ApprovalResult> {
     const bot = await this.requireBot();
+    let userId = opts?.approverUserId;
+    if (!userId && /^\d+$/.test(channelId)) {
+      userId = channelId;
+    }
+    if (!userId || !this.allowedUsers.includes(Number(userId))) {
+      return "deny";
+    }
 
     // Telegram limits callback_query data to 64 bytes. Use a short hash
     // as the callback key and map it back to the full approvalKey internally.
@@ -864,7 +894,7 @@ export class TelegramBridge implements ChannelBridge {
       .row()
       .text("✗ Deny", `a:${shortKey}:deny`);
 
-    await withRetry(() =>
+    const sent = await withRetry(() =>
       withTimeout(
         bot.api.sendMessage(parseInt(channelId, 10), prompt, {
           parse_mode: "HTML",
@@ -877,13 +907,17 @@ export class TelegramBridge implements ChannelBridge {
     );
 
     return new Promise<ApprovalResult>((resolve) => {
-      this.pendingApprovals.set(shortKey, resolve);
+      const pending = {
+        userId, channelId, channelThreadId: opts?.channelThreadId, messageId: sent.message_id,
+        resolve: (result: ApprovalResult) => { clearTimeout(timer); resolve(result); },
+      };
+      this.pendingApprovals.set(shortKey, pending);
 
       // Auto-deny on timeout and notify the user
-      setTimeout(async () => {
-        if (this.pendingApprovals.has(shortKey)) {
+      const timer = setTimeout(async () => {
+        if (this.pendingApprovals.get(shortKey) === pending) {
           this.pendingApprovals.delete(shortKey);
-          resolve("deny");
+          pending.resolve("deny");
           try {
             await withRetry(() =>
               withTimeout(

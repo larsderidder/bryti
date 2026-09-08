@@ -174,6 +174,13 @@ export class MessageQueue {
 
   /** Restore accepted input after the caller reconciles interrupted work. */
   start(): void {
+    if (this.durability.store) {
+      // Rebuild from acceptance order, including messages admitted during startup.
+      for (const queue of this.queues.values()) {
+        queue.entries = [];
+      }
+      this.queuedIds.clear();
+    }
     for (const record of this.durability.store?.queued() ?? []) {
       if (this.queuedIds.has(record.id)) {
         continue;

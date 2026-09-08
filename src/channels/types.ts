@@ -68,6 +68,8 @@ export interface SendOpts {
   channelThreadId?: string;
   /** Accepted work whose final response this delivery carries. */
   workIds?: string[];
+  /** Requesting platform user. Used only to bind approval callbacks. */
+  approverUserId?: string;
 }
 
 /**

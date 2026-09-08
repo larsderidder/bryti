@@ -104,8 +104,8 @@ export interface ProjectionStore {
 
 
   /**
-   * Get pending projections whose scheduled occurrence has been accepted by
-   * the work queue and must be reconciled before rearming or expiring.
+   * Get projections, including resolved ones, whose scheduled occurrence must
+   * be reconciled with the work queue before rearming or expiring.
    */
   getAwaitingDelivery(): Projection[];
 
@@ -114,9 +114,11 @@ export interface ProjectionStore {
 
   /**
    * Persist the deterministic work id for the scheduled occurrence. Returns
-   * false when the projection is not pending or belongs to another occurrence.
+   * false when the projection does not exist or already owns another occurrence.
    */
   markDeliveryWork(id: string, workId: string): boolean;
+  /** Release only the expected occurrence after delivery or safe cancellation. */
+  clearDeliveryWork(id: string, workId: string): boolean;
 
   /**
    * Mark a projection's status (done/cancelled/passed).
@@ -471,8 +473,7 @@ export function createProjectionStore(userId: string, dataDir: string): Projecti
 
   const stmtAwaitingDelivery = db.prepare(`
     SELECT * FROM projections
-    WHERE status = 'pending'
-      AND delivery_work_id IS NOT NULL
+    WHERE delivery_work_id IS NOT NULL
       AND delivery_work_id != ''
     ORDER BY resolved_when ASC
   `);
@@ -490,7 +491,6 @@ export function createProjectionStore(userId: string, dataDir: string): Projecti
     UPDATE projections
     SET delivery_work_id = ?
     WHERE id = ?
-      AND status = 'pending'
       AND (delivery_work_id IS NULL OR delivery_work_id = ?)
   `);
 
@@ -750,6 +750,11 @@ export function createProjectionStore(userId: string, dataDir: string): Projecti
 
     markDeliveryWork(id, workId) {
       const result = stmtMarkDeliveryWork.run(workId, id, workId) as { changes: number };
+      return result.changes > 0;
+    },
+
+    clearDeliveryWork(id, workId) {
+      const result = db.prepare("UPDATE projections SET delivery_work_id = NULL WHERE id = ? AND delivery_work_id = ?").run(id, workId);
       return result.changes > 0;
     },
 

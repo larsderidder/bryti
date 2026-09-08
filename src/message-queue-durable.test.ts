@@ -87,4 +87,14 @@ describe("durable message queue", () => {
     expect(store.get("two")?.execution).toBe("completed");
     expect(process).toHaveBeenCalledOnce();
   });
+
+  it("restores older accepted work before messages received during startup", async () => {
+    store.accept({ ...message, threadId: "main", text: "older request", workId: "old" });
+    const order: string[] = [];
+    const queue = new MessageQueue(async (msg) => { order.push(msg.text); }, vi.fn(), 10, 5000, () => "main", { store, paused: true });
+    queue.enqueue({ ...message, text: "/clear", workId: "new" });
+    queue.start();
+    await queue.waitForIdle();
+    expect(order).toEqual(["older request", "/clear"]);
+  });
 });

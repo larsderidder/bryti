@@ -64,6 +64,24 @@ import {
 import { acquireSessionTurn } from "./compaction/proactive.js";
 import type { WorkStore } from "./work/store.js";
 import { isDeliveryError } from "./channels/delivery.js";
+import { isCurrentProjectionWork, OBSOLETE_PROJECTION_WORK } from "./projection/occurrence.js";
+
+/** Recheck after session loading too: cancellation can happen in another thread. */
+function skipObsoleteProjectionWork(state: AppState, msg: IncomingMessage): boolean {
+  if ((msg.raw as { type?: string } | null)?.type !== "projection_exact_check") {
+    return false;
+  }
+  const store = createProjectionStore(msg.userId, state.config.data_dir);
+  try {
+    if (isCurrentProjectionWork(msg, store)) {
+      return false;
+    }
+    state.workStore?.finish(msg.workIds ?? [], "failed", OBSOLETE_PROJECTION_WORK);
+    return true;
+  } finally {
+    store.close();
+  }
+}
 
 // ---------------------------------------------------------------------------
 // AppState
@@ -472,7 +490,8 @@ export async function getOrLoadSession(
     onApprovalNeeded: async (prompt, approvalKey) => {
       const target = state.deliveryTargets?.get(sessionKey) ?? msg;
       const bridge = getBridge(state, target.platform);
-      return bridge.sendApprovalRequest(target.channelId, prompt, approvalKey, undefined, { channelThreadId: target.channelThreadId });
+      return bridge.sendApprovalRequest(target.channelId, prompt, approvalKey, undefined,
+        { channelThreadId: target.channelThreadId, approverUserId: target.userId });
     },
   };
   const wrappedTools = wrapToolsWithTrustChecks(
@@ -573,6 +592,9 @@ export async function processMessage(
   originalMsg: IncomingMessage,
 ): Promise<void> {
   let msg = originalMsg;
+  if (skipObsoleteProjectionWork(state, msg)) {
+    return;
+  }
   if (msg.raw && typeof msg.raw === "object" && "type" in msg.raw && msg.raw.type === "recovery_notice") {
     await sendAssistantResponse(state, msg, msg.text);
     return;
@@ -707,6 +729,9 @@ export async function processMessage(
     // Track message count before prompt so we can find all new messages after.
     const messageCountBefore = session.messages.length;
 
+    if (skipObsoleteProjectionWork(state, originalMsg)) {
+      return;
+    }
     const promptStart = Date.now();
     const promptResult = await runPromptWithActivityWatchdog({
       sessionKey,
