@@ -10,6 +10,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { createTrustStore, registerToolCapabilities, wrapToolWithTrustCheck } from "./trust/index.js";
 import type { Config } from "./config.js";
+import { createTopicDeliveryTracker, importTopicDeliveries } from "./channels/topic-delivery.js";
 
 /** Real SDK sessions with scripted provider output. No network or model inference. */
 describe("Pi SDK integration contracts", () => {
@@ -91,6 +92,45 @@ describe("Pi SDK integration contracts", () => {
     await reopened.session.prompt("Continue");
     expect(reopened.session.getLastAssistantText()).toBe("Still here");
     expect(tool.execute).toHaveBeenCalledOnce();
+  });
+
+  it("carries a confirmed cross-topic send into the destination's next provider context", async () => {
+    const userId = "12345";
+    const chatId = "-1003987750931";
+    const threadId = "telegram-topic-1003987750931-32";
+    const text = "Two Pokémon links: Planet Fantasy and Monsteriada.";
+    const tool = defineTool({
+      name: "telegram_forum_topic_send", label: "Send to topic", description: "Offline topic sender",
+      parameters: Type.Object({ chat_id: Type.String(), message_thread_id: Type.Number(), text: Type.String() }),
+      execute: vi.fn(async () => ({ content: [{ type: "text" as const, text: JSON.stringify({
+        ok: true, chat_id: chatId, message_thread_id: 32, message_id: 349,
+      }) }], details: {} })),
+    });
+    const source = await setup([tool]);
+    source.session.subscribe(createTopicDeliveryTracker({ data_dir: directory, telegram: {
+      token: "", mode: "group", allowed_users: [12345], allowed_groups: [Number(chatId)],
+    } }, userId, userId));
+    const manager = SessionManager.create(directory, path.join(directory, "destination"));
+    const destination = await setup([], manager);
+    destination.faux.setResponses([fauxAssistantMessage("Earlier domain recommendations")]);
+    await destination.session.prompt("Find a domain name");
+    source.faux.setResponses([
+      fauxAssistantMessage(fauxToolCall(tool.name, { chat_id: chatId, message_thread_id: 32, text }), { stopReason: "toolUse" }),
+      fauxAssistantMessage("Posted in the TCG topic"),
+    ]);
+    await source.session.prompt("Post those Pokémon links in the TCG topic");
+    const acknowledge = await importTopicDeliveries(directory, userId, threadId, destination.session);
+    expect(destination.faux.state.callCount).toBe(1);
+    destination.faux.setResponses([(context) => {
+      expect(JSON.stringify(context.messages)).toContain(text);
+      expect(context.messages.at(-1)).toMatchObject({ role: "user", content: expect.stringContaining("those two") });
+      return fauxAssistantMessage("Those shops came from the watcher");
+    }]);
+    await destination.session.prompt("Why exactly those two?");
+    acknowledge();
+    expect(tool.execute).toHaveBeenCalledOnce();
+    const reopened = SessionManager.open(manager.getSessionFile()!);
+    expect(reopened.buildSessionContext().messages.filter((message) => message.role === "custom")).toHaveLength(1);
   });
 
   it("activates a deferred custom tool in a worker-like in-memory session", async () => {

@@ -33,6 +33,7 @@ import { registerToolCapabilities, getToolCapabilities } from "./trust/index.js"
 import { createBrytiSettingsManager, createModelInfra, resolveModel } from "./model-infra.js";
 import { buildSystemPrompt, buildToolSection, SILENT_REPLY_TOKEN, type ToolSummary } from "./system-prompt.js";
 import { quarantineInvalidExtensionTools } from "./tools/schema-validation.js";
+import { createTopicDeliveryTracker } from "./channels/topic-delivery.js";
 import {
   configureDynamicToolLoading,
   createToolSearch,
@@ -373,7 +374,13 @@ export async function loadUserSession(
   let userSessionRef: UserSession | null = null;
   let compactionStartedAt: number | null = null;
   const toolCallCounts = new Map<string, number>();
+  const trackTopicDelivery = createTopicDeliveryTracker(config, userId, sessionKey);
   const unsubscribe = session.subscribe((event: AgentSessionEvent) => {
+    try {
+      trackTopicDelivery(event);
+    } catch (error) {
+      console.error(`[topic-delivery] Failed to preserve destination context for ${sessionKey}:`, error);
+    }
     if (event.type === "compaction_start") {
       compactionStartedAt = Date.now();
       console.log(`[compaction] starting (reason: ${event.reason}) for user ${userId}`);

@@ -36,6 +36,7 @@ import { createModelInfra } from "./model-infra.js";
 import type { Scheduler } from "./scheduler.js";
 import type { AudioAttachment, IncomingMessage, ChannelBridge } from "./channels/types.js";
 import { isInternalMessage } from "./channels/types.js";
+import { importTopicDeliveries } from "./channels/topic-delivery.js";
 import type { VoiceService } from "./voice.js";
 import {
   createTrustStore,
@@ -704,6 +705,9 @@ export async function processMessage(
 
     repairSessionTranscript(session, msg.userId);
     await refreshSystemPrompt(session);
+    const acknowledgeTopicDeliveries = await importTopicDeliveries(
+      state.config.data_dir, msg.userId, msg.threadId ?? DEFAULT_THREAD_ID, session,
+    );
 
     const imageLogSuffix =
       msg.images && msg.images.length > 0
@@ -784,6 +788,7 @@ export async function processMessage(
       return;
     }
     const latencyMs = Date.now() - promptStart;
+    acknowledgeTopicDeliveries();
 
     const lastAssistant = toAssistantMessage(
       session.messages.filter((m) => m.role === "assistant").pop(),

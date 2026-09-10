@@ -27,6 +27,9 @@ import { createWorkStore } from "./work/store.js";
 import { deliveryNotSent } from "./channels/delivery.js";
 import { createProjectionStore } from "./projection/store.js";
 import { scheduledWorkId } from "./scheduler.js";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { createTopicDeliveryTracker } from "./channels/topic-delivery.js";
+import { getSessionKey } from "./threads.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -240,6 +243,46 @@ describe("processMessage pipeline", () => {
   afterEach(() => {
     vi.useRealTimers();
     fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("includes cross-topic sends before answering a follow-up, without sending them again", async () => {
+    const userId = "12345";
+    const chatId = "-1003987750931";
+    const threadId = "telegram-topic-1003987750931-32";
+    const deliveryText = "Two Pokémon links: Planet Fantasy and Monsteriada.";
+    fs.mkdirSync(path.join(tmpDir, "pending"));
+    config.telegram = { token: "", mode: "group", allowed_users: [12345], allowed_groups: [Number(chatId)] };
+    const track = createTopicDeliveryTracker(config, userId, userId);
+    track({ type: "tool_execution_start", toolName: "telegram_forum_topic_send", toolCallId: "send-1",
+      args: { chat_id: chatId, message_thread_id: 32, text: deliveryText } });
+    track({ type: "tool_execution_end", toolName: "telegram_forum_topic_send", toolCallId: "send-1", isError: false,
+      result: { content: [{ type: "text", text: JSON.stringify({
+        ok: true, chat_id: chatId, message_thread_id: 32, message_id: 349,
+      }) }] } });
+    const userSession = makeUserSession(userId, [assistantMsg("Earlier domain discussion")]);
+    const manager = SessionManager.inMemory(tmpDir);
+    Object.assign(userSession.session, {
+      sessionManager: manager,
+      sendCustomMessage: vi.fn(async (message) => {
+        manager.appendCustomMessageEntry(message.customType, message.content, message.display, message.details);
+        userSession.session.messages.push({ ...message, role: "custom", timestamp: Date.now() });
+      }),
+    });
+    const prompt = vi.spyOn(userSession.session, "prompt").mockImplementation(async () => {
+      expect(userSession.session.messages.at(-1)).toMatchObject({
+        role: "custom", content: expect.stringContaining(deliveryText),
+      });
+      userSession.session.messages.push(assistantMsg("Those shops came from your watcher.") as any);
+    });
+    const state = makeState(config, userSession, tmpDir);
+    state.sessions = new Map([[getSessionKey(userId, threadId), userSession]]);
+    const bridge = state.bridges[0] as ReturnType<typeof makeBridge>;
+    await processMessage(state, { ...incomingMsg("Why are you checking exactly those two?"),
+      channelId: chatId, threadId, channelThreadId: "32" });
+    expect(prompt).toHaveBeenCalledOnce();
+    expect(userSession.session.sendCustomMessage).toHaveBeenCalledOnce();
+    expect(bridge.sent).toEqual([{ channelId: chatId, text: "Those shops came from your watcher." }]);
+    expect(state.lastUserMessages.get(getSessionKey(userId, threadId))).toBe("Why are you checking exactly those two?");
   });
 
   it.each(["cancelled", "done", "rescheduled", "cancel-during-load", "pending"] as const)("checks the current projection before prompting: %s", async (status) => {
