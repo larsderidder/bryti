@@ -72,8 +72,9 @@ const dispatchWorkerSchema = Type.Object({
     Type.Union([Type.Literal("web_search"), Type.Literal("fetch_url")]),
     {
       description:
-        "Optional extra tools the worker may use. fetch_url is always available. " +
-        "Defaults to [\"web_search\", \"fetch_url\"] so research workers can search and extract.",
+        "Optional extra tools the worker may use. fetch_url and scoped file tools are always available. " +
+        "Omit to inherit the worker type's tools or default to [\"web_search\", \"fetch_url\"]. " +
+        "Pass [] for code-only review or analysis that does not require web research.",
     },
   )),
   model: Type.Optional(Type.String({
@@ -264,6 +265,7 @@ export function createWorkerTools(
         );
       }
 
+      // An explicit empty list opts out of research; only omitted tools inherit defaults.
       const effectiveTools = requestedTools ?? workerType?.tools ?? ["web_search", "fetch_url"];
       const effectiveTimeout = timeout_seconds ?? workerType?.timeout_seconds;
       const effectiveModel = modelOverride ?? workerType?.model;
@@ -278,9 +280,6 @@ export function createWorkerTools(
           return toolError(`Unknown tool "${t}". Allowed: ${ALLOWED_TOOLS.join(", ")}`);
         }
         toolNames.push(t as AllowedTool);
-      }
-      if (toolNames.length === 0) {
-        toolNames.push("web_search", "fetch_url");
       }
 
       // Create worker directory

@@ -112,6 +112,7 @@ import { spawnWorkerSession, writeStatusFile, type WorkerStatusFile } from "./sp
 import { createWorkerRegistry } from "./registry.js";
 import { createMemoryStore } from "../memory/store.js";
 import type { Config } from "../config.js";
+import { createWorkerTools } from "./tools.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -262,6 +263,44 @@ describe("spawnWorkerSession completion lifecycle", () => {
       timeoutHandle: null,
     });
   }
+
+  it.each([
+    { label: "explicit empty override", typeTools: ["web_search", "fetch_url"], tools: [], expected: "complete" },
+    { label: "empty type defaults", typeTools: [], tools: undefined, expected: "complete" },
+    { label: "omitted research defaults", typeTools: undefined, tools: undefined, expected: "failed" },
+  ])("preserves $label through dispatch and completion", async ({ typeTools, tools, expected }) => {
+    const registry = createWorkerRegistry();
+    const memStore = createMemoryStore("user-review", tmpDir);
+    config.tools.web_search.enabled = true;
+    config.tools.web_search.searxng_url = "https://search.example.com";
+    config.tools.workers.types = { general: { tools: typeTools } };
+    mockPromptImpl = async () => {
+      const entry = registry.list()[0];
+      fs.writeFileSync(entry.resultPath, "# Review\n\nPASS for the supplied code.\n");
+    };
+
+    try {
+      const dispatch = createWorkerTools(config, memStore, registry)
+        .find((tool) => tool.name === "worker_dispatch")!;
+      await dispatch.execute("review-call", { task: "Review the supplied code only", type: "general", tools });
+      const entry = registry.list()[0];
+      await vi.waitFor(() => {
+        expect(registry.get(entry.workerId)?.status).toBe(expected);
+      });
+      const status = readStatusFile(entry.workerDir);
+      expect(status.status).toBe(expected);
+      if (expected === "complete") {
+        expect(status.error).toBeNull();
+        expect(mockCustomToolNames).not.toContain("web_search");
+        expect(mockCustomToolNames).toContain("write_file");
+      } else {
+        expect(status.error).toContain("without using web_search or fetch_url");
+        expect(mockCustomToolNames).toContain("web_search");
+      }
+    } finally {
+      memStore.close();
+    }
+  });
 
   it("always gives workers fetch_url even when only web_search was requested", async () => {
     const registry = createWorkerRegistry();
