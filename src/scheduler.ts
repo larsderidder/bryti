@@ -22,6 +22,7 @@ import { getUserTimezone } from "./time.js";
 import { createDeviceStore } from "./web-e2ee/device-store.js";
 import { createWorkStore, type WorkRecord, type WorkStore } from "./work/store.js";
 import { scheduledWorkId, OBSOLETE_PROJECTION_WORK } from "./projection/occurrence.js";
+import { createCommandStore } from "./work/commands.js";
 export { scheduledWorkId } from "./projection/occurrence.js";
 
 // ---------------------------------------------------------------------------
@@ -353,11 +354,15 @@ function shouldSettleReceipt(receipt: WorkRecord | null): boolean {
   return receipt.delivery === "delivered" || receipt.delivery === "none";
 }
 
-function settleProjection(store: ProjectionStore, projection: Projection, timezone: string): void {
+function settleProjection(store: ProjectionStore, projection: Projection, timezone: string, reconciled = false): void {
   if (projection.recurrence) {
     let scheduledTime = new Date();
     if (projection.resolved_when) {
       scheduledTime = new Date(projection.resolved_when + "Z");
+    }
+    if (reconciled && scheduledTime.getTime() < Date.now()) {
+      // Recovery resumes the schedule from now, never with catch-up executions.
+      scheduledTime = new Date();
     }
     const next = nextCronOccurrence(projection.recurrence, scheduledTime, timezone);
     if (next) {
@@ -396,6 +401,7 @@ export function createScheduler(
   const cronJobs = new Map<string, Cron>();
   const workStore = suppliedWorkStore ?? createWorkStore(config.data_dir);
   const ownsWorkStore = !suppliedWorkStore;
+  const commands = createCommandStore(config.data_dir);
 
   function defaultTarget(): SchedulerTarget | null {
     return getSchedulerTargets(config)[0] ?? null;
@@ -467,7 +473,13 @@ export function createScheduler(
         store.clearDeliveryWork(projection.id, workId);
         continue;
       }
-      if (!shouldSettleReceipt(receipt)) {
+      const managedCommands = commands.forWork(workId);
+      const reconciled = commands.isReconciled(workId, workStore);
+      if (managedCommands.length > 0 && !reconciled) {
+        // Dispatch is not completion. The durable command event owns the review.
+        continue;
+      }
+      if (!reconciled && !shouldSettleReceipt(receipt)) {
         if (receipt && (receipt.execution === "failed" || receipt.execution === "interrupted"
           || (receipt.execution === "completed" && ["failed", "unknown"].includes(receipt.delivery)))) {
           const noticeId = `blocked:${workId}`;
@@ -494,7 +506,7 @@ export function createScheduler(
         continue;
       }
       if (projection.status === "pending") {
-        settleProjection(store, projection, timezone);
+        settleProjection(store, projection, timezone, reconciled);
       } else {
         store.clearDeliveryWork(projection.id, workId);
       }
@@ -695,6 +707,7 @@ export function createScheduler(
         job.stop();
       }
       const count = cronJobs.size;
+      commands.close();
       cronJobs.clear();
       if (ownsWorkStore) {
         workStore.close();

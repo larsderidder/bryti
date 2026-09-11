@@ -61,11 +61,13 @@ import {
 import {
   PROMPT_INACTIVITY_TIMEOUT_MS,
   runPromptWithActivityWatchdog,
+  describePromptTimeout,
 } from "./prompt-lifecycle.js";
 import { acquireSessionTurn } from "./compaction/proactive.js";
 import type { WorkStore } from "./work/store.js";
 import { isDeliveryError } from "./channels/delivery.js";
 import { isCurrentProjectionWork, OBSOLETE_PROJECTION_WORK } from "./projection/occurrence.js";
+import { commandRecoveryNotice, isCommandContinuationCurrent } from "./work/commands.js";
 
 /** Recheck after session loading too: cancellation can happen in another thread. */
 function skipObsoleteProjectionWork(state: AppState, msg: IncomingMessage): boolean {
@@ -466,6 +468,7 @@ export async function getOrLoadSession(
     },
     projectionStore,
     () => state.deliveryTargets?.get(sessionKey) ?? msg,
+    () => state.deliveryTargets?.get(sessionKey) ?? msg,
   );
 
   const trustContext: TrustWrapperContext = {
@@ -736,6 +739,9 @@ export async function processMessage(
     if (skipObsoleteProjectionWork(state, originalMsg)) {
       return;
     }
+    if (state.workStore && !isCommandContinuationCurrent(state.config.data_dir, msg, state.workStore)) {
+      msg = { ...msg, text: "[System: The owning reminder was cancelled or rescheduled. Inspect and report existing command results only. Do not continue development, deploy, or recreate the reminder.]\n\n" + msg.text };
+    }
     const promptStart = Date.now();
     const promptResult = await runPromptWithActivityWatchdog({
       sessionKey,
@@ -750,11 +756,8 @@ export async function processMessage(
         msg.images,
         controls,
       ),
-      onInactive: (key, timeoutMs) => {
-        console.error(
-          `[agent] Prompt for ${key} had no activity for ` +
-          `${timeoutMs / 1000}s, aborting`,
-        );
+      onTimeout: (key, timeout) => {
+        console.error(`[agent] Prompt for ${key} stopped: ${timeout.reason}; tool=${timeout.toolName ?? "none"}; elapsed_ms=${timeout.elapsedMs}`);
       },
       onAbortError: (key, err) => {
         console.warn(
@@ -772,12 +775,12 @@ export async function processMessage(
     // is unreliable (partially updated). Evict it from the cache so the next
     // message reloads from the JSONL file (the source of truth).
     if (promptResult.status === "timeout") {
-      state.workStore?.finish(msg.workIds ?? [], "interrupted", "Prompt inactivity timeout; not replayed");
+      state.workStore?.finish(msg.workIds ?? [], "interrupted", `${describePromptTimeout(promptResult)} Not replayed.`);
       console.log(`[agent] Evicting session for ${sessionKey} after timeout abort`);
       try {
         await getBridge(state, msg.platform).sendMessage(
           msg.channelId,
-          "This request took too long without any activity, so I stopped it. Some actions may already have happened. Ask me to check the outcome before retrying.",
+          `${describePromptTimeout(promptResult)} I stopped the supervising turn. ${commandRecoveryNotice(state.config.data_dir, msg.workIds ?? [])}`,
           { channelThreadId: msg.channelThreadId },
         );
       } catch {
@@ -898,14 +901,17 @@ export async function processMessage(
           undefined,
           controls,
         ),
+        onTimeout: (key, timeout) => {
+          console.error(`[agent] Follow-up for ${key} stopped: ${timeout.reason}; tool=${timeout.toolName ?? "none"}; elapsed_ms=${timeout.elapsedMs}`);
+        },
       });
       if (followUpResult.status === "timeout") {
-        state.workStore?.finish(msg.workIds ?? [], "interrupted", "Follow-up prompt timed out; not replayed");
+        state.workStore?.finish(msg.workIds ?? [], "interrupted", `${describePromptTimeout(followUpResult)} Follow-up not replayed.`);
         userSession.dispose();
         state.sessions.delete(sessionKey);
         try {
           await getBridge(state, msg.platform).sendMessage(msg.channelId,
-            "I stopped waiting for the final response. Some actions may already have happened. Ask me to check the outcome before retrying.",
+            `${describePromptTimeout(followUpResult)} I stopped the supervising turn. ${commandRecoveryNotice(state.config.data_dir, msg.workIds ?? [])}`,
             { channelThreadId: msg.channelThreadId });
         } catch {
           // The interrupted work receipt remains available for recovery.

@@ -8,6 +8,7 @@ import { PERSONAL_ASSISTANT_DEFAULTS } from "./config.js";
 import type { IncomingMessage } from "./channels/types.js";
 import { createProjectionStore, type Projection } from "./projection/index.js";
 import { createWorkStore, type WorkStore } from "./work/store.js";
+import { createCommandStore } from "./work/commands.js";
 
 const cronMockState = vi.hoisted(() => ({
   callbacks: new Map<string, Array<() => Promise<void>>>(),
@@ -340,6 +341,73 @@ describe("Scheduler", () => {
     workStore.close();
   });
 
+  it("holds a recurring schedule until managed work has a completed reconciliation", async () => {
+    const config = { ...makeConfig(), data_dir: tempDir };
+    const workStore = createWorkStore(tempDir);
+    const commands = createCommandStore(tempDir);
+    const onMessage = vi.fn().mockResolvedValue(true);
+    const scheduler = createScheduler(config, onMessage, workStore);
+    const id = addDueProjection(config, { summary: "Develop", resolved_when: dueWhen(), resolution: "exact", recurrence: "0 10 * * *" });
+    scheduler.start();
+    await runExactCallback();
+    const store = createProjectionStore("12345", tempDir);
+    const workId = store.getById(id)!.delivery_work_id!;
+    const when = store.getById(id)!.resolved_when;
+    const parent = workStore.get(workId)!.message;
+    workStore.claim([workId]);
+    const command = commands.accept(parent, "call", { command: "true", cwd: tempDir, timeoutSeconds: 60 }, 1);
+    workStore.recordResponse([workId], "delivered");
+    await runExactCallback();
+    expect(store.getById(id)).toMatchObject({ resolved_when: when, delivery_work_id: workId });
+    commands.claim(command.id, process.pid, "identity");
+    commands.finish(command.id, "complete", 0);
+    await runExactCallback();
+    expect(store.getById(id)!.delivery_work_id).toBe(workId);
+    const review = workStore.accept(commands.collectEvents()[0]).record;
+    workStore.claim([review.id]);
+    commands.reconcile(workId, review.message, "Actual diff and release checks reviewed", workStore);
+    await runExactCallback();
+    expect(store.getById(id)!.delivery_work_id).toBe(workId);
+    workStore.recordResponse([review.id], "delivered");
+    await runExactCallback();
+    expect(store.getById(id)!.resolved_when).not.toBe(when);
+    store.close();
+    commands.close();
+    scheduler.stop();
+    workStore.close();
+  });
+
+  it("recovers an interrupted occurrence after review without replaying it", async () => {
+    const config = { ...makeConfig(), data_dir: tempDir };
+    const workStore = createWorkStore(tempDir);
+    const commands = createCommandStore(tempDir);
+    const onMessage = vi.fn().mockResolvedValue(true);
+    const scheduler = createScheduler(config, onMessage, workStore);
+    const id = addDueProjection(config, { summary: "Develop", resolved_when: dueWhen(), resolution: "exact", recurrence: "0 10 * * *" });
+    scheduler.start();
+    await runExactCallback();
+    const store = createProjectionStore("12345", tempDir);
+    const workId = store.getById(id)!.delivery_work_id!;
+    const when = store.getById(id)!.resolved_when;
+    const parent = workStore.get(workId)!.message;
+    workStore.claim([workId]);
+    const command = commands.accept(parent, "call", { command: "true", cwd: tempDir, timeoutSeconds: 60 }, 1);
+    workStore.finish([workId], "interrupted");
+    commands.claim(command.id, process.pid, "identity");
+    commands.finish(command.id, "complete", 0);
+    const review = workStore.accept(commands.collectEvents()[0]).record;
+    workStore.claim([review.id]);
+    commands.reconcile(workId, review.message, "No deployment; preserved local changes reviewed", workStore);
+    workStore.recordResponse([review.id], "delivered");
+    await runExactCallback();
+    expect(store.getById(id)!.resolved_when).not.toBe(when);
+    expect(onMessage.mock.calls.filter(([msg]) => msg.workId === workId)).toHaveLength(1);
+    expect(workStore.get(workId)!.execution).toBe("interrupted");
+    store.close();
+    commands.close();
+    scheduler.stop();
+    workStore.close();
+  });
   it("notifies once when a recurring occurrence is blocked, without replaying uncertain actions", async () => {
     const config = { ...makeConfig(), data_dir: tempDir };
     const workStore = createWorkStore(tempDir);

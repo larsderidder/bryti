@@ -589,7 +589,7 @@ export async function promptWithFallback(
 
   for (let i = 0; i < candidates.length; i++) {
     if (controls && !controls.shouldContinue()) {
-      throw new Error("Prompt cancelled after inactivity timeout");
+      throw new Error("Prompt cancelled after watchdog timeout");
     }
     if (session.isStreaming) {
       throw new Error("Agent is already processing; concurrent prompts must share the session queue");
@@ -607,7 +607,7 @@ export async function promptWithFallback(
       await session.setModel(model);
     }
     if (controls && !controls.shouldContinue()) {
-      throw new Error("Prompt cancelled after inactivity timeout");
+      throw new Error("Prompt cancelled after watchdog timeout");
     }
 
     let thrownError: unknown = null;
@@ -620,7 +620,7 @@ export async function promptWithFallback(
       thrownError = err;
     }
     if (controls && !controls.shouldContinue()) {
-      throw new Error("Prompt cancelled after inactivity timeout");
+      throw new Error("Prompt cancelled after watchdog timeout");
     }
 
     const { failed, reason } = didPromptFail(session, thrownError);

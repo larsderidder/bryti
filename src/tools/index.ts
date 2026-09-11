@@ -11,6 +11,8 @@ import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Type } from "typebox";
 import { createFileTools } from "./files.js";
 import { createSystemLogTool } from "./system-log.js";
+import { createCommandTools } from "./commands.js";
+import type { IncomingMessage } from "../channels/types.js";
 import { createPiSessionTools } from "./pi-sessions.js";
 import { createSkillInstallTool } from "./skill-install.js";
 import { createCoreMemoryTools } from "./core-memory-tool.js";
@@ -56,6 +58,7 @@ export function createTools(
   onRestart?: RestartCallback,
   projectionStore?: ProjectionStore,
   getProjectionTarget?: () => ProjectionTarget | undefined | null,
+  getWorkTarget?: () => IncomingMessage | undefined | null,
 ): BrytiTool[] {
   const tools: BrytiTool[] = [];
   const groups = new Set<ToolGroup>(config.agent_def.tool_groups);
@@ -179,6 +182,17 @@ export function createTools(
   // The projection store is passed so worker completion can trigger projections
   // immediately (instead of waiting for the 5-minute scheduler tick).
   if (groups.has("workers")) {
+    if (getWorkTarget) {
+      tools.push(...createCommandTools(config.data_dir, getWorkTarget, config.tools.workers.max_concurrent));
+      registerToolCapabilities("command_start", {
+        level: "elevated", capabilities: ["shell", "filesystem", "network"],
+        reason: "Runs an authorized shell command outside the chat turn with durable outcome tracking.",
+      });
+      registerToolCapabilities("work_reconcile", {
+        level: "elevated", capabilities: ["filesystem"],
+        reason: "Records a reviewed task outcome and permits its recurring schedule to resume.",
+      });
+    }
     const workerRegistry = createWorkerRegistry();
     const createWorkerToolsWithTarget = createWorkerTools as (
       config: Config,

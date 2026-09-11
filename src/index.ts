@@ -52,6 +52,7 @@ import { withDurableOutbound } from "./channels/outbound-queue.js";
 import { createScheduler, isTargetAllowed } from "./scheduler.js";
 import { createWorkStore } from "./work/store.js";
 import { collectWorkerEvents, acknowledgeWorkerEvent } from "./workers/recovery.js";
+import { recoverCommandEvents } from "./work/commands.js";
 import { MessageQueue } from "./message-queue.js";
 import { getActiveThread } from "./threads.js";
 import type { IncomingMessage, ChannelBridge } from "./channels/types.js";
@@ -255,6 +256,7 @@ async function startApp(onRequestRestart?: () => void): Promise<RunningApp> {
     }
   }
   const recoverWorkers = (recoverInterrupted = false) => {
+    recoverCommandEvents(config.data_dir, workStore, (msg) => queue.enqueue(msg), (msg) => isTargetAllowed(config, msg));
     for (const msg of collectWorkerEvents(config.data_dir, recoverInterrupted)) {
       if (!isTargetAllowed(config, msg)) {
         continue;

@@ -54,6 +54,7 @@ export interface IncomingMessage {
 export function isInternalMessage(msg: IncomingMessage): boolean {
   const type = (msg.raw as { type?: unknown } | null | undefined)?.type;
   return type === "worker_trigger"
+    || type === "command_completion"
     || type === "compaction_resume"
     || type === "cron"
     || type === "projection_exact_check"

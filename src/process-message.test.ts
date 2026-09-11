@@ -756,9 +756,25 @@ describe("processMessage pipeline", () => {
     await vi.advanceTimersByTimeAsync(6 * 60 * 1000);
     await processing;
 
-    expect(bridge.sent.some((s) => s.text.includes("took too long"))).toBe(true);
+    expect(bridge.sent.some((s) => s.text.includes("model stopped producing activity"))).toBe(true);
     expect(state.sessions.has("12345")).toBe(false);
     expect(session.dispose).toHaveBeenCalled();
+  });
+
+  it("names the timed-out tool without leaking its arguments", async () => {
+    vi.useFakeTimers();
+    const session = makeUserSession("12345", []);
+    vi.spyOn(session.session, "prompt").mockImplementation(() => new Promise(() => {}));
+    const state = makeState(config, session, tmpDir);
+    const bridge = state.bridges[0] as ReturnType<typeof makeBridge>;
+    const processing = processMessage(state, incomingMsg("run a build"));
+    await vi.advanceTimersByTimeAsync(0);
+    session.emitEvent({ type: "tool_execution_start", toolCallId: "build", toolName: "bash", args: { timeout: 10, command: "private-command-arguments" } });
+    await vi.advanceTimersByTimeAsync(15_000);
+    await processing;
+    expect(bridge.sent.some((s) => s.text.includes("bash tool exceeded its execution deadline"))).toBe(true);
+    expect(bridge.sent.some((s) => s.text.includes("private-command-arguments"))).toBe(false);
+    expect(state.sessions.has("12345")).toBe(false);
   });
 
   it("catches and reports thrown errors gracefully", async () => {

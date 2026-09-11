@@ -49,6 +49,10 @@ export function buildToolSection(
       return `- ${tool.name}: ${description}${sourceSuffix}`;
     });
 
+  if (tools.some((tool) => tool.name === "command_start")) {
+    lines.push("", "For long-running commands and coding sessions, use command_start rather than detached bash, nohup, setsid, or sleep/poll loops. End the turn after dispatch; a durable completion event returns here for review. Read the actual output and verify the whole task before work_reconcile. Do not create a second reminder for the same completion, repeat actions with uncertain effects, or treat exit status as release approval.");
+  }
+
   return `## Your currently loaded tools\n${lines.join("\n")}`;
 }
 
