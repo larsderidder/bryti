@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { createWorkerRegistry } from "./registry.js";
 
+import type { WorkerStatus } from "./registry.js";
 describe("WorkerRegistry", () => {
   it("registers a worker and retrieves it by id", () => {
     const registry = createWorkerRegistry();
@@ -75,5 +76,15 @@ describe("WorkerRegistry", () => {
     const all = registry.list();
     expect(all).toHaveLength(2);
     expect(all.map((e) => e.workerId).sort()).toEqual(["w-1", "w-2"]);
+  });
+
+  it.each(["complete", "failed", "timeout", "cancelled", "interrupted"] as const)("keeps %s terminal", (status) => {
+    const registry = createWorkerRegistry();
+    const entry = registry.register({ workerId: "w-1", status, task: "T", resultPath: "", workerDir: "", startedAt: new Date(), error: null, model: "m", abort: null, timeoutHandle: null });
+    const statuses: WorkerStatus[] = ["queued", "running", "complete", "failed", "timeout", "cancelled", "interrupted"];
+    for (const next of statuses) {
+      registry.update(entry.workerId, { status: next });
+      expect(entry.status).toBe(status);
+    }
   });
 });

@@ -348,6 +348,8 @@ export interface Config {
     workers: {
       /** Maximum number of workers that may run concurrently. Default: 3. */
       max_concurrent: number;
+      /** Time to let active workers finish on shutdown before aborting. Default: 30. */
+      shutdown_grace_seconds?: number;
       /** Default model for workers. Falls back to first fallback model, then primary. */
       model?: string;
       /** Default thinking/reasoning level for workers. Defaults to agent.thinking_level. */
@@ -1090,6 +1092,10 @@ function validateConfig(config: Config): void {
   }
   if (!Number.isInteger(config.tools.workers.max_concurrent) || config.tools.workers.max_concurrent <= 0) {
     errors.push("tools.workers.max_concurrent must be a positive integer");
+  }
+  const workerGrace = config.tools.workers.shutdown_grace_seconds;
+  if (workerGrace !== undefined && (!Number.isFinite(workerGrace) || workerGrace < 0)) {
+    errors.push("tools.workers.shutdown_grace_seconds must be a non-negative finite number");
   }
   if (config.tools.workers.max_turns !== undefined && (!Number.isInteger(config.tools.workers.max_turns) || config.tools.workers.max_turns <= 1)) {
     errors.push("tools.workers.max_turns must be an integer greater than 1");

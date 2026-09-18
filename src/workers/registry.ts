@@ -3,7 +3,7 @@
  * Each entry records status, timing, file paths, and the timeout handle.
  */
 
-export type WorkerStatus = "queued" | "running" | "complete" | "failed" | "timeout" | "cancelled";
+export type WorkerStatus = "queued" | "running" | "complete" | "failed" | "timeout" | "cancelled" | "interrupted";
 
 export interface WorkerEntry {
   workerId: string;
@@ -93,6 +93,9 @@ export function createWorkerRegistry(): WorkerRegistry {
     update(workerId, updates) {
       const entry = entries.get(workerId);
       if (!entry) return;
+      if (updates.status && entry.status !== "running" && entry.status !== "queued" && updates.status !== entry.status) {
+        return;
+      }
       Object.assign(entry, updates);
     },
 

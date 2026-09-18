@@ -22,6 +22,7 @@ import { createFetchUrlTool } from "./fetch-url.js";
 import { createBraveSearchTool, createWebSearchTool } from "./web-search.js";
 import { createProjectionTools, createProjectionStore, type ProjectionStore, type ProjectionTarget } from "../projection/index.js";
 import { createWorkerTools, createWorkerRegistry } from "../workers/index.js";
+import type { WorkerLifecycle } from "../workers/lifecycle.js";
 import { toolSuccess } from "./result.js";
 import { embed } from "../memory/embeddings.js";
 import { createMemoryStore, type MemoryStore } from "../memory/store.js";
@@ -59,6 +60,7 @@ export function createTools(
   projectionStore?: ProjectionStore,
   getProjectionTarget?: () => ProjectionTarget | undefined | null,
   getWorkTarget?: () => IncomingMessage | undefined | null,
+  workerLifecycle?: WorkerLifecycle,
 ): BrytiTool[] {
   const tools: BrytiTool[] = [];
   const groups = new Set<ToolGroup>(config.agent_def.tool_groups);
@@ -202,10 +204,11 @@ export function createTools(
       projectionStore: ProjectionStore,
       onTrigger: WorkerTriggerCallback | undefined,
       getTarget: (() => ProjectionTarget | undefined | null) | undefined,
+      lifecycle: WorkerLifecycle | undefined,
     ) => BrytiTool[];
     tools.push(...createWorkerToolsWithTarget(
       config, archivalStore, workerRegistry, false, resolvedProjectionStore, onWorkerTrigger,
-      getProjectionTarget,
+      getProjectionTarget, workerLifecycle,
     ));
   }
 

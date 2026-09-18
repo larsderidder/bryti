@@ -81,6 +81,38 @@ models:
     expect(loadConfig().memory.embeddings.required).toBe(true);
   });
 
+  it.each([0, 30, 60])("accepts a worker shutdown grace of %s seconds", (seconds) => {
+    fs.writeFileSync(path.join(tempDir, "config.yml"), `
+telegram:
+  token: test-token
+models:
+  providers:
+    - name: openai-codex
+      api: openai-codex-responses
+      models: []
+tools:
+  workers:
+    shutdown_grace_seconds: ${seconds}
+`);
+    expect(loadConfig().tools.workers.shutdown_grace_seconds).toBe(seconds);
+  });
+
+  it.each(["-1", ".inf", ".nan", "invalid"])("rejects invalid worker shutdown grace %s", (seconds) => {
+    fs.writeFileSync(path.join(tempDir, "config.yml"), `
+telegram:
+  token: test-token
+models:
+  providers:
+    - name: openai-codex
+      api: openai-codex-responses
+      models: []
+tools:
+  workers:
+    shutdown_grace_seconds: ${seconds}
+`);
+    expect(() => loadConfig()).toThrow("shutdown_grace_seconds");
+  });
+
   it("should apply defaults", () => {
     const configContent = `
 agent:

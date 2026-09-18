@@ -14,6 +14,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import type { WorkerLifecycle } from "./workers/lifecycle.js";
 import type { Config } from "./config.js";
 import {
   RESTART_EXIT_CODE,
@@ -126,6 +127,7 @@ export interface AppState {
   requestRestart: (() => void) | null;
   /** Durable accepted-work receipts, shared with the queue and delivery adapters. */
   workStore?: WorkStore;
+  workerLifecycle?: WorkerLifecycle;
   deliveryTargets?: Map<string, IncomingMessage>;
 }
 
@@ -469,6 +471,7 @@ export async function getOrLoadSession(
     projectionStore,
     () => state.deliveryTargets?.get(sessionKey) ?? msg,
     () => state.deliveryTargets?.get(sessionKey) ?? msg,
+    state.workerLifecycle,
   );
 
   const trustContext: TrustWrapperContext = {

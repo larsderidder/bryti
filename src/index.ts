@@ -52,6 +52,7 @@ import { withDurableOutbound } from "./channels/outbound-queue.js";
 import { createScheduler, isTargetAllowed } from "./scheduler.js";
 import { createWorkStore } from "./work/store.js";
 import { collectWorkerEvents, acknowledgeWorkerEvent } from "./workers/recovery.js";
+import { WorkerLifecycle } from "./workers/lifecycle.js";
 import { recoverCommandEvents } from "./work/commands.js";
 import { MessageQueue } from "./message-queue.js";
 import { getActiveThread } from "./threads.js";
@@ -193,6 +194,7 @@ async function startApp(onRequestRestart?: () => void): Promise<RunningApp> {
     voiceService,
     requestRestart: onRequestRestart ?? null,
     workStore,
+    workerLifecycle: new WorkerLifecycle(),
   };
 
   const queue = new MessageQueue(
@@ -349,7 +351,12 @@ async function startApp(onRequestRestart?: () => void): Promise<RunningApp> {
       queue.stop();
       eventsWatcher.stop();
       for (const job of compactionJobs) job.stop();
-      await Promise.all([...state.sessions.values()].map((session) => session.session.abort()));
+      const workersStopped = state.workerLifecycle!.stop((config.tools.workers.shutdown_grace_seconds ?? 30) * 1000);
+      // Observe rejection immediately while chat turns are still settling.
+      await Promise.all([
+        workersStopped,
+        Promise.all([...state.sessions.values()].map((session) => session.session.abort())),
+      ]);
       await queue.waitForIdle();
       await Promise.all(state.bridges.map((b) => b.stop()));
       for (const [userId, userSession] of state.sessions) {

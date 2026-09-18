@@ -247,6 +247,8 @@ tools:
 
   workers:
     max_concurrent: 3
+    shutdown_grace_seconds: 30  # let active workers finish before aborting
+    # The service/container stop timeout must exceed this grace plus 10 seconds.
     # max_turns: 20  # steer workers to wrap up near this many turns
     # model: "opencode/minimax-m2.5-free"  # default model for workers
     # thinking_level: "medium"  # default thinking level for workers

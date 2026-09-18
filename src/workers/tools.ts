@@ -25,6 +25,7 @@ import { toolError, toolSuccess } from "../tools/result.js";
 import type { WorkerEntry, WorkerRegistry } from "./registry.js";
 import type { ProjectionStore, ProjectionTarget } from "../projection/store.js";
 import { registerWorkerOwner } from "./recovery.js";
+import { WorkerLifecycle, stopWorker } from "./lifecycle.js";
 import {
   spawnWorkerSession,
   writeStatusFile,
@@ -131,12 +132,14 @@ export function createWorkerTools(
   projectionStore?: ProjectionStore,
   onTrigger?: WorkerTriggerCallback,
   getTarget?: () => ProjectionTarget,
+  lifecycle = new WorkerLifecycle(),
 ): AgentTool<any>[] {
   // Build description dynamically to include configured worker types
   const types = config.tools.workers.types ?? {};
   const typeNames = Object.keys(types);
   let typesSuffix = "";
   const pendingLaunches = new Map<string, WorkerLaunchSpec>();
+  lifecycle.register(registry);
 
   function filesBase(): string {
     return path.join(config.data_dir, "files");
@@ -147,6 +150,9 @@ export function createWorkerTools(
   }
 
   function startWorker(entry: WorkerEntry, spec: WorkerLaunchSpec): void {
+    if (lifecycle.stopping || (entry.status !== "running" && entry.status !== "queued")) {
+      return;
+    }
     registry.update(entry.workerId, { status: "running", error: null });
     writeStatusFile(entry.workerDir, {
       worker_id: entry.workerId,
@@ -164,7 +170,7 @@ export function createWorkerTools(
       `(model: ${entry.model}, thinking: ${spec.thinkingLevel}, tools: ${spec.toolNames.join(", ")})`,
     );
 
-    spawnWorkerSession({
+    const run = spawnWorkerSession({
       config,
       workerId: entry.workerId,
       workerDir: entry.workerDir,
@@ -179,6 +185,9 @@ export function createWorkerTools(
       maxTurns: spec.maxTurns,
       onTrigger,
     }).catch((err: Error) => {
+      if (entry.status !== "running") {
+        return;
+      }
       console.error(`[worker] ${entry.workerId} spawn failed:`, err.message);
       registry.update(entry.workerId, {
         status: "failed",
@@ -198,9 +207,13 @@ export function createWorkerTools(
     }).finally(() => {
       drainQueue();
     });
+    lifecycle.track(run);
   }
 
   function drainQueue(): void {
+    if (lifecycle.stopping) {
+      return;
+    }
     const maxConcurrent = config.tools.workers.max_concurrent;
     while (registry.runningCount() < maxConcurrent) {
       const next = registry.nextQueued();
@@ -251,6 +264,9 @@ export function createWorkerTools(
       // Hard block: no nesting
       if (isWorkerSession) {
         return toolError("Workers cannot dispatch other workers.");
+      }
+      if (lifecycle.stopping) {
+        return toolError("Bryti is shutting down. No worker was started.");
       }
 
       // Resolve worker type defaults (explicit params override type defaults)
@@ -472,23 +488,8 @@ export function createWorkerTools(
       }
 
       if (entry.status === "queued") {
+        await stopWorker(registry, entry, "cancelled", null);
         pendingLaunches.delete(worker_id);
-        const cancelledAt = new Date();
-        registry.update(worker_id, {
-          status: "cancelled",
-          completedAt: cancelledAt,
-          error: null,
-        });
-        writeStatusFile(entry.workerDir, {
-          worker_id,
-          status: "cancelled",
-          task: entry.task,
-          started_at: entry.startedAt.toISOString(),
-          completed_at: cancelledAt.toISOString(),
-          model: entry.model,
-          error: null,
-          result_path: entry.resultPath,
-        });
         return toolSuccess({
           worker_id,
           status: "cancelled",
@@ -505,40 +506,8 @@ export function createWorkerTools(
         });
       }
 
-      // Cancel the timeout so it doesn't fire after we've already cancelled
-      if (entry.timeoutHandle) {
-        clearTimeout(entry.timeoutHandle);
-      }
-
-      // Mark cancelled before calling abort() so the spawnWorkerSession catch
-      // block sees the terminal status and skips overwriting it
-      const cancelledAt = new Date();
-      registry.update(worker_id, {
-        status: "cancelled",
-        completedAt: cancelledAt,
-        error: null,
-        timeoutHandle: null,
-      });
-
-      writeStatusFile(entry.workerDir, {
-        worker_id,
-        status: "cancelled",
-        task: entry.task,
-        started_at: entry.startedAt.toISOString(),
-        completed_at: cancelledAt.toISOString(),
-        model: entry.model,
-        error: null,
-        result_path: entry.resultPath,
-      });
-
-      // Abort the session if it's running. abort() may throw — treat as best-effort
-      if (entry.abort) {
-        try {
-          await entry.abort();
-        } catch {
-          // Best-effort — the status is already set to cancelled
-        }
-      }
+      // stopWorker persists cancellation before aborting and refuses terminal transitions.
+      await stopWorker(registry, entry, "cancelled", null);
 
       // Archive a cancellation fact so any projections watching this worker can clean up
       const modelsDir = path.join(config.data_dir, ".models");

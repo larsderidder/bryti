@@ -25,6 +25,7 @@ import type { ProjectionStore } from "../projection/store.js";
 import { createBrytiSettingsManager, createModelInfra, resolveModel, resolveFirstModel } from "../model-infra.js";
 import { attachWorkerRunTracker, type WorkerProgress, type WorkerRuntimePaths } from "./tracker.js";
 import { writeWorkerStatus } from "./recovery.js";
+import { stopWorker } from "./lifecycle.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -159,11 +160,19 @@ export async function spawnWorkerSession(opts: {
     onTrigger,
   } = opts;
 
+  const isRunning = () => registry.get(workerId)?.status === "running";
+  if (!isRunning()) {
+    return;
+  }
+
   const effectiveThinkingLevel = thinkingLevel
     ?? config.tools.workers.thinking_level
     ?? config.agent.thinking_level;
 
   const { modelRuntime, modelRegistry, agentDir } = await createModelInfra(config);
+  if (!isRunning()) {
+    return;
+  }
   const modelsDir = path.join(config.data_dir, ".models");
   const resultPath = path.join(workerDir, "result.md");
 
@@ -225,6 +234,9 @@ export async function spawnWorkerSession(opts: {
     systemPromptOverride: () => systemPrompt,
   });
   await loader.reload();
+  if (!isRunning()) {
+    return;
+  }
 
   const settingsManager = createBrytiSettingsManager(config, config.data_dir, agentDir);
 
@@ -245,6 +257,10 @@ export async function spawnWorkerSession(opts: {
     sessionManager: SessionManager.inMemory(workerDir),
     settingsManager,
   });
+  if (!isRunning()) {
+    session.dispose();
+    return;
+  }
 
   // ---- Timeout setup --------------------------------------------------------
   registry.update(workerId, {
@@ -285,45 +301,16 @@ export async function spawnWorkerSession(opts: {
   }
 
   // Set up timeout
-  const timeoutHandle = setTimeout(async () => {
-    console.log(`[worker] ${workerId} timed out after ${timeoutMs / 1000}s`);
-    registry.update(workerId, {
-      status: "timeout",
-      completedAt: new Date(),
-      error: `Timed out after ${timeoutMs / 1000}s`,
-    });
+  let timeoutTask: Promise<void> | undefined;
+  const timeoutHandle = setTimeout(() => {
     const entry = registry.get(workerId);
-    try {
-      await session.abort();
-    } catch {
-      // Best-effort abort
+    if (!entry || !isRunning()) {
+      return;
     }
-    session.dispose();
-    if (entry) {
-      writeStatusFile(workerDir, {
-        worker_id: workerId,
-        status: "timeout",
-        task,
-        started_at: entry.startedAt.toISOString(),
-        completed_at: new Date().toISOString(),
-        model: modelString,
-        error: `Timed out after ${timeoutMs / 1000}s`,
-        result_path: resultPath,
-        transcript_path: tracker.paths.transcript_path,
-        output_path: tracker.paths.output_path,
-        progress: tracker.progress,
-      });
-      tracker.writeOutput("timeout", { error: `Timed out after ${timeoutMs / 1000}s`, result_path: resultPath });
-      const factContent = `Worker ${workerId} failed: timed out after ${timeoutMs / 1000}s`;
-      try {
-        const embedding = await embed(factContent, modelsDir);
-        memoryStore.addFact(factContent, "worker", embedding);
-        console.log(`[worker] ${workerId} timeout fact archived`);
-      } catch (err) {
-        console.error(`[worker] ${workerId} failed to archive timeout fact:`, (err as Error).message);
-      }
-    }
-    scheduleCleanup(registry, workerId, workerDir);
+    const error = `Timed out after ${timeoutMs / 1000}s`;
+    timeoutTask = stopWorker(registry, entry, "timeout", error).catch((err: unknown) => {
+      console.error(`[worker] ${workerId} timeout abort failed:`, err);
+    });
   }, timeoutMs);
 
   // Store handle so we can cancel it if the worker finishes first
@@ -344,6 +331,9 @@ export async function spawnWorkerSession(opts: {
     let promptError: unknown = null;
 
     for (let i = 0; i < candidateStrings.length; i++) {
+      if (!isRunning()) {
+        return;
+      }
       // On retry: switch the session to the next candidate model.
       if (i > 0) {
         const nextModel = resolveModel(candidateStrings[i], modelRegistry);
@@ -356,6 +346,9 @@ export async function spawnWorkerSession(opts: {
           `(previous error: ${(promptError as Error | null)?.message ?? "model error"})`,
         );
         await session.setModel(nextModel);
+        if (!isRunning()) {
+          return;
+        }
         modelString = nextModel.provider + "/" + nextModel.id;
       }
 
@@ -364,6 +357,9 @@ export async function spawnWorkerSession(opts: {
         await session.prompt(taskPrompt);
       } catch (err) {
         promptError = err;
+      }
+      if (!isRunning()) {
+        return;
       }
 
       // Check for model-level errors (stopReason="error") even when no exception
@@ -474,12 +470,8 @@ export async function spawnWorkerSession(opts: {
     }
   } catch (error) {
     const errMsg = (error as Error).message;
-    // Don't overwrite a terminal status set externally (timeout handler or
-    // worker_interrupt). Both set their own status before aborting the session,
-    // so the error thrown by abort() here would otherwise clobber it.
-    const currentEntry = registry.get(workerId);
-    if (currentEntry?.status === "timeout" || currentEntry?.status === "cancelled") {
-      session.dispose();
+    // Cancellation and shutdown remain terminal even when prompt() resolves normally.
+    if (!isRunning()) {
       return;
     }
 
@@ -516,8 +508,21 @@ export async function spawnWorkerSession(opts: {
       console.error(`[worker] ${workerId} failed to archive failure fact:`, (err2 as Error).message);
     }
   } finally {
+    clearTimeout(timeoutHandle);
+    await timeoutTask;
     tracker.unsubscribe();
     session.dispose();
+    if (timeoutTask && registry.get(workerId)?.status === "timeout") {
+      const error = `Timed out after ${timeoutMs / 1000}s`;
+      tracker.writeOutput("timeout", { error, result_path: resultPath });
+      try {
+        const factContent = `Worker ${workerId} failed: timed out after ${timeoutMs / 1000}s`;
+        const embedding = await embed(factContent, modelsDir);
+        memoryStore.addFact(factContent, "worker", embedding);
+      } catch (err) {
+        console.error(`[worker] ${workerId} failed to archive timeout fact:`, (err as Error).message);
+      }
+    }
     scheduleCleanup(registry, workerId, workerDir);
   }
 }
@@ -539,5 +544,5 @@ export function scheduleCleanup(
   setTimeout(() => {
     registry.remove(workerId);
     console.log(`[worker] ${workerId} removed from registry after 24h`);
-  }, 24 * 60 * 60 * 1000);
+  }, 24 * 60 * 60 * 1000).unref();
 }

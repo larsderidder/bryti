@@ -41,6 +41,8 @@ let mockMessages: unknown[] = [];
 let mockCustomToolNames: string[] = [];
 let mockAllowedToolNames: string[] | undefined;
 
+let mockSetupImpl: () => Promise<void> = async () => {};
+const mockPrompt = vi.fn(async () => mockPromptImpl());
 // Mock embed so tests never load the embedding model (slow, 300MB download)
 vi.mock("../memory/embeddings.js", () => ({
   embed: vi.fn().mockResolvedValue(null),
@@ -53,10 +55,9 @@ vi.mock("../model-infra.js", () => {
   const model = { provider: "test-provider", id: "test-model" };
   return {
     createBrytiSettingsManager: vi.fn().mockReturnValue({}),
-    createModelInfra: vi.fn().mockResolvedValue({
-      modelRuntime: {},
-      modelRegistry: {},
-      agentDir: "/tmp/test-agent",
+    createModelInfra: vi.fn(async () => {
+      await mockSetupImpl();
+      return { modelRuntime: {}, modelRegistry: {}, agentDir: "/tmp/test-agent" };
     }),
     resolveModel: vi.fn().mockReturnValue(model),
     resolveFirstModel: vi.fn().mockReturnValue(model),
@@ -76,7 +77,7 @@ vi.mock("@earendil-works/pi-coding-agent", async (importActual) => {
       return {
       session: {
         get messages() { return mockMessages; },
-        async prompt() { return mockPromptImpl(); },
+        prompt: mockPrompt,
         abort: mockAbort,
         steer: mockSteer,
         subscribe: vi.fn(() => vi.fn()),
@@ -232,6 +233,8 @@ describe("spawnWorkerSession completion lifecycle", () => {
     tmpDir = makeTmpDir();
     workerDir = path.join(tmpDir, "workers", "w-test01");
     fs.mkdirSync(workerDir, { recursive: true });
+    mockSetupImpl = async () => {};
+    mockPrompt.mockClear();
     config = makeConfig(tmpDir);
     mockMessages = [];
     mockCustomToolNames = [];
@@ -642,10 +645,91 @@ describe("spawnWorkerSession completion lifecycle", () => {
         timeoutMs: 30_000,
       });
 
-      // The abort path returns early when status is "cancelled" — no status.json written
-      expect(fs.existsSync(path.join(workerDir, "status.json"))).toBe(false);
+      expect(mockPrompt).not.toHaveBeenCalled();
+      expect(registry.get("w-test01")?.status).toBe("cancelled");
     } finally {
       memStore.close();
+    }
+  });
+
+  it.each(["cancelled", "timeout", "interrupted"] as const)("does not publish success after %s", async (status) => {
+    const registry = createWorkerRegistry();
+    registerWorker(registry, "w-test01", "cancel test");
+    mockPromptImpl = async () => {
+      registry.update("w-test01", { status });
+      fs.writeFileSync(path.join(workerDir, "result.md"), "Partial findings");
+    };
+    const memStore = createMemoryStore("user-8", tmpDir);
+    const addFact = vi.spyOn(memStore, "addFact");
+    try {
+      await spawnWorkerSession({ config, workerId: "w-test01", workerDir, task: "cancel test",
+        modelOverride: undefined, toolNames: [], memoryStore: memStore, registry, timeoutMs: 30_000 });
+      expect(registry.get("w-test01")?.status).toBe(status);
+      expect(addFact).not.toHaveBeenCalled();
+    } finally {
+      memStore.close();
+    }
+  });
+
+  it("does not fall back after cancellation", async () => {
+    const registry = createWorkerRegistry();
+    registerWorker(registry, "w-test01", "cancel test");
+    config.agent.fallback_models = ["test-provider/other-model"];
+    mockPromptImpl = async () => {
+      registry.update("w-test01", { status: "cancelled" });
+      throw new Error("aborted");
+    };
+    const memStore = createMemoryStore("user-9", tmpDir);
+    try {
+      await spawnWorkerSession({ config, workerId: "w-test01", workerDir, task: "cancel test",
+        modelOverride: undefined, toolNames: [], memoryStore: memStore, registry, timeoutMs: 30_000 });
+      expect(mockPrompt).toHaveBeenCalledOnce();
+    } finally {
+      memStore.close();
+    }
+  });
+
+  it("does not prompt if cancelled during initialization", async () => {
+    const registry = createWorkerRegistry();
+    registerWorker(registry, "w-test01", "cancel test");
+    mockSetupImpl = async () => {
+      registry.update("w-test01", { status: "cancelled" });
+    };
+    const memStore = createMemoryStore("user-10", tmpDir);
+    try {
+      await spawnWorkerSession({ config, workerId: "w-test01", workerDir, task: "cancel test",
+        modelOverride: undefined, toolNames: [], memoryStore: memStore, registry, timeoutMs: 30_000 });
+      expect(mockPrompt).not.toHaveBeenCalled();
+      expect(registry.get("w-test01")?.status).toBe("cancelled");
+    } finally {
+      memStore.close();
+    }
+  });
+
+  it("persists timeout before abort and archives it before the run settles", async () => {
+    vi.useFakeTimers();
+    const registry = createWorkerRegistry();
+    registerWorker(registry, "w-test01", "timeout test");
+    let finish!: () => void;
+    mockPromptImpl = () => new Promise<void>((resolve) => { finish = resolve; });
+    mockAbort.mockImplementationOnce(async () => {
+      expect(readStatusFile(workerDir).status).toBe("timeout");
+      finish();
+    });
+    const memStore = createMemoryStore("user-11", tmpDir);
+    const addFact = vi.spyOn(memStore, "addFact");
+    try {
+      const run = spawnWorkerSession({ config, workerId: "w-test01", workerDir, task: "timeout test",
+        modelOverride: undefined, toolNames: [], memoryStore: memStore, registry, timeoutMs: 1000 });
+      await vi.advanceTimersByTimeAsync(1000);
+      await run;
+      expect(mockPrompt).toHaveBeenCalledOnce();
+      expect(mockDispose).toHaveBeenCalledOnce();
+      expect(addFact).toHaveBeenCalledWith(expect.stringContaining("timed out"), "worker", null);
+      expect(JSON.parse(fs.readFileSync(path.join(workerDir, "output.json"), "utf8")).status).toBe("timeout");
+    } finally {
+      memStore.close();
+      vi.useRealTimers();
     }
   });
 });
