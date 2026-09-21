@@ -97,6 +97,17 @@ function supportedRecordingMimeType() {
   return "";
 }
 
+function resizeChatInput() {
+  chatInputEl.style.height = "auto";
+  const maxHeight = Number.parseFloat(window.getComputedStyle(chatInputEl).maxHeight);
+  const contentHeight = chatInputEl.scrollHeight;
+  const nextHeight = Number.isFinite(maxHeight)
+    ? Math.min(contentHeight, maxHeight)
+    : contentHeight;
+  chatInputEl.style.height = `${nextHeight}px`;
+  chatInputEl.style.overflowY = Number.isFinite(maxHeight) && contentHeight > maxHeight ? "auto" : "hidden";
+}
+
 function updateChatAvailability() {
   const connected = !!(
     appState.pairedState &&
@@ -810,6 +821,7 @@ async function sendEncryptedText() {
   try {
     await sendReservedEncryptedFrame("msg", { kind: "text", text });
     chatInputEl.value = "";
+    resizeChatInput();
     appendChatMessage("user", text);
     pairingMessageEl.textContent = "Encrypted text roundtrip is enabled.";
   } catch (error) {
@@ -985,12 +997,16 @@ async function init() {
   autoPlayVoiceRepliesEl?.addEventListener("change", () => {
     void setAutoPlayVoiceReplies(autoPlayVoiceRepliesEl.checked);
   });
+  chatInputEl.addEventListener("input", () => {
+    resizeChatInput();
+  });
   chatInputEl.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" && !chatSendEl.disabled) {
+    if (event.key === "Enter" && !event.shiftKey && !event.isComposing && !chatSendEl.disabled) {
       event.preventDefault();
       void sendEncryptedText();
     }
   });
+  resizeChatInput();
 }
 
 window.addEventListener("beforeunload", () => {
