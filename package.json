@@ -44,6 +44,7 @@
     "@earendil-works/pi-agent-core": "0.99.1",
     "@earendil-works/pi-ai": "0.99.1",
     "@earendil-works/pi-coding-agent": "0.99.1",
+    "@earendil-works/pi-mcp": "0.99.1",
     "@mozilla/readability": "^0.6.0",
     "@types/markdown-it": "^14.1.2",
     "@whiskeysockets/baileys": "^7.0.0-rc.9",

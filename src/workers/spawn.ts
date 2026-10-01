@@ -18,6 +18,7 @@ import type { Config, ThinkingLevel } from "../config.js";
 import type { MemoryStore } from "../memory/store.js";
 import { embed } from "../memory/embeddings.js";
 import { createBraveSearchTool, createWebSearchTool } from "../tools/web-search.js";
+import { createParallelTools } from "../tools/parallel-search.js";
 import { createFetchUrlTool } from "../tools/fetch-url.js";
 import { createWorkerScopedTools } from "./scoped-tools.js";
 import type { WorkerRegistry } from "./registry.js";
@@ -198,7 +199,7 @@ export async function spawnWorkerSession(opts: {
   let modelString = model.provider + "/" + model.id;
 
   // ---- Tool selection -------------------------------------------------------
-  // Web search is request/config controlled. Argus extraction and scoped file
+  // Web search is request/config controlled. URL extraction and scoped file
   // tools are always added for workers.
   const workerTools: AgentTool<any>[] = [];
 
@@ -208,6 +209,9 @@ export async function spawnWorkerSession(opts: {
       workerTools.push(createBraveSearchTool(ws.brave_api_key));
     } else if (ws.searxng_url) {
       workerTools.push(createWebSearchTool(ws.searxng_url));
+    }
+    if (ws.parallel_enabled) {
+      workerTools.push(...createParallelTools());
     }
     // If neither is configured, web_search is silently omitted from worker tools.
   }
@@ -380,7 +384,7 @@ export async function spawnWorkerSession(opts: {
       if (!promptError) {
         // A normal model stop is not sufficient: the worker contract requires
         // a non-empty result.md. Research requests must also gather evidence
-        // through web_search or fetch_url rather than returning unsupported
+        // through the configured search or extraction tools rather than returning unsupported
         // prose without using their tools.
         let resultIsUsable = false;
         try {
@@ -396,8 +400,10 @@ export async function spawnWorkerSession(opts: {
           toolNames.includes("web_search")
           && (tracker.progress.tool_calls_by_name.web_search ?? 0) === 0
           && (tracker.progress.tool_calls_by_name.fetch_url ?? 0) === 0
+          && (tracker.progress.tool_calls_by_name.parallel_search ?? 0) === 0
+          && (tracker.progress.tool_calls_by_name.parallel_fetch ?? 0) === 0
         ) {
-          promptError = new Error("Research worker stopped without using web_search or fetch_url");
+          promptError = new Error("Research worker stopped without using web_search or fetch_url (or enabled Parallel tools)");
         }
       }
 

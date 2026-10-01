@@ -20,6 +20,7 @@ import { createArchivalMemoryTools } from "./archival-memory-tool.js";
 import { createConversationSearchTool } from "./conversation-search-tool.js";
 import { createFetchUrlTool } from "./fetch-url.js";
 import { createBraveSearchTool, createWebSearchTool } from "./web-search.js";
+import { createParallelTools } from "./parallel-search.js";
 import { createProjectionTools, createProjectionStore, type ProjectionStore, type ProjectionTarget } from "../projection/index.js";
 import { createWorkerTools, createWorkerRegistry } from "../workers/index.js";
 import type { WorkerLifecycle } from "../workers/lifecycle.js";
@@ -93,6 +94,15 @@ export function createTools(
         tools.push(createBraveSearchTool(ws.brave_api_key));
       } else if (ws.searxng_url) {
         tools.push(createWebSearchTool(ws.searxng_url));
+      }
+      if (ws.parallel_enabled) {
+        tools.push(...createParallelTools());
+        for (const name of ["parallel_search", "parallel_fetch"]) {
+          registerToolCapabilities(name, {
+            level: "elevated", capabilities: ["network"],
+            reason: "Sends public research objectives, queries, or URLs to Parallel. Returned content is untrusted external data.",
+          });
+        }
       }
     }
 

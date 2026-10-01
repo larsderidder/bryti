@@ -223,6 +223,9 @@ tools:
   web_search:
     # brave_api_key: "${BRAVE_API_KEY}"  # https://api.search.brave.com/
     searxng_url: "https://searx.be"
+    # Optional anonymous Parallel tools alongside the existing provider.
+    # Public research only: objectives, queries, URLs, and an opaque ID leave Bryti.
+    parallel_enabled: false
 
   # Safe URL extraction. Default backend is npm-native Readability so it works
   # out of the box. Set backend: argus if you have Argus installed.

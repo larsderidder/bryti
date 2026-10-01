@@ -52,6 +52,17 @@ cron: []
     expect(config.models.providers).toHaveLength(1);
   });
 
+  it.each([undefined, false, true, "true"])("requires an explicit boolean opt-in for Parallel: %s", (enabled) => {
+    const tools: Record<string, unknown> = { web_search: {} };
+    if (enabled !== undefined) {
+      tools.web_search = { parallel_enabled: enabled };
+    }
+    fs.writeFileSync(path.join(tempDir, "config.yml"), JSON.stringify({
+      telegram: { token: "test-token" }, models: { providers: [{ name: "openai", api: "openai-responses", models: [] }] }, tools,
+    }));
+    expect(loadConfig().tools.web_search.parallel_enabled).toBe(enabled === true);
+  });
+
   it("uses GPT-6.1 Sol when no primary model is configured", () => {
     fs.writeFileSync(path.join(tempDir, "config.yml"), `
 telegram:

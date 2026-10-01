@@ -333,6 +333,8 @@ export interface Config {
       searxng_url: string;
       /** Brave Search API key. If set, used instead of SearXNG. */
       brave_api_key?: string;
+      /** Enable anonymous Parallel alongside the existing provider. Default: false. */
+      parallel_enabled?: boolean;
     };
     fetch_url: {
       /** Deprecated and ignored. Exposure is controlled by workers and the `web` tool group. */
@@ -642,6 +644,7 @@ function toolsFromConfig(substituted: Record<string, unknown>, dataDir: string):
       enabled: webRaw.enabled !== false,
       searxng_url: searxngUrl,
       brave_api_key: (webRaw.brave_api_key as string) ?? undefined,
+      parallel_enabled: webRaw.parallel_enabled === true,
     },
     fetch_url: {
       timeout_ms: 10000,

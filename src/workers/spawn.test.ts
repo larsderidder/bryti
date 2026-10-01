@@ -27,6 +27,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 
 // ---------------------------------------------------------------------------
 // Mock the SDK session factory so tests never open a real network connection
@@ -40,6 +41,7 @@ let mockPromptImpl: () => Promise<void> = async () => {};
 let mockMessages: unknown[] = [];
 let mockCustomToolNames: string[] = [];
 let mockAllowedToolNames: string[] | undefined;
+let mockEventListener: ((event: AgentSessionEvent) => void) | undefined;
 
 let mockSetupImpl: () => Promise<void> = async () => {};
 const mockPrompt = vi.fn(async () => mockPromptImpl());
@@ -80,7 +82,10 @@ vi.mock("@earendil-works/pi-coding-agent", async (importActual) => {
         prompt: mockPrompt,
         abort: mockAbort,
         steer: mockSteer,
-        subscribe: vi.fn(() => vi.fn()),
+        subscribe: vi.fn((listener: (event: AgentSessionEvent) => void) => {
+          mockEventListener = listener;
+          return vi.fn();
+        }),
         dispose: mockDispose,
         async reload() { return mockReload(); },
         agent: { replaceMessages(_msgs: unknown[]) {} },
@@ -239,6 +244,7 @@ describe("spawnWorkerSession completion lifecycle", () => {
     mockMessages = [];
     mockCustomToolNames = [];
     mockAllowedToolNames = undefined;
+    mockEventListener = undefined;
     mockPromptImpl = async () => {
       fs.writeFileSync(path.join(workerDir, "result.md"), "# Result\n\nDone.\n", "utf-8");
     };
@@ -325,6 +331,69 @@ describe("spawnWorkerSession completion lifecycle", () => {
       });
 
       expect(mockCustomToolNames).toContain("fetch_url");
+    } finally {
+      memStore.close();
+    }
+  });
+
+  it.each(["parallel_search", "parallel_fetch"])("accepts %s as research evidence", async (toolName) => {
+    const registry = createWorkerRegistry();
+    registerWorker(registry, "w-evidence", "research task");
+    const memStore = createMemoryStore("user-evidence", tmpDir);
+    config.tools.web_search.enabled = true;
+    config.tools.web_search.parallel_enabled = true;
+    mockPromptImpl = async () => {
+      mockEventListener?.({ type: "tool_execution_start", toolCallId: "evidence", toolName, args: {} });
+      mockEventListener?.({ type: "tool_execution_end", toolCallId: "evidence", toolName, result: { content: [], details: {} }, isError: false });
+      fs.writeFileSync(path.join(workerDir, "result.md"), "Findings with public sources.");
+    };
+    try {
+      await spawnWorkerSession({
+        config, workerId: "w-evidence", workerDir, task: "research task", modelOverride: undefined,
+        toolNames: ["web_search"], memoryStore: memStore, registry, timeoutMs: 30_000,
+      });
+      expect(registry.get("w-evidence")?.status).toBe("complete");
+      expect(readStatusFile(workerDir).progress?.tool_calls_by_name[toolName]).toBe(1);
+    } finally {
+      memStore.close();
+    }
+  });
+
+  it.each([true, false])("exposes Parallel to research workers only when opted in: %s", async (enabled) => {
+    const registry = createWorkerRegistry();
+    registerWorker(registry, "w-parallel", "research task");
+    const memStore = createMemoryStore("user-parallel", tmpDir);
+    config.tools.web_search.enabled = true;
+    config.tools.web_search.searxng_url = "https://search.example.com";
+    config.tools.web_search.parallel_enabled = enabled;
+    try {
+      await spawnWorkerSession({
+        config, workerId: "w-parallel", workerDir, task: "research task", modelOverride: undefined,
+        toolNames: ["web_search"], memoryStore: memStore, registry, timeoutMs: 30_000,
+      });
+      expect(mockCustomToolNames.includes("parallel_search")).toBe(enabled);
+      expect(mockCustomToolNames.includes("parallel_fetch")).toBe(enabled);
+      expect(mockAllowedToolNames).toEqual(mockCustomToolNames);
+      expect(mockCustomToolNames).toContain("web_search");
+      expect(mockCustomToolNames).not.toContain("bash");
+    } finally {
+      memStore.close();
+    }
+  });
+
+  it("does not add Parallel to workers with an explicit empty research tool set", async () => {
+    const registry = createWorkerRegistry();
+    registerWorker(registry, "w-private", "local review");
+    const memStore = createMemoryStore("user-private", tmpDir);
+    config.tools.web_search.parallel_enabled = true;
+    config.tools.web_search.enabled = true;
+    try {
+      await spawnWorkerSession({
+        config, workerId: "w-private", workerDir, task: "local review", modelOverride: undefined,
+        toolNames: [], memoryStore: memStore, registry, timeoutMs: 30_000,
+      });
+      expect(mockCustomToolNames).not.toContain("parallel_search");
+      expect(mockCustomToolNames).not.toContain("parallel_fetch");
     } finally {
       memStore.close();
     }

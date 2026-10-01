@@ -1,0 +1,60 @@
+{
+  "searches": [
+    {
+      "id": "mcp-oauth",
+      "objective": "Find the official MCP authorization requirements for PKCE and OAuth discovery. Prefer the protocol specification rather than tutorials.",
+      "queries": ["MCP authorization PKCE discovery", "Model Context Protocol OAuth specification"],
+      "language": "en",
+      "officialDomains": ["modelcontextprotocol.io"],
+      "evidenceTerms": ["PKCE", "discovery", "authorization server"]
+    },
+    {
+      "id": "calendar-sync",
+      "objective": "Find official Google Calendar API documentation explaining incremental synchronization and what to do when a sync token produces HTTP 410.",
+      "queries": ["Google Calendar incremental sync 410", "Calendar API expired sync token"],
+      "language": "en",
+      "officialDomains": ["developers.google.com"],
+      "evidenceTerms": ["410", "sync token", "full sync"]
+    },
+    {
+      "id": "nvwa-horeca",
+      "objective": "Vind officiële NVWA-informatie over openbaar gemaakte inspectieresultaten van horeca en hoe consumenten die resultaten kunnen raadplegen.",
+      "queries": ["NVWA inspectieresultaten horeca openbaar", "NVWA horeca inspecties raadplegen"],
+      "language": "nl",
+      "officialDomains": ["nvwa.nl"],
+      "evidenceTerms": ["horeca", "inspectie", "openbaar"]
+    },
+    {
+      "id": "esdl-python",
+      "objective": "Find official ESDL documentation or source explaining how to load an Energy System Description Language file from Python with esdl_handler.",
+      "queries": ["ESDL Python esdl_handler load", "Energy System Description Language Python documentation"],
+      "language": "en",
+      "officialDomains": ["energytransition.github.io", "github.com/EnergyTransition", "docs.esdl.nl", "esdl.nl"],
+      "evidenceTerms": ["esdl_handler", "load", "Python"]
+    },
+    {
+      "id": "zzp-2026",
+      "objective": "Vind officiële informatie van de Belastingdienst over handhaving op schijnzelfstandigheid in 2026, inclusief het onderscheid tussen verzuimboetes en vergrijpboetes.",
+      "queries": ["Belastingdienst schijnzelfstandigheid boetes 2026", "handhaving arbeidsrelaties 2026 verzuimboetes vergrijpboetes"],
+      "language": "nl",
+      "officialDomains": ["belastingdienst.nl", "rijksoverheid.nl"],
+      "evidenceTerms": ["2026", "verzuimboete", "vergrijpboete"]
+    }
+  ],
+  "extractions": [
+    {
+      "id": "mcp-oauth-page",
+      "objective": "Find the PKCE and authorization server discovery requirements in the MCP specification.",
+      "queries": ["MCP PKCE authorization discovery"],
+      "url": "https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization",
+      "evidenceTerms": ["PKCE", "discovery", "authorization server"]
+    },
+    {
+      "id": "calendar-sync-page",
+      "objective": "Find what HTTP 410 means for an incremental sync token and how to recover.",
+      "queries": ["Google Calendar sync token 410"],
+      "url": "https://developers.google.com/workspace/calendar/api/guides/sync",
+      "evidenceTerms": ["410", "sync token", "full sync"]
+    }
+  ]
+}

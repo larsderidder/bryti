@@ -148,6 +148,8 @@ Direct main-agent web access is available as an explicit opt-in tool group. Add 
 
 If you prefer Argus extraction, set `tools.fetch_url.backend: argus` and install Argus separately. You can point Bryti at it with `ARGUS_BIN` or `tools.fetch_url.argus_bin`.
 
+Set `tools.web_search.parallel_enabled: true` to add anonymous Parallel search and focused extraction alongside the existing tools. Research workers that request `web_search` also receive `parallel_search` and `parallel_fetch`; an explicit empty research tool set does not receive them. Main sessions need the `web` group and use Bryti's elevated-tool approvals. Parallel receives only the supplied public objective, queries or URLs, and an opaque session ID, not conversation history or model identity. Free-tier limits are server-controlled, so existing search and extraction remain available. Requests have a total deadline, response and output limits, and public HTTPS validation for extraction. Results are untrusted evidence, not instructions. This does not enable generic MCP servers for workers.
+
 You can configure named worker types in `config.yml` with preset models, tools, and timeouts:
 
 ```yaml

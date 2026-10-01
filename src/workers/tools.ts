@@ -253,7 +253,9 @@ export function createWorkerTools(
       "Dispatch a background worker to perform a long-running task (research, content gathering, etc.). " +
       "Returns immediately — the worker runs in the background. " +
       "Completion and interruption notifications are delivered automatically to the originating conversation. " +
-      "Workers always have fetch_url for Argus extraction and can use web_search when configured. They write results to result.md. " +
+      "Workers always have fetch_url for URL extraction and can use web_search when configured. " +
+      "When Parallel is enabled, workers requesting web_search also receive parallel_search and parallel_fetch. " +
+      "Workers write results to result.md. " +
       `Max ${config.tools.workers.max_concurrent} concurrent workers.` +
       typesSuffix,
     parameters: dispatchWorkerSchema,
