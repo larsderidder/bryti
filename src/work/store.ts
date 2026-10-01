@@ -86,6 +86,7 @@ function durableMessage(message: IncomingMessage, id: string): IncomingMessage {
     text: message.text,
     images: message.images,
     audio: message.audio,
+    documents: message.documents,
     replyMode: message.replyMode,
     raw,
   };

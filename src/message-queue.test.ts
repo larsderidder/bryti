@@ -19,6 +19,31 @@ describe("MessageQueue", () => {
     rejectFn = vi.fn(async (msg) => { rejected.push(msg); });
   });
 
+  it("preserves every PDF when user messages merge", async () => {
+    const q = new MessageQueue(processFn, rejectFn, 10, 5000, undefined, { paused: true });
+    const first = { data: "JVBERi0=", mimeType: "application/pdf" as const, fileName: "first.pdf" };
+    const second = { ...first, fileName: "second.pdf" };
+    q.enqueue({ ...makeMsg("first"), documents: [first] });
+    q.enqueue({ ...makeMsg("second"), documents: [second] });
+    q.start();
+    await q.waitForIdle();
+    expect(processed).toHaveLength(1);
+    expect(processed[0].documents).toEqual([first, second]);
+  });
+
+  it("splits upload bursts before merging would exceed the PDF attachment limit", async () => {
+    const q = new MessageQueue(processFn, rejectFn, 10, 5000, undefined, { paused: true });
+    const documents = ["first", "second", "third", "fourth"].map((fileName) => ({ data: "JVBERi0=", mimeType: "application/pdf" as const, fileName }));
+    for (const document of documents) {
+      q.enqueue({ ...makeMsg(document.fileName), documents: [document] });
+    }
+    q.start();
+    await q.waitForIdle();
+    expect(processed.map((message) => message.documents?.length)).toEqual([3, 1]);
+    expect(processed.flatMap((message) => message.documents ?? [])).toEqual(documents);
+    expect(rejected).toEqual([]);
+  });
+
   it("processes a single message", async () => {
     const q = new MessageQueue(processFn, rejectFn);
     q.enqueue(makeMsg("hello"));

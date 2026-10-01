@@ -30,7 +30,7 @@
     "clean": "rm -rf dist",
     "test": "vitest run",
     "test:watch": "vitest",
-    "check": "npm test && npm run build",
+    "check": "npm test && npm run build && node scripts/check-pdf-worker.mjs",
     "web-e2ee:invite": "npm run cli -- web-e2ee invite"
   },
   "engines": {
@@ -50,10 +50,13 @@
     "@whiskeysockets/baileys": "^7.0.0-rc.9",
     "axios": "^1.13.5",
     "better-sqlite3": "^12.6.2",
+    "clawpdf": "0.3.2",
     "croner": "^9.0.0",
     "grammy": "^1.35.0",
+    "imapflow": "2.2.1",
     "linkedom": "^0.18.12",
     "markdown-it": "^14.1.1",
+    "postal-mime": "4.0.2",
     "proper-lockfile": "4.1.2",
     "qrcode-terminal": "^0.12.0",
     "sqlite-vec": "^0.1.7-alpha.2",

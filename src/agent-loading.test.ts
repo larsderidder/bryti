@@ -8,6 +8,7 @@ import type { ModelInfra } from "./model-infra.js";
 import { PERSONAL_ASSISTANT_DEFAULTS, type Config } from "./config.js";
 import { createCoreMemory } from "./memory/core-memory.js";
 import { createTrustStore } from "./trust/store.js";
+import { createGoogleTools } from "./integrations/google-tools.js";
 
 let infrastructure: ModelInfra;
 vi.mock("./model-infra.js", async (importActual) => {
@@ -29,6 +30,7 @@ afterEach(async () => {
   await userSession?.dispose();
   userSession = undefined;
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   if (directory) {
     fs.rmSync(directory, { recursive: true, force: true });
   }
@@ -36,8 +38,10 @@ afterEach(async () => {
 
 /** Exercise Bryti's resource-loader overrides and permissions with a real SDK and scripted provider. */
 describe("Bryti session loading", () => {
-  it("keeps native search usable and wraps deferred extension execution", async () => {
+  it.each([false, true])("keeps discovery and approval wrappers usable with native Google opt-in %s", async (nativeGoogle) => {
     directory = fs.mkdtempSync(path.join(os.tmpdir(), "bryti-agent-load-"));
+    vi.stubEnv("GOOGLE_CLIENT_ID", "test-client");
+    vi.stubEnv("GOOGLE_CLIENT_SECRET", "test-secret");
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Network disabled"));
     const agentDir = path.join(directory, ".pi");
     const runtime = await ModelRuntime.create({ authPath: path.join(agentDir, "auth.json"),
@@ -47,11 +51,19 @@ describe("Bryti session loading", () => {
     await runtime.setRuntimeApiKey(faux.getModel().provider, "offline-test");
     infrastructure = { modelRuntime: runtime, modelRegistry: new ModelRegistry(runtime), agentDir };
     const extension = path.join(directory, "records.mjs");
-    fs.writeFileSync(extension, `export default (pi) => pi.registerTool({
-      name: "contract_record", label: "Record", description: "Write a fixture record",
-      parameters: { type: "object", properties: { value: { type: "string" } }, required: ["value"] },
-      execute: async (_id, args) => ({ content: [{ type: "text", text: args.value }], details: {} })
-    });`);
+    fs.writeFileSync(extension, `export default (pi) => {
+      pi.registerTool({
+        name: "contract_record", label: "Record", description: "Write a fixture record",
+        parameters: { type: "object", properties: { value: { type: "string" } }, required: ["value"] },
+        execute: async (_id, args) => ({ content: [{ type: "text", text: args.value }], details: {} })
+      });
+      for (const name of ["google_calendar_list", "google_oauth_setup"]) {
+        pi.registerTool({ name, label: name, description: "Legacy Google fixture",
+          parameters: { type: "object", properties: {} },
+          execute: async () => ({ content: [{ type: "text", text: "Legacy credential path" }], details: {} })
+        });
+      }
+    };`);
     const model = faux.getModel();
     const config = {
       data_dir: directory,
@@ -62,8 +74,11 @@ describe("Bryti session loading", () => {
       telegram: { allowed_users: [] }, whatsapp: { enabled: false }, integrations: {}, cron: [],
       trust: { approved_tools: [] },
     } as Config;
+    if (nativeGoogle) {
+      config.google = { users: { owner: { default_account: "personal" } } };
+    }
     const approval = vi.fn().mockResolvedValue("allow_once");
-    userSession = await loadUserSession(config, createCoreMemory(directory), "owner", [], undefined, "owner", {
+    userSession = await loadUserSession(config, createCoreMemory(directory), "owner", createGoogleTools(config, "owner"), undefined, "owner", {
       trustStore: createTrustStore(directory),
       context: { config, getLastUserMessage: () => "write a record", onApprovalNeeded: approval,
         evaluateToolCall: async () => ({ verdict: "ASK", reason: "Confirm" }) },
@@ -71,6 +86,15 @@ describe("Bryti session loading", () => {
     expect(userSession.extensionErrors).toEqual([]);
     expect(userSession.session.getActiveToolNames()).toContain("tool_search");
     expect(userSession.session.getActiveToolNames()).not.toContain("contract_record");
+    if (nativeGoogle) {
+      expect(userSession.session.getToolDefinition("google_oauth_setup")).toBeUndefined();
+      expect(userSession.session.getToolDefinition("google_calendar_list")?.parameters)
+        .toMatchObject({ properties: { account: { type: "string" } } });
+      expect(userSession.session.getAllTools().some((tool) => tool.description === "Legacy Google fixture")).toBe(false);
+    } else {
+      expect(userSession.session.getToolDefinition("google_oauth_setup")?.description).toBe("Legacy Google fixture");
+      expect(userSession.session.getToolDefinition("google_calendar_list")?.description).toBe("Legacy Google fixture");
+    }
     faux.setResponses([
       fauxAssistantMessage(fauxToolCall("tool_search", { query: "fixture record" }), { stopReason: "toolUse" }),
       fauxAssistantMessage(fauxToolCall("contract_record", { value: "confirmed" }), { stopReason: "toolUse" }),

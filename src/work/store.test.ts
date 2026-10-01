@@ -23,6 +23,14 @@ describe("durable work receipts", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  it("retains normalized PDF input across a restart", () => {
+    const documents = [{ data: Buffer.from("%PDF-1.4").toString("base64"), mimeType: "application/pdf" as const, fileName: "report.pdf" }];
+    const accepted = store.accept({ ...message, documents });
+    store.close();
+    store = createWorkStore(dir);
+    expect(store.get(accepted.record.id)?.message.documents).toEqual(documents);
+  });
+
   it("persists accepted work and deduplicates platform message IDs", () => {
     const first = store.accept({ ...message, messageId: "42" });
     expect(first.created).toBe(true);

@@ -34,6 +34,8 @@ import Database from "better-sqlite3";
 import { loadConfig, resolveDataDir as defaultDataDir, type Config } from "./config.js";
 import { runReflection } from "./projection/index.js";
 import { createInviteStore } from "./web-e2ee/invite-store.js";
+import { createGoogleAccountStore, startGoogleLogin } from "./integrations/google-auth.js";
+import { googleClient } from "./integrations/google-tools.js";
 
 // ---------------------------------------------------------------------------
 // Version
@@ -373,6 +375,41 @@ async function cmdModelsStatus(dataDir: string): Promise<void> {
 // ---------------------------------------------------------------------------
 // Help
 // ---------------------------------------------------------------------------
+/** Authenticate Google only from an operator terminal, with exact-port forwarding for headless hosts. */
+export async function cmdGoogle(dataDir: string, userId: string, action: string, account: string, options: { port?: number; email?: string } = {}): Promise<void> {
+  const config = loadConfig(path.join(dataDir, "config.yml"));
+  const client = googleClient(config);
+  const store = createGoogleAccountStore(dataDir, userId, client);
+  if (action === "accounts") {
+    console.log(JSON.stringify({ userId, accounts: store.list() }));
+    return;
+  }
+  if (action !== "login") {
+    throw new Error("Use: google login --account <alias> or google accounts");
+  }
+  if (!client.clientId || !client.clientSecret) {
+    throw new Error("Configure GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET before Google sign-in");
+  }
+  const port = options.port ?? 19847;
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error("Google callback port must be between 1 and 65535");
+  }
+  const flow = await startGoogleLogin(store, account, client, { ...options, port });
+  const cancel = () => { void flow.close(); };
+  process.once("SIGINT", cancel);
+  try {
+    console.log(`Callback: ${flow.redirectUri}`);
+    console.log(`On a headless host, forward the same port: ssh -L ${port}:127.0.0.1:${port} <host>`);
+    console.log("Open this URL in your browser. Never paste codes or callback URLs into chat:");
+    console.log(flow.authUrl);
+    await flow.wait;
+    console.log(`Connected Google account ${account} for user ${userId}. Existing accounts were not changed.`);
+  } finally {
+    process.removeListener("SIGINT", cancel);
+    await flow.close();
+  }
+}
+
 
 function showHelp(): void {
   const dataDir = resolveDataDir();
@@ -422,6 +459,11 @@ Commands:
   models status
     Show resolved primary/fallback models, provider API modes, auth hints, and embeddings config.
 
+  google login --account <alias> [--email <address>] [--port <port>]
+    Connect a private Google account from the operator terminal. Supports SSH forwarding.
+
+  google accounts
+    List connected account aliases for --user-id. Does not print tokens.
   version
     Show version number.
 
@@ -507,6 +549,12 @@ async function main(): Promise<void> {
   const userId = resolveUserId(dataDir);
 
   switch (command) {
+    case "google": {
+      await cmdGoogle(dataDir, userId, positional(1) ?? "accounts", opt("--account", "personal")!, {
+        port: Number(opt("--port", "19847")), email: opt("--email"),
+      });
+      break;
+    }
     case "memory": {
       const sub = positional(1);
       const showAll = flag("--all");

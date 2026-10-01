@@ -223,6 +223,9 @@ tools:
   web_search:
     # brave_api_key: "${BRAVE_API_KEY}"  # https://api.search.brave.com/
     searxng_url: "https://searx.be"
+    # Operator-controlled endpoint; HTTP/private hosts and path prefixes are supported.
+    # HTTPS certificates are verified. Use NODE_EXTRA_CA_CERTS for a private CA.
+    # SearXNG responses are bounded, cancellable, and cached briefly per tool instance.
     # Optional anonymous Parallel tools alongside the existing provider.
     # Public research only: objectives, queries, URLs, and an opaque ID leave Bryti.
     parallel_enabled: false
@@ -254,6 +257,58 @@ tools:
 #   hedgedoc:
 #     url: "http://hedgedoc:3000"
 #     public_url: "https://docs.example.com"
+#   google:
+#     client_id: ${GOOGLE_CLIENT_ID}
+#     client_secret: ${GOOGLE_CLIENT_SECRET}
+
+# Native private Google tools are disabled unless a user is explicitly selected.
+# Connect each alias using `bryti google login --user-id USER_ID --account personal`.
+# The OAuth client must allow the CLI's loopback redirect; never paste codes into chat.
+# Legacy shared credentials are not migrated or overwritten.
+# google:
+#   users:
+#     "USER_ID":
+#       default_account: personal
+
+# Local PDF text extraction is enabled for Telegram attachments.
+# Low-text page images may be sent to the configured image-capable model.
+# Set false to keep PDF input text-only. Parsing still runs locally.
+# documents:
+#   render_images: true
+
+# Optional inert email previews. Email cannot invoke tools, commands, or the model.
+# The initial poll baselines current mail; only subsequent arrivals are considered.
+# Sender allowlisting also requires receiver-authenticated, aligned DMARC evidence.
+# DMARC proves the domain; individual mailbox identity depends on its sending policy.
+# Destinations must match the configured Telegram/WhatsApp user or group allowlists.
+# email:
+#   poll_interval_seconds: 60
+#   triggers:
+#     - id: personal-gmail
+#       provider: gmail
+#       user_id: "USER_ID"
+#       platform: telegram
+#       channel_id: "USER_ID"
+#       account: personal
+#       sender_allowlist: ["owner@example.com"]
+#       # Gmail trusts only mx.google.com authentication results.
+#       # Optional: channel_thread_id: 42
+#       # Optional: thread_id: telegram-topic-example-42
+#     - id: private-imap
+#       provider: imap
+#       user_id: "USER_ID"
+#       platform: telegram
+#       channel_id: "USER_ID"
+#       sender_allowlist: ["owner@example.com"]
+#       # Must be the receiving MTA's first Authentication-Results authserv ID.
+#       # That MTA must strip forged headers; insecure TLS is unsupported.
+#       trusted_authserv_ids: ["mx.example.com"]
+#       imap:
+#         host: imap.example.com
+#         port: 993
+#         user: ${IMAP_USER}
+#         password: ${IMAP_PASSWORD}
+#         mailbox: INBOX
 
 # ---------------------------------------------------------------------------
 # Voice support (optional, disabled by default)

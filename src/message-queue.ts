@@ -279,11 +279,15 @@ export class MessageQueue {
     const batch: QueueEntry[] = [];
     const first = q.entries.shift()!;
     batch.push(first);
+    let documentCount = first.msg.documents?.length ?? 0;
 
     while (q.entries.length > 0) {
       const next = q.entries[0];
-      if (next.arrivedAt - first.arrivedAt <= this.mergeWindowMs && canMerge(first.msg, next.msg)) {
+      // Preserve valid uploads rather than merging them into an over-limit PDF batch.
+      const nextDocumentCount = documentCount + (next.msg.documents?.length ?? 0);
+      if (next.arrivedAt - first.arrivedAt <= this.mergeWindowMs && canMerge(first.msg, next.msg) && nextDocumentCount <= 3) {
         batch.push(q.entries.shift()!);
+        documentCount = nextDocumentCount;
       } else {
         break;
       }
@@ -309,6 +313,7 @@ export class MessageQueue {
     // vice versa) within the merge window is not silently dropped.
     const allImages = entries.flatMap((e) => e.msg.images ?? []);
     const allAudio = entries.flatMap((e) => e.msg.audio ?? []);
+    const allDocuments = entries.flatMap((entry) => entry.msg.documents ?? []);
     const replyMode = entries.some((e) => e.msg.replyMode === "voice") ? "voice" : entries[0].msg.replyMode;
 
     return {
@@ -317,6 +322,7 @@ export class MessageQueue {
       workIds: entries.flatMap((entry) => entry.msg.workIds ?? []),
       ...(allImages.length > 0 ? { images: allImages } : {}),
       ...(allAudio.length > 0 ? { audio: allAudio } : {}),
+      documents: allDocuments,
       ...(replyMode ? { replyMode } : {}),
     };
   }

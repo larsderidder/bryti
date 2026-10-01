@@ -21,6 +21,13 @@ export interface AudioAttachment {
 
 export type ReplyMode = "text" | "voice";
 
+/** Self-contained PDF input retained in durable work receipts. */
+export interface DocumentAttachment {
+  data: string;
+  mimeType: "application/pdf";
+  fileName?: string;
+}
+
 export interface IncomingMessage {
   /** Platform-specific chat/channel/room ID */
   channelId: string;
@@ -46,6 +53,8 @@ export interface IncomingMessage {
   images?: Array<{ data: string; mimeType: string }>;
   /** Audio attachments downloaded to local temporary files. */
   audio?: AudioAttachment[];
+  /** PDF attachments, encoded as base64 so queued input survives restarts. */
+  documents?: DocumentAttachment[];
   /** Preferred response mode for this message. */
   replyMode?: ReplyMode;
 }
@@ -55,6 +64,7 @@ export function isInternalMessage(msg: IncomingMessage): boolean {
   const type = (msg.raw as { type?: unknown } | null | undefined)?.type;
   return type === "worker_trigger"
     || type === "command_completion"
+    || type === "email_notice"
     || type === "compaction_resume"
     || type === "cron"
     || type === "projection_exact_check"

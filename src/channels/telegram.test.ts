@@ -28,7 +28,7 @@ const grammyMocks = vi.hoisted(() => {
       sendVoice: vi.fn(async () => ({ message_id: 202 })),
       editMessageText: vi.fn(async () => ({})),
       sendChatAction: vi.fn(async () => ({})),
-      getFile: vi.fn(async () => ({ file_path: "voice/test.ogg" })),
+      getFile: vi.fn(async (_fileId?: string, _signal?: AbortSignal) => ({ file_path: "voice/test.ogg" })),
       setMyCommands: vi.fn(async () => ({})),
     };
 
@@ -85,6 +85,81 @@ describe("TelegramBridge", () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it("normalizes PDF documents with their caption and durable bytes", async () => {
+    const bytes = Buffer.from("%PDF-1.4\nfixture\n%%EOF");
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(bytes)));
+    const bridge = new TelegramBridge("test-token", [67890]);
+    const handler = vi.fn(async (_msg: unknown) => {});
+    bridge.onMessage(handler);
+    await bridge.start();
+    const bot = grammyMocks.MockBot.instances[0];
+    const ctx = makeVoiceContext({ message: {
+      message_id: 99, caption: "Read this report", document: {
+        file_id: "pdf-file", mime_type: "application/pdf", file_name: "report.pdf", file_size: bytes.length,
+      },
+    } });
+    await bot.handlers.get("message:document")!(ctx);
+    expect(handler).toHaveBeenCalledWith(expect.objectContaining({
+      text: "Read this report", messageId: "99",
+      documents: [{ data: bytes.toString("base64"), mimeType: "application/pdf", fileName: "report.pdf" }],
+    }));
+    await bridge.stop();
+  });
+
+  it("bounds PDF metadata lookup and cancels its request before downloading bytes", async () => {
+    vi.useFakeTimers();
+    const download = vi.fn();
+    vi.stubGlobal("fetch", download);
+    const bridge = new TelegramBridge("test-token", [67890]);
+    const handler = vi.fn(async (_msg: unknown) => {});
+    bridge.onMessage(handler);
+    await bridge.start();
+    const bot = grammyMocks.MockBot.instances[0];
+    bot.api.getFile.mockImplementation(() => new Promise(() => {}));
+    const ctx = makeVoiceContext({ message: { message_id: 99, document: { file_id: "pdf-file", mime_type: "application/pdf" } } });
+    try {
+      const pending = bot.handlers.get("message:document")!(ctx);
+      await vi.advanceTimersByTimeAsync(31_000);
+      await pending;
+      expect(bot.api.getFile.mock.calls[0][1]?.aborted).toBe(true);
+      expect(download).not.toHaveBeenCalled();
+      expect(handler).not.toHaveBeenCalled();
+      expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("PDF"));
+    } finally {
+      await bridge.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it("rejects oversized PDFs before downloading them", async () => {
+    const download = vi.fn();
+    vi.stubGlobal("fetch", download);
+    const bridge = new TelegramBridge("test-token", [67890]);
+    const handler = vi.fn(async () => {});
+    bridge.onMessage(handler);
+    await bridge.start();
+    const ctx = makeVoiceContext({ message: { message_id: 99, document: {
+      file_id: "pdf-file", mime_type: "application/pdf", file_size: 11 * 1024 * 1024,
+    } } });
+    await grammyMocks.MockBot.instances[0].handlers.get("message:document")!(ctx);
+    expect(download).not.toHaveBeenCalled();
+    expect(handler).not.toHaveBeenCalled();
+    expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("PDF"));
+    await bridge.stop();
+  });
+
+  it("rejects non-PDF bytes declared as a PDF", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("not a PDF")));
+    const bridge = new TelegramBridge("test-token", [67890]);
+    const handler = vi.fn(async () => {});
+    bridge.onMessage(handler);
+    await bridge.start();
+    const ctx = makeVoiceContext({ message: { message_id: 99, document: { file_id: "pdf-file", mime_type: "application/pdf" } } });
+    await grammyMocks.MockBot.instances[0].handlers.get("message:document")!(ctx);
+    expect(handler).not.toHaveBeenCalled();
+    await bridge.stop();
   });
 
   it("has correct name and platform", () => {

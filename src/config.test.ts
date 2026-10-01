@@ -16,6 +16,33 @@ describe("Config", () => {
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
+  it("parses native Google accounts, inert email triggers, and PDF rendering settings", () => {
+    fs.writeFileSync(path.join(tempDir, "config.yml"), JSON.stringify({
+      telegram: { token: "test-token", allowed_users: [123] },
+      models: { providers: [{ name: "openai", api: "openai-responses", models: [] }] },
+      google: { users: { "123": { default_account: "personal" } } },
+      documents: { render_images: false },
+      email: { triggers: [{ id: "mail", provider: "gmail", account: "personal", user_id: "123", platform: "telegram", channel_id: "123", sender_allowlist: ["Owner@Example.Test"] }] },
+    }));
+    const config = loadConfig();
+    expect(config.google?.users["123"].default_account).toBe("personal");
+    expect(config.documents?.render_images).toBe(false);
+    expect(config.email?.poll_interval_seconds).toBe(60);
+    expect(config.email?.triggers[0].sender_allowlist).toEqual(["owner@example.test"]);
+    expect(config.email?.triggers[0].trusted_authserv_ids).toEqual(["mx.google.com"]);
+  });
+
+  it.each([
+    { google: { users: { "../other": { default_account: "personal" } } } },
+    { google: { users: { "123": { default_account: "../other" } } } },
+    { email: { triggers: [{ id: "mail", provider: "gmail", user_id: "123", platform: "telegram", channel_id: "123", sender_allowlist: [] }] } },
+    { email: { poll_interval_seconds: 0, triggers: [] } },
+    { email: { triggers: [{ id: "mail", provider: "imap", user_id: "123", platform: "telegram", channel_id: "123", sender_allowlist: ["owner@example.test"], imap: { host: "mail.example.test", user: "owner", password: "fixture", secure: false } }] } },
+  ])("rejects unsafe integration configuration %j", (extra) => {
+    fs.writeFileSync(path.join(tempDir, "config.yml"), JSON.stringify({ telegram: { token: "test-token" }, models: { providers: [{ name: "openai", api: "openai-responses", models: [] }] }, ...extra }));
+    expect(() => loadConfig()).toThrow();
+  });
+
   it("should load minimal config", () => {
     const configContent = `
 agent:

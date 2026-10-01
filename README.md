@@ -31,7 +31,7 @@ Bryti is a personal AI agent that lives in the chat apps you already use, or in 
 
 **It understands the future, not just the past.** Projections go beyond simple reminders. "Remind me to write that article unless you see it posted already." "When the dentist confirms, remind me to book time off." "Every Monday morning, check the sprint board." Time-based, event-triggered, recurring, with dependencies.
 
-**External content can't compromise it.** The main agent has no web access at all. Research happens in isolated worker sessions with scoped file access. Even if a malicious page tries to hijack the model, it only reaches the disposable worker, never the main conversation.
+**Research runs in scoped workers.** Workers use separate sessions and limited file access, without loading extensions or MCP. Their results can still contain malicious instructions, so the main agent treats external content as untrusted and tool execution remains subject to Bryti's approval policy.
 
 **It extends itself.** The agent writes TypeScript extensions to give itself new tools: API integrations, custom commands, whatever it needs. Write the file, restart, done.
 
@@ -142,11 +142,13 @@ A reflection pass runs every 30 minutes, scanning recent conversation history fo
 
 Background sessions for long-running tasks. The main agent dispatches a worker with a goal; the worker runs independently (web search, URL fetching, analysis) and writes results to a file. When it finishes, a completion fact is archived, which can trigger projections so the main agent reads the summary and notifies you right away.
 
-Workers are also the default security boundary. By default, the main agent has no web search or URL fetch tools. External content is processed in isolation, and only the worker's cleaned-up result file enters the main conversation. This keeps prompt injection in web content from reaching the agent's context.
+Workers are the default path for web research, with scoped file access and no extensions or MCP. The main agent can still receive untrusted content through worker results or opted-in direct web tools. Worker isolation restricts capabilities, and the main agent's tool calls retain Bryti's approvals.
 
 Direct main-agent web access is available as an explicit opt-in tool group. Add `web` to `agent.yml` `tools.groups` to expose `web_search` and `fetch_url` directly. The same `fetch_url` tool is always available to background workers. It uses npm-native Readability by default, is HTTPS-only by default, and is protected against private-network fetches before extraction. Worker isolation is still the safer choice for broad or adversarial research.
 
 If you prefer Argus extraction, set `tools.fetch_url.backend: argus` and install Argus separately. You can point Bryti at it with `ARGUS_BIN` or `tools.fetch_url.argus_bin`.
+
+Local Argus CLI extraction uses explicit development standalone mode and stores its state in `$XDG_DATA_HOME/argus-cli`, defaulting to `~/.local/share/argus-cli`. `ARGUS_DATA_ROOT` can override that directory, but it must not point at a long-lived Argus service's state because standalone calls persist provider registrations. Explicit `ARGUS_MCP_STANDALONE` settings are preserved; `ARGUS_AUTHORITY_URL` and `ARGUS_ENV=production` prevent automatic standalone configuration.
 
 Set `tools.web_search.parallel_enabled: true` to add anonymous Parallel search and focused extraction alongside the existing tools. Research workers that request `web_search` also receive `parallel_search` and `parallel_fetch`; an explicit empty research tool set does not receive them. Main sessions need the `web` group and use Bryti's elevated-tool approvals. Parallel receives only the supplied public objective, queries or URLs, and an opaque session ID, not conversation history or model identity. Free-tier limits are server-controlled, so existing search and extraction remain available. Requests have a total deadline, response and output limits, and public HTTPS validation for extraction. Results are untrusted evidence, not instructions. This does not enable generic MCP servers for workers.
 
@@ -219,6 +221,48 @@ Credentials and refresh locks stay in that user's directory, while headers and e
 
 The main session can use pi's native `codemode` to batch tool calls and filter, join, or aggregate results before they enter model context. Direct tool calls remain available. Scripts run in a QuickJS sandbox without direct filesystem or network access; nested calls retain the tools' existing approvals and audit events. Classifier calls are disabled, and workers do not receive codemode. Only script output reaches the model. Failed scripts do not undo completed tool operations.
 
+### Google accounts
+
+Native Google tools use private accounts selected by the operator for each Bryti user. Enable them explicitly in `config.yml`:
+
+```yaml
+google:
+  users:
+    "USER_ID":
+      default_account: personal
+```
+
+Set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`, or the matching `integrations.google.client_id` and `client_secret` values. Enable Calendar, Gmail, and Search Console APIs for the OAuth application. The client must accept the loopback redirect printed by the CLI; web clients need that exact URI registered.
+
+```bash
+bryti google login --user-id USER_ID --account personal --email owner@example.com
+bryti google accounts --user-id USER_ID
+```
+
+Authentication happens in the operator terminal and browser, with PKCE and a one-use callback protected by random state. On a headless host, forward the callback port printed by the CLI to the same local port before opening the authorization URL. Keep authorization codes and callback URLs out of chat.
+
+Accounts live in `data/users/<userId>/google/<alias>.json`, with private directory and file permissions and serialized refreshes. Signing in never replaces an existing alias; use a new alias to reconnect. Tools accept an optional account alias and otherwise use the configured default. Calendar and Gmail remain read-only; Search Console retains performance queries and sitemap submissions under Bryti's approval policy.
+
+Opted-in users cannot access the overlapping legacy Google tools, including chat-based OAuth setup. Existing extensions and shared credentials remain unchanged for users without this opt-in. There is no automatic migration.
+
+### Email previews
+
+Optional Gmail and IMAP triggers forward bounded, plain-text previews to an allowlisted Telegram or WhatsApp destination. Polling needs no public webhooks or Gmail Pub/Sub infrastructure; configuration examples are commented in `config.example.yml`.
+
+Gmail uses an account connected through the operator CLI and reads headers with provider snippets, without fetching full MIME bodies or attachments. IMAP requires verified TLS and opens the mailbox read-only. Sender checks require an exact allowlisted address and an aligned DMARC pass in the receiver's first `Authentication-Results` header. Gmail trusts `mx.google.com`; IMAP requires explicit `trusted_authserv_ids` and a receiving server that strips forged authentication headers. DMARC authenticates the domain, so mailbox-level identity still depends on that domain's sending policy.
+
+The first poll establishes a baseline without replaying existing mail. Expired Gmail history or changed IMAP UIDVALIDITY produces a gap notice and a new baseline. Cursors advance after durable notification acceptance, and accepted messages deduplicate across restarts. Provider failures retain the cursor with backoff; queue backpressure leaves it available for another poll.
+
+Email notices bypass slash commands, approvals, memory updates, and the model entirely. Their contents cannot start an agent turn or invoke tools; any follow-up requires a separate user request in chat.
+
+### PDF attachments
+
+Telegram accepts PDF documents up to 10 MiB each, with an optional caption describing the request. Up to three PDFs share a 40,000-character text budget per processed message. Attachment bytes remain in durable work receipts, so queued uploads survive restarts and are included in data backups.
+
+PDFium extracts text locally through `clawpdf` in terminable workers; each document has a 60-second deadline and a 20-page extraction limit. At most two parser workers run concurrently. Each worker caps WASM linear memory at 128 MiB and its old-generation V8 heap at 128 MiB; session state and attachment buffers also contribute to application memory.
+
+Low-text pages can be rendered as PNGs for an image-capable model, with at most three images forwarded per message. Rendering is bounded by pixel count, dimensions, and encoded size. Disable it with `documents.render_images: false` for text-only extraction. Extracted text and selected page images enter the configured model's context as untrusted document data; local parsing does not make subsequent cloud-model processing local.
+
 ## Architecture
 
 Bryti is intentionally simple, straightforward, and organized. You should be able to understand the code, and any component should be simple enough to read in a single sitting. If that's not the case, open an issue and I'll fix it.
@@ -259,6 +303,8 @@ src/
 
   tools/              tool definitions (memory, files, search, fetch)
   compaction/         transcript repair, proactive session compaction
+  integrations/       private Google accounts, native API tools, inert email polling
+  documents/          bounded local PDF parsing and page rendering
   markdown/           IR-based markdown-to-Telegram-HTML renderer
   scheduler.ts        projection-driven cron (daily review, exact-time checks)
   message-queue.ts    per-channel FIFO with merge window
@@ -271,7 +317,7 @@ src/
 
 **Transcript repair.** Session files can end up with tool-call/result mismatches from partial writes or crashes. A repair pass runs before every prompt, reordering displaced results, inserting synthetic error results for missing ones, and dropping duplicates so the API never rejects the request.
 
-**Worker isolation.** The main agent intentionally has no web search or URL fetch tools. All external content goes through workers, which run in separate sessions with scoped file access. The main agent only reads the worker's result file. This keeps prompt injection in web content contained; even if a malicious page tries to instruct the model, it only reaches the isolated worker, not the main conversation.
+**Worker isolation.** Web research uses separate sessions with scoped file access by default; the main agent can receive direct web tools only through an explicit opt-in. Workers do not load extensions or MCP. Their results remain untrusted external content when read by the main agent, and tool execution still uses Bryti's approval policy.
 
 **Model fallback.** When the primary model fails (rate limit, downtime, error), the agent switches to the next candidate in the fallback chain and retries with the same session. OAuth tokens from `~/.pi/agent/auth.json` are shared with the pi CLI, so signing in once covers both.
 
@@ -295,9 +341,13 @@ bryti memory archival --query "energy"  # search archival memory
 bryti reflect                           # run reflection pass now
 bryti archive-fact "dentist confirmed"  # insert fact, trigger matching projections
 bryti version                           # show version
+bryti google accounts --user-id USER_ID # connected private Google aliases
+bryti google login --user-id USER_ID --account personal --email owner@example.com
 ```
 
 ## Contributing
+
+Run `npm run check` to run the tests, build the application, and verify the compiled PDF worker against local text and image fixtures.
 
 Found a bug or have an idea? [Open an issue](https://github.com/larsderidder/bryti/issues). Pull requests welcome.
 

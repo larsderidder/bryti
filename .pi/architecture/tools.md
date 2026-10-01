@@ -16,6 +16,8 @@ Built-in tools + extension system.
 - Skills: skill_install (agent writes skills to `data/skills/`)
 - Tool discovery: native `tool_search` ranks deferred extension and MCP tools using names, schemas, descriptions, and namespaces, then activates matches additively.
 - Codemode: the main session registers native `createCodemodeExtension({ mode: "on", models: false })` and activates it additively. Direct calls remain available; workers do not receive codemode. Scripts can compose active direct and deferred tools while only their output enters model context. Nested calls retain approval wrappers, audit events, and topic-delivery tracking. Script state persists through native `codemode-store` entries.
+- Google: `src/integrations/google-tools.ts` registers account aliases, Calendar, Gmail, and Search Console tools only for users selected by `google.users`. Calls remain approval-wrapped. `src/agent.ts` removes overlapping legacy Google extension definitions for those users before discovery.
+- SearXNG: `src/tools/searxng.ts` validates operator endpoints, bounds response bytes, rejects redirects, verifies HTTPS certificates, propagates cancellation, and filters malformed result entries. `src/tools/web-search.ts` owns a bounded per-tool TTL cache and returns cloned, untrusted search data.
 
 ## Extensions
 
@@ -50,6 +52,14 @@ Agent-written Python/Bash scripts, not TypeScript extensions.
 `src/tools/mcp.ts` reads only `data/users/<userId>/mcp.json`. There are no default servers and no implicit global/project MCP configuration. Native transports provide stdio and streamable HTTP. Server and tool exposure are deferred, with explicit hidden tools preserved. MCP-triggered codemode activation is disabled; the main session enables codemode independently.
 
 OAuth credentials use `data/users/<userId>/mcp-auth.json`, atomic private writes, and cross-process refresh locks compatible with pi. Operator sign-in uses `PI_CODING_AGENT_DIR=<user-directory> pi mcp login <server>`; there is no chat OAuth flow. Native metadata and structured results are preserved through the approval wrapper. Session disposal awaits native shutdown hooks before disposing the SDK. Workers do not load extensions or MCP.
+
+## Google accounts and email previews
+
+`src/integrations/google-auth.ts` owns private per-user/account tokens, refresh locks, bounded Google API requests, and operator-only loopback OAuth with PKCE and random state. `src/cli.ts` exposes `google login` and `google accounts`; login cannot overwrite an existing alias. Legacy credentials remain untouched, with no shared-token fallback for native tools.
+
+`src/integrations/email-config.ts` validates opt-in Gmail/IMAP triggers and destinations. `email-readers.ts` uses read-only Gmail history or verified-TLS IMAP polling with bounded batches and source-bound cursors. `email-watcher.ts` requires an allowlisted From plus aligned DMARC evidence in the receiver's first authentication header. IMAP needs explicitly trusted authserv IDs and an MTA that removes forged headers; DMARC establishes domain authentication, not independent mailbox identity.
+
+The watcher advances cursors only after durable notice acceptance and deduplicates accepted mail across restarts. Initial connection baselines old mail; history gaps emit a notice and rebaseline. `email_notice` bypasses commands, approvals, memory, sessions, and models in `src/process-message.ts`, using plain-text durable delivery. Application shutdown aborts and awaits polling.
 
 ## Execution and delivery receipts
 

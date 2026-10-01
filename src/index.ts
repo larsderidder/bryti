@@ -63,6 +63,7 @@ import { createAppLogger, installConsoleFileLogging } from "./logger.js";
 import { recoverPendingCheckpoints } from "./crash-recovery.js";
 import { startProactiveCompaction } from "./compaction/proactive.js";
 import { createEventsWatcher } from "./events-watcher.js";
+import { createEmailWatcher } from "./integrations/email-watcher.js";
 import { checkForUpdate } from "./update-check.js";
 import { createVoiceService } from "./voice.js";
 import { createRequire } from "node:module";
@@ -191,6 +192,7 @@ async function startApp(onRequestRestart?: () => void): Promise<RunningApp> {
     trustStore,
     lastUserMessages: new Map(),
     recoveredSessions: new Set(),
+    documentAbortController: new AbortController(),
     voiceService,
     requestRestart: onRequestRestart ?? null,
     workStore,
@@ -285,6 +287,8 @@ async function startApp(onRequestRestart?: () => void): Promise<RunningApp> {
   // Watch data/events/ for notifications from pi sessions and external scripts
   const eventsWatcher = createEventsWatcher(config, (msg) => queue.enqueue(msg));
   eventsWatcher.start();
+  const emailWatcher = createEmailWatcher(config, workStore, (msg) => queue.enqueue(msg));
+  emailWatcher.start();
 
   // ---------------------------------------------------------------------------
   // Startup notifications: crash recovery, restart marker, config rollback
@@ -346,15 +350,18 @@ async function startApp(onRequestRestart?: () => void): Promise<RunningApp> {
       }
       stopped = true;
       console.log("Shutting down...");
+      state.documentAbortController?.abort();
       state.scheduler.stop();
       clearInterval(workerRecoveryTimer);
       queue.stop();
       eventsWatcher.stop();
+      const emailStopped = emailWatcher.stop();
       for (const job of compactionJobs) job.stop();
       const workersStopped = state.workerLifecycle!.stop((config.tools.workers.shutdown_grace_seconds ?? 30) * 1000);
       // Observe rejection immediately while chat turns are still settling.
       await Promise.all([
         workersStopped,
+        emailStopped,
         Promise.all([...state.sessions.values()].map((session) => session.session.abort())),
       ]);
       await queue.waitForIdle();

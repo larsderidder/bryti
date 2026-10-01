@@ -37,6 +37,7 @@ import { createTranscriptRepairExtension } from "./compaction/session-repair.js"
 import { createBrytiMcpExtension } from "./tools/mcp.js";
 import { createExtensionToolPolicy, type ExtensionTrustContext } from "./tools/extension-policy.js";
 import { createToolDiscoveryExtension } from "./tools/tool-search.js";
+import { GOOGLE_TOOL_NAMES } from "./integrations/google-tools.js";
 
 // Re-export for backward compatibility with index.ts
 export { SILENT_REPLY_TOKEN };
@@ -258,6 +259,11 @@ export async function loadUserSession(
           continue;
         }
         for (const [name, registered] of extension.tools) {
+          if (config.google?.users && Object.hasOwn(config.google.users, userId) && GOOGLE_TOOL_NAMES.has(name)) {
+            // Explicit native-account opt-in must never leave the legacy shared-token tools reachable.
+            extension.tools.delete(name);
+            continue;
+          }
           // Only definitions captured from the SDK factory bypass agent-written extension policy.
           if (trustedCodemodeDefinitions.has(registered.definition)) {
             continue;

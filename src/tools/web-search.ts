@@ -27,22 +27,8 @@ import http from "node:http";
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { Static } from "typebox";
 import { Type } from "typebox";
+import { fetchSearxngJson, parseSearxngResults, searxngEndpoint, type SearxngOptions } from "./searxng.js";
 
-interface SearxngResult {
-  title: string;
-  url: string;
-  content: string;
-  engine: string;
-  score: number;
-  publishedDate?: string;
-}
-
-interface SearxngResponse {
-  query: string;
-  results: SearxngResult[];
-  number_of_results: number;
-  suggestions: string[];
-}
 
 const webSearchSchema = Type.Object({
   query: Type.String({ description: "Search query" }),
@@ -68,40 +54,6 @@ const webSearchSchema = Type.Object({
 
 type WebSearchInput = Static<typeof webSearchSchema>;
 
-// Why the raw Node http/https module instead of axios or fetch?
-// Self-hosted SearXNG instances often use self-signed TLS certificates. The
-// native fetch() API and axios do not expose `rejectUnauthorized` in a way
-// that is easy to toggle per-request without global side-effects. The raw
-// http/https module accepts a per-request `rejectUnauthorized: false` option,
-// making it straightforward to support internal SearXNG instances without
-// disabling TLS verification globally.
-function fetchJson(url: string, timeoutMs: number): Promise<SearxngResponse> {
-  return new Promise((resolve, reject) => {
-    const protocol = url.startsWith("https") ? https : http;
-
-    const req = protocol.get(url, { timeout: timeoutMs }, (res) => {
-      let data = "";
-      res.on("data", (chunk: Buffer) => {
-        data += chunk;
-      });
-      res.on("end", () => {
-        try {
-          resolve(JSON.parse(data) as SearxngResponse);
-        } catch (err) {
-          reject(new Error(`Failed to parse SearXNG response: ${(err as Error).message}`));
-        }
-      });
-    });
-
-    req.on("error", (err: Error) => {
-      reject(new Error(`SearXNG request failed: ${err.message}`));
-    });
-    req.on("timeout", () => {
-      req.destroy();
-      reject(new Error("SearXNG request timed out"));
-    });
-  });
-}
 
 // ---------------------------------------------------------------------------
 // Brave Search backend
@@ -244,71 +196,61 @@ export function createBraveSearchTool(apiKey: string): AgentTool<typeof webSearc
 // SearXNG backend
 // ---------------------------------------------------------------------------
 
-/**
- * Create the web search tool backed by SearXNG.
- */
-export function createWebSearchTool(searxngUrl: string): AgentTool<typeof webSearchSchema> {
+/** Create a bounded, cancellable SearXNG search tool with a per-instance cache. */
+export function createWebSearchTool(searxngUrl: string, options: SearxngOptions = {}): AgentTool<typeof webSearchSchema> {
+  const endpoint = searxngEndpoint(searxngUrl);
+  const cache = new Map<string, { expiresAt: number; response: ReturnType<typeof parseSearxngResults> }>();
+  const ttl = options.cacheTtlMs ?? 30_000;
+  const maxEntries = options.maxCacheEntries ?? 100;
   return {
     name: "web_search",
     label: "web_search",
-    description:
-      "Search the web. Returns titles, URLs, and snippets. " +
-      "Aggregates results from Google, Bing, DuckDuckGo, Brave, and more.",
+    description: "Search the web. Returns titles, URLs, and untrusted snippets from SearXNG.",
     parameters: webSearchSchema,
-    async execute(
-      _toolCallId: string,
-      { query, count, freshness, language }: WebSearchInput,
-    ): Promise<AgentToolResult<unknown>> {
+    async execute(_toolCallId, { query, count, freshness, language }, signal) {
+      signal?.throwIfAborted();
       const limit = Math.min(count ?? 10, 20);
-      const lang = language ?? "en";
-
-      const params = new URLSearchParams({
-        q: query,
-        format: "json",
-        language: lang,
-        safesearch: "0",
-      });
-
+      const params = new URLSearchParams({ q: query, format: "json", language: language ?? "en", safesearch: "0" });
       if (freshness) {
-        // Normalize common formats
-        const timeMap: Record<string, string> = {
-          pd: "day",
-          pw: "week",
-          pm: "month",
-          py: "year",
-          day: "day",
-          week: "week",
-          month: "month",
-          year: "year",
-        };
-        const timeRange = timeMap[freshness] ?? freshness;
-        params.append("time_range", timeRange);
+        const ranges: Record<string, string> = { pd: "day", pw: "week", pm: "month", py: "year" };
+        params.set("time_range", ranges[freshness] ?? freshness);
       }
-
-      const url = `${searxngUrl}/search?${params.toString()}`;
-
+      const url = new URL(endpoint);
+      url.search = params.toString();
+      const key = JSON.stringify([url.href, limit]);
       try {
-        const response = await fetchJson(url, 10000);
-
-        const results = (response.results ?? []).slice(0, limit).map((r) => ({
-          title: r.title ?? "",
-          url: r.url ?? "",
-          snippet: (r.content ?? "").slice(0, 300),
-          engine: r.engine ?? "unknown",
-        }));
-
-        const text = JSON.stringify({ results }, null, 2);
+        const now = Date.now();
+        for (const [cachedKey, entry] of cache) {
+          if (entry.expiresAt <= now) {
+            cache.delete(cachedKey);
+          }
+        }
+        let cached = false;
+        let response = cache.get(key)?.response;
+        if (response) {
+          cached = true;
+        } else {
+          response = parseSearxngResults(await fetchSearxngJson(url, options, signal), limit);
+          signal?.throwIfAborted();
+          if (ttl > 0 && maxEntries > 0) {
+            while (cache.size >= maxEntries) {
+              cache.delete(cache.keys().next().value!);
+            }
+            cache.set(key, { expiresAt: Date.now() + ttl, response: structuredClone(response) });
+          }
+        }
+        response = structuredClone(response);
         return {
-          content: [{ type: "text", text }],
-          details: { query, results, total: response.number_of_results ?? 0 },
+          content: [{ type: "text", text: JSON.stringify({ results: response.results }, null, 2) }],
+          details: { query, ...response, cached, untrusted: true },
         };
       } catch (error) {
-        const err = error as Error;
-        const text = JSON.stringify({ error: `Search failed: ${err.message}` });
-        return {
-          content: [{ type: "text", text }],
-          details: { error: err.message },
-        };
+        signal?.throwIfAborted();
+        let message = "Search failed";
+        if (error instanceof Error) {
+          message = `Search failed: ${error.message}`;
+        }
+        return { content: [{ type: "text", text: JSON.stringify({ error: message }) }], details: { error: message }, isError: true };
       }
     },
   };

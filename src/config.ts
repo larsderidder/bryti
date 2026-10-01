@@ -12,6 +12,8 @@ import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { FetchUrlBackend } from "./tools/fetch-url.js";
+import { emailFromConfig } from "./integrations/email-config.js";
+import type { EmailConfig } from "./integrations/email-types.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -372,6 +374,10 @@ export interface Config {
    * Example: integrations.hedgedoc.url → HEDGEDOC_URL
    */
   integrations: Record<string, Record<string, string>>;
+  /** Opted-in users get native Google tools backed only by their private account stores. */
+  google?: { users: Record<string, { default_account: string }> };
+  /** Opt-in inert email previews. Email content cannot authorize an agent turn. */
+  email?: EmailConfig;
   cron: CronJob[];
   /** Response rendering options. */
   response?: {
@@ -380,6 +386,8 @@ export interface Config {
   };
   /** Optional voice support via configurable STT/TTS commands. */
   voice?: VoiceConfig;
+  /** Render scanned PDF pages for vision-capable models unless explicitly disabled. */
+  documents?: { render_images?: boolean };
   /** Optional active hours window. Scheduler callbacks skip firing outside it. */
   active_hours?: ActiveHoursConfig;
   /** Trust and permission settings. */
@@ -513,6 +521,25 @@ function voiceFromConfig(substituted: Record<string, unknown>): VoiceConfig {
     synthesized_audio_extension: (raw.synthesized_audio_extension as string | undefined) ?? ".ogg",
     max_tts_chars: toFiniteNumber(raw.max_tts_chars) ?? 2500,
   };
+}
+
+/** Validate explicit Google account opt-in without reading credentials or migrating legacy tokens. */
+function googleFromConfig(config: Record<string, unknown>): Config["google"] {
+  if (config.google === undefined) {
+    return undefined;
+  }
+  const raw = config.google as { users?: Record<string, { default_account?: unknown }> };
+  if (!raw || typeof raw !== "object" || !raw.users || typeof raw.users !== "object" || Array.isArray(raw.users)) {
+    throw new Error("google.users must map user IDs to a default_account");
+  }
+  const users: Record<string, { default_account: string }> = Object.create(null);
+  for (const [userId, entry] of Object.entries(raw.users)) {
+    if (!/^[a-zA-Z0-9_-]{1,100}$/.test(userId) || !entry || typeof entry.default_account !== "string" || !/^[a-zA-Z0-9_-]{1,100}$/.test(entry.default_account)) {
+      throw new Error("Invalid Google user ID or default_account");
+    }
+    users[userId] = { default_account: entry.default_account };
+  }
+  return { users };
 }
 
 function integrationsFromConfig(substituted: Record<string, unknown>): Config["integrations"] {
@@ -852,11 +879,14 @@ export function loadConfig(configPath?: string): Config {
     memory: memoryFromConfig(substituted),
     tools: toolsFromConfig(substituted, dataDir),
     integrations: integrationsFromConfig(substituted),
+    google: googleFromConfig(substituted),
+    email: emailFromConfig(substituted.email),
     cron: (substituted.cron as CronJob[]) || [],
     response: {
       show_thinking: booleanFrom((substituted.response as Record<string, unknown> | undefined)?.show_thinking, false),
     },
     voice: voiceFromConfig(substituted),
+    documents: { render_images: booleanFrom((substituted.documents as Record<string, unknown> | undefined)?.render_images, true) },
     active_hours: (substituted.active_hours as ActiveHoursConfig | undefined) ?? undefined,
     trust: {
       approved_tools: ((substituted.trust as { approved_tools?: string[] })?.approved_tools) ?? [],

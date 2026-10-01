@@ -32,6 +32,7 @@ import type { Config, ToolGroup } from "../config.js";
 import type { CoreMemory } from "../memory/core-memory.js";
 import type { WorkerTriggerCallback } from "../workers/tools.js";
 import { registerToolCapabilities } from "../trust/index.js";
+import { createGoogleTools } from "../integrations/google-tools.js";
 
 /** Callback invoked when the agent requests a restart. */
 export type RestartCallback = (reason: string) => Promise<void>;
@@ -65,6 +66,7 @@ export function createTools(
 ): BrytiTool[] {
   const tools: BrytiTool[] = [];
   const groups = new Set<ToolGroup>(config.agent_def.tool_groups);
+  tools.push(...createGoogleTools(config, userId));
 
   // ---------------------------------------------------------------------------
   // Shared stores: created regardless of which tool groups are enabled so that

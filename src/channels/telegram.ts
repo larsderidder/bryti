@@ -28,6 +28,9 @@ import {
   isFileTooBigError,
 } from "./telegram-network-errors.js";
 import { fetchWithTimeout, withTimeout } from "../util/timeout.js";
+import { readResponseBuffer } from "../util/response-body.js";
+import { MAX_PDF_BYTES } from "../documents/pdf.js";
+import type { DocumentAttachment } from "./types.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -534,8 +537,25 @@ export class TelegramBridge implements ChannelBridge {
 
       const doc = ctx.message.document;
       const mimeType = doc.mime_type ?? "";
+      if (mimeType === "application/pdf") {
+        if (!this.handler) {
+          return;
+        }
+        const document = await this.downloadPdf(ctx);
+        if (!document) {
+          await ctx.reply("Sorry, that PDF could not be downloaded. It must be a valid PDF of at most 10 MiB.");
+          return;
+        }
+        await this.handler({
+          channelId: String(ctx.chat.id), userId: String(ctx.from?.id),
+          threadId: this.brytiThreadId(ctx), channelThreadId: this.channelThreadId(ctx),
+          messageId: String(ctx.message.message_id), platform: "telegram", raw: ctx.message,
+          text: ctx.message.caption?.trim() || "Read this PDF.", documents: [document],
+        });
+        return;
+      }
       if (!mimeType.startsWith("image/")) {
-        await ctx.reply("Sorry, I can only handle text messages, images, and voice messages for now.");
+        await ctx.reply("Sorry, I can only handle text messages, images, voice messages, and PDF documents for now.");
         return;
       }
 
@@ -571,7 +591,7 @@ export class TelegramBridge implements ChannelBridge {
         await this.replyUnauthorized(ctx);
         return;
       }
-      await ctx.reply("Sorry, I can only handle text messages, images, and voice messages for now.");
+      await ctx.reply("Sorry, I can only handle text messages, images, voice messages, and PDF documents for now.");
     });
 
     // Handle inline keyboard callbacks for approval requests.
@@ -1148,6 +1168,44 @@ export class TelegramBridge implements ChannelBridge {
     } catch (err) {
       console.error("[telegram] Document fetch failed:", (err as Error).message);
       return null;
+    }
+  }
+
+  /** Download PDF bytes within a full-transfer deadline, without writing user-controlled filenames. */
+  private async downloadPdf(
+    ctx: Context & { message: NonNullable<Context["message"]> & { document: NonNullable<NonNullable<Context["message"]>["document"]> } },
+  ): Promise<DocumentAttachment | null> {
+    const doc = ctx.message.document;
+    if (!this.bot || (doc.file_size ?? 0) > MAX_PDF_BYTES) {
+      return null;
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), TELEGRAM_FILE_DOWNLOAD_TIMEOUT_MS);
+    try {
+      const file = await withTimeout(
+        this.bot.api.getFile(doc.file_id, controller.signal), TELEGRAM_FILE_DOWNLOAD_TIMEOUT_MS, "PDF metadata lookup timed out",
+      );
+      if (!file.file_path) {
+        return null;
+      }
+      const response = await fetch(`https://api.telegram.org/file/bot${this.botToken}/${file.file_path}`, {
+        signal: controller.signal, redirect: "error",
+      });
+      if (!response.ok) {
+        await response.body?.cancel();
+        return null;
+      }
+      const bytes = await readResponseBuffer(response, MAX_PDF_BYTES);
+      if (!bytes.subarray(0, 1024).includes(Buffer.from("%PDF-"))) {
+        return null;
+      }
+      return { data: bytes.toString("base64"), mimeType: "application/pdf", fileName: doc.file_name?.slice(0, 200) };
+    } catch {
+      // Fetch errors can contain the bot token in their URL. Never log the raw error.
+      console.warn("[telegram] PDF download failed");
+      return null;
+    } finally {
+      clearTimeout(timer);
     }
   }
 
