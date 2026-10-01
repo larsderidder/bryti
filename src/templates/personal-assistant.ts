@@ -27,7 +27,7 @@ name: "Bryti"
 # Model to use. Format: provider/model-id
 model: anthropic/claude-sonnet-4-6
 fallback_models:
-  - opencode/kimi-k2.5-free
+  - opencode/mimo-v2.6-flash-free
 timezone: "Europe/Amsterdam"
 
 # Replace with your actual Telegram bot token env var and user ID

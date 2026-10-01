@@ -152,6 +152,7 @@ function makeUserSession(
       async prompt() {},
       async abort() {},
       async reload() {},
+      refreshContext: vi.fn(),
       dispose() {},
       subscribe(listener: (event: unknown) => void) {
         listeners.add(listener);
@@ -705,7 +706,7 @@ describe("processMessage pipeline", () => {
       finishCompact = () => resolve({} as Awaited<ReturnType<typeof userSession.session.compact>>);
     }));
     const reload = vi.spyOn(userSession.session, "reload");
-    const repair = vi.spyOn(userSession.session.agent, "replaceMessages");
+    const repair = vi.spyOn(userSession.session, "refreshContext");
     const compacting = tryCompact(userSession, "nightly");
     const state = makeState(config, userSession, tmpDir);
     const processing = processMessage(state, incomingMsg("hello"));

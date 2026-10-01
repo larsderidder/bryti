@@ -13,7 +13,8 @@ Built-in tools + extension system.
 - Files: file_read (unsandboxed, any path), file_write + file_list (sandboxed to data/files/)
 - Web: web_search, fetch_url. Workers always get fetch_url and get web_search when configured/requested; main agent gets web tools only when `agent.yml` includes the opt-in `web` tool group. `fetch_url` uses npm-native Readability by default, can use Argus when configured, is HTTPS-only by default, and uses SSRF protections before extraction.
 - Skills: skill_install (agent writes skills to `data/skills/`)
-- Tool discovery: search_tools searches the inactive extension-tool catalog and activates matching tools additively
+- Tool discovery: native `tool_search` ranks deferred extension and MCP tools using names, schemas, descriptions, and namespaces, then activates matches additively.
+- Codemode: the main session registers native `createCodemodeExtension({ mode: "on", models: false })` and activates it additively. Direct calls remain available; workers do not receive codemode. Scripts can compose active direct and deferred tools while only their output enters model context. Nested calls retain approval wrappers, audit events, and topic-delivery tracking. Script state persists through native `codemode-store` entries.
 
 ## Extensions
 
@@ -36,12 +37,18 @@ Agent-written Python/Bash scripts, not TypeScript extensions.
 
 ## Tool registration
 
-`src/agent.ts` registers all tools with pi, then `src/tools/tool-search.ts` keeps Bryti-owned core tools active and defers extension tools until `search_tools` loads them.
+`src/agent.ts` loads native codemode, MCP, and discovery factories. Only codemode definitions captured by identity from the trusted SDK factory bypass the agent-written extension policy. `src/tools/extension-policy.ts` wraps extension execution with Bryti approvals and marks unsupported schemas as hidden before registration. `src/tools/tool-search.ts` refreshes prompt metadata and reconciles persisted tool declarations after asynchronous MCP startup. The custom prompt summarizes codemode without duplicating its generated tool catalog.
 
 - The system prompt lists only active tools through `src/system-prompt.ts` → buildToolSection()
 - Tool activation is additive so supported providers can preserve their prompt-cache prefix
 - Quarantined extension tools are excluded from both the initial active set and the searchable catalog
 - Grouped by: standard groups, workers, and opt-in direct web access (based on config)
+
+## MCP
+
+`src/tools/mcp.ts` reads only `data/users/<userId>/mcp.json`. There are no default servers and no implicit global/project MCP configuration. Native transports provide stdio and streamable HTTP. Server and tool exposure are deferred, with explicit hidden tools preserved. MCP-triggered codemode activation is disabled; the main session enables codemode independently.
+
+OAuth credentials use `data/users/<userId>/mcp-auth.json`, atomic private writes, and cross-process refresh locks compatible with pi. Operator sign-in uses `PI_CODING_AGENT_DIR=<user-directory> pi mcp login <server>`; there is no chat OAuth flow. Native metadata and structured results are preserved through the approval wrapper. Session disposal awaits native shutdown hooks before disposing the SDK. Workers do not load extensions or MCP.
 
 ## Execution and delivery receipts
 

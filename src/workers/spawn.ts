@@ -230,6 +230,8 @@ export async function spawnWorkerSession(opts: {
   const loader = new DefaultResourceLoader({
     cwd: config.data_dir,
     agentDir,
+    noExtensions: true,
+    extensionsOverride: (base) => ({ ...base, extensions: [] }),
     settingsManager: createBrytiSettingsManager(config, config.data_dir, agentDir),
     systemPromptOverride: () => systemPrompt,
   });
@@ -265,7 +267,9 @@ export async function spawnWorkerSession(opts: {
   // ---- Timeout setup --------------------------------------------------------
   registry.update(workerId, {
     abort: () => session.abort(),
-    steer: (guidance: string) => session.steer(guidance),
+    steer: async (guidance: string) => {
+      await session.steer(guidance);
+    },
   });
 
   const tracker = attachWorkerRunTracker({

@@ -77,11 +77,8 @@ function extractToolResultId(msg: Extract<AgentMessage, { role: "toolResult" }>)
  * Construct a synthetic tool_result for a tool call that has no matching
  * result in the session file.
  *
- * The content string "[bryti] missing tool result" is intentionally prefixed
- * with the agent name so the model can identify this as a repair artifact
- * rather than a real tool failure. That distinction matters: the model should
- * reason "this call was lost during a crash" rather than "the tool returned
- * an error", which would lead to incorrect retry or error-handling behaviour.
+ * Mark the outcome as unknown. A missing receipt does not prove that an
+ * operation failed, so the model must not automatically repeat side effects.
  */
 function makeMissingToolResult(params: {
   toolCallId: string;
@@ -94,7 +91,7 @@ function makeMissingToolResult(params: {
     content: [
       {
         type: "text",
-        text: "[bryti] missing tool result in session history; inserted synthetic error result for transcript repair.",
+        text: "[bryti] missing tool result in session history; outcome unknown. The operation may have completed. Do not retry side effects without checking the outcome.",
       },
     ],
     isError: true,
@@ -140,13 +137,11 @@ export function repairToolUseResultPairing(messages: AgentMessage[]): ToolUseRep
   const seenToolResultIds = new Set<string>();
   let droppedDuplicateCount = 0;
   let droppedOrphanCount = 0;
-  let changed = false;
 
   const pushToolResult = (msg: Extract<AgentMessage, { role: "toolResult" }>) => {
     const id = extractToolResultId(msg);
     if (id && seenToolResultIds.has(id)) {
       droppedDuplicateCount += 1;
-      changed = true;
       return;
     }
     if (id) {
@@ -171,7 +166,6 @@ export function repairToolUseResultPairing(messages: AgentMessage[]): ToolUseRep
         out.push(msg);
       } else {
         droppedOrphanCount += 1;
-        changed = true;
       }
       continue;
     }
@@ -217,13 +211,11 @@ export function repairToolUseResultPairing(messages: AgentMessage[]): ToolUseRep
         if (id && toolCallIds.has(id)) {
           if (seenToolResultIds.has(id)) {
             droppedDuplicateCount += 1;
-            changed = true;
             continue;
           }
           if (spanResultsById.has(id)) {
             // Duplicate within this span
             droppedDuplicateCount += 1;
-            changed = true;
           } else {
             spanResultsById.set(id, toolResult);
           }
@@ -236,15 +228,11 @@ export function repairToolUseResultPairing(messages: AgentMessage[]): ToolUseRep
       } else {
         // Phase 5 (inline): drop orphan results that have no matching call.
         droppedOrphanCount += 1;
-        changed = true;
       }
     }
 
     out.push(msg);
 
-    if (spanResultsById.size > 0 && remainder.length > 0) {
-      changed = true;
-    }
 
     // Phase 3: emit results in call order (reordering any that were out of
     // sequence). Phase 4: for any call with no matching result, insert a
@@ -256,7 +244,6 @@ export function repairToolUseResultPairing(messages: AgentMessage[]): ToolUseRep
       } else {
         const missing = makeMissingToolResult({ toolCallId: call.id, toolName: call.name });
         added.push(missing);
-        changed = true;
         pushToolResult(missing);
       }
     }
@@ -268,8 +255,13 @@ export function repairToolUseResultPairing(messages: AgentMessage[]): ToolUseRep
     i = j - 1;
   }
 
+  const changed = out.length !== messages.length || out.some((message, index) => message !== messages[index]);
+  let repairedMessages = messages;
+  if (changed) {
+    repairedMessages = out;
+  }
   return {
-    messages: changed ? out : messages,
+    messages: repairedMessages,
     added,
     droppedDuplicateCount,
     droppedOrphanCount,

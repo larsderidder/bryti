@@ -84,7 +84,8 @@ describe("Pi SDK integration contracts", () => {
     sessions.splice(sessions.indexOf(first.session), 1);
 
     const reopened = await setup([tool], SessionManager.open(file));
-    expect(reopened.session.messages.map((message) => message.role)).toEqual(["user", "assistant", "toolResult", "assistant"]);
+    expect(reopened.session.messages.filter((message) => message.role !== "system").map((message) => message.role))
+      .toEqual(["user", "assistant", "toolResult", "assistant"]);
     expect(reopened.session.messages.find((message) => message.role === "toolResult")).toMatchObject({
       toolName: tool.name, isError: false, content: [{ type: "text", text: "stored result" }],
     });

@@ -361,7 +361,7 @@ async function startApp(onRequestRestart?: () => void): Promise<RunningApp> {
       await Promise.all(state.bridges.map((b) => b.stop()));
       for (const [userId, userSession] of state.sessions) {
         console.log(`Disposing session for user ${userId}`);
-        userSession.dispose();
+        await userSession.dispose();
       }
       await disposeEmbeddings();
       workStore.close();

@@ -805,7 +805,7 @@ export function loadConfig(configPath?: string): Config {
     agent: {
       name: "Bryti",
       system_prompt: "You are a personal AI colleague. You are warm, direct, and proactive.",
-      model: "openai-codex/gpt-6-astra",
+      model: "openai/gpt-6.1-sol",
       fallback_models: [],
       ...(substituted.agent as object),
       thinking_level: normalizeThinkingLevel((substituted.agent as Record<string, unknown> | undefined)?.thinking_level, "high"),

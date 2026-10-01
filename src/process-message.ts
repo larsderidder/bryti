@@ -519,6 +519,7 @@ export async function getOrLoadSession(
       wrappedTools,
       projectionStore,
       sessionKey,
+      { trustStore: state.trustStore, context: trustContext },
     );
   } catch (err) {
     console.error(
@@ -545,6 +546,7 @@ export async function getOrLoadSession(
       wrappedTools,
       projectionStore,
       sessionKey,
+      { trustStore: state.trustStore, context: trustContext },
     );
     state.recoveredSessions.add(sessionKey);
   }
@@ -613,11 +615,11 @@ export async function processMessage(
     historyManager: state.historyManager,
     trustStore: state.trustStore,
     workStore: state.workStore,
-    disposeSession: (userId: string, threadId = DEFAULT_THREAD_ID) => {
+    disposeSession: async (userId: string, threadId = DEFAULT_THREAD_ID) => {
       const sessionKey = getSessionKey(userId, threadId);
       const existing = state.sessions.get(sessionKey);
       if (existing) {
-        existing.dispose();
+        await existing.dispose();
         state.sessions.delete(sessionKey);
         if (fs.existsSync(existing.sessionDir)) {
           fs.rmSync(existing.sessionDir, { recursive: true, force: true });
@@ -789,7 +791,7 @@ export async function processMessage(
       } catch {
         // Best-effort — don't let a send failure mask the eviction
       }
-      userSession.dispose();
+      await userSession.dispose();
       state.sessions.delete(sessionKey);
       return;
     }
@@ -857,7 +859,7 @@ export async function processMessage(
 
     if (lastAssistant?.stopReason === "aborted") {
       state.workStore?.finish(msg.workIds ?? [], "interrupted", "Model turn was aborted; not replayed");
-      userSession.dispose();
+      await userSession.dispose();
       state.sessions.delete(sessionKey);
       return;
     }
@@ -910,7 +912,7 @@ export async function processMessage(
       });
       if (followUpResult.status === "timeout") {
         state.workStore?.finish(msg.workIds ?? [], "interrupted", `${describePromptTimeout(followUpResult)} Follow-up not replayed.`);
-        userSession.dispose();
+        await userSession.dispose();
         state.sessions.delete(sessionKey);
         try {
           await getBridge(state, msg.platform).sendMessage(msg.channelId,
@@ -926,7 +928,7 @@ export async function processMessage(
       );
       if (followUpMsg?.stopReason === "aborted") {
         state.workStore?.finish(msg.workIds ?? [], "interrupted", "Follow-up prompt was aborted; not replayed");
-        userSession.dispose();
+        await userSession.dispose();
         state.sessions.delete(sessionKey);
         return;
       }

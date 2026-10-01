@@ -10,7 +10,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue.svg" alt="License: AGPL-3.0"></a>
-  <a href="https://nodejs.org/"><img src="https://img.shields.io/badge/node-22%2B-brightgreen.svg" alt="Node.js 22+"></a>
+  <a href="https://nodejs.org/"><img src="https://img.shields.io/badge/node-22.19%2B-brightgreen.svg" alt="Node.js 22.19+"></a>
   <a href="https://github.com/mariozechner/pi"><img src="https://img.shields.io/badge/built%20on-pi%20SDK-purple.svg" alt="Built on pi"></a>
   <a href="#getting-started"><img src="https://img.shields.io/badge/self--hosted-yes-orange.svg" alt="Self-hosted"></a>
 </p>
@@ -56,7 +56,7 @@ Status labels are intentionally conservative. Alpha means the channel is worth t
 
 ### Requirements
 
-- Node.js 22+
+- Node.js 22.19+
 - A Telegram bot token (from [@BotFather](https://t.me/BotFather)) or a WhatsApp phone number for Bryti
 - Docker and docker-compose (optional, for HedgeDoc integration)
 
@@ -92,9 +92,9 @@ No subscription, no API keys:
 
 ```yaml
 agent:
-  model: "opencode/minimax-m2.5-free"
+  model: "opencode/mimo-v2.6-flash-free"
   fallback_models:
-    - "opencode/kimi-k2.5-free"
+    - "opencode/nemotron-3-ultra-free"
 ```
 
 Remove the `anthropic` provider from `models.providers` in your config. See `config.example.yml` for more provider examples (OpenRouter, Google Gemini, Ollama, Together AI).
@@ -190,6 +190,32 @@ trust:
 The agent writes TypeScript extension files to give itself new tools, using the pi SDK extension format. Each extension registers tools with the SDK; after writing one the agent restarts, and the new tools are available immediately.
 
 Extensions live in `data/files/extensions/`. An extension guide is included so the agent knows the template, parameter types, and conventions. An empty file acts as a tombstone, signaling the agent intentionally deleted an extension so it won't get reseeded on restart.
+
+### MCP servers
+
+Configure MCP for each user in an operator-owned `data/users/<userId>/mcp.json`, using pi's `mcpServers` format. Bryti starts without MCP servers and ignores your global pi and project MCP configuration.
+
+```json
+{
+  "mcpServers": {
+    "docs": { "url": "https://example.com/mcp" }
+  }
+}
+```
+
+Both stdio and streamable HTTP use pi's native MCP transport. Tools can be loaded through `tool_search` or composed in `codemode` scripts. Bryti forces server and tool exposure to `deferred`, preserving explicit `hidden` settings. MCP tools use Bryti's approvals; unsupported input schemas are quarantined before discovery, and workers never load MCP or other extensions.
+
+Sign in to OAuth servers through the operator's pi 0.99.1 CLI, pointing it at the user's directory:
+
+```bash
+PI_CODING_AGENT_DIR=/path/to/data/users/USER_ID pi mcp login docs
+```
+
+Credentials and refresh locks stay in that user's directory, while headers and environment values can reference `${VARIABLE}`. Keep credentials out of URLs and source control, and reload the session after configuration changes.
+
+### Codemode
+
+The main session can use pi's native `codemode` to batch tool calls and filter, join, or aggregate results before they enter model context. Direct tool calls remain available. Scripts run in a QuickJS sandbox without direct filesystem or network access; nested calls retain the tools' existing approvals and audit events. Classifier calls are disabled, and workers do not receive codemode. Only script output reaches the model. Failed scripts do not undo completed tool operations.
 
 ## Architecture
 

@@ -50,12 +50,13 @@ agent:
       specific HTTPS pages, while workers remain safer for broad research.
 
   # Primary model. Format: provider/model-id
-  model: "openai-codex/gpt-6-astra"
+  model: "openai/gpt-6.1-sol"
 
   # Tried in order when primary model fails
   fallback_models:
-    - "opencode/minimax-m2.5-free"
-    - "opencode/kimi-k2.5-free"
+    - "openai-codex/gpt-6.1-sol"
+    - "openai/gpt-5.6-sol"
+    - "opencode/mimo-v2.6-flash-free"
 
   # Thinking/reasoning level for the main session: off, minimal, low, medium, high, xhigh
   thinking_level: "high"
@@ -64,7 +65,7 @@ agent:
   timezone: "Europe/Amsterdam"
 
   # Model for the background reflection pass (defaults to primary model)
-  # reflection_model: "opencode/minimax-m2.5-free"
+  # reflection_model: "opencode/mimo-v2.6-flash-free"
 
   # Model for the LLM guardrail (defaults to primary model).
   # The guardrail only classifies tool calls (ALLOW/ASK/BLOCK), so a small
@@ -132,6 +133,13 @@ models:
   # http_idle_timeout_ms: 300000
   # websocket_connect_timeout_ms: 30000
   providers:
+    # Public Responses API using the self-hosted app's ChatGPT plan.
+    # Sign in with `pi login openai`. To use API billing instead, set api_key.
+    - name: openai
+      base_url: ""
+      api: openai-responses
+      api_key: ""
+      models: []
     # OpenAI Codex subscription. Sign in with /login in pi as the Bryti user.
     # Uses pi's model catalog, preserving reasoning and context metadata.
     - name: openai-codex
@@ -156,18 +164,8 @@ models:
           context_window: 200000
           max_tokens: 64000
 
-    # OpenAI API key, uncomment to use direct OpenAI models.
-    # - name: openai
-    #   base_url: https://api.openai.com/v1
-    #   api: openai-responses
-    #   api_key: ${OPENAI_API_KEY}
-    #   models:
-    #     - id: "gpt-5.2"
-    #       context_window: 400000
-    #       max_tokens: 128000
-    #     - id: "gpt-5.2-codex-mini"
-    #       context_window: 400000
-    #       max_tokens: 128000
+    # To use API billing instead of a ChatGPT plan, set the openai provider's
+    # api_key above to ${OPENAI_API_KEY}.
 
     # Any OpenAI-compatible chat endpoint.
     # - name: local-openai
@@ -189,19 +187,8 @@ models:
         x-opencode-project: "global"
         x-opencode-session: "pi-session"
         x-opencode-request: "pi-request"
-      models:
-        - id: "minimax-m2.5-free"
-          name: "MiniMax M2.5 (Free)"
-          context_window: 200000
-          max_tokens: 32000
-          compat:
-            maxTokensField: max_tokens
-        - id: "kimi-k2.5-free"
-          name: "Kimi K2.5 (Free)"
-          context_window: 128000
-          max_tokens: 32000
-          compat:
-            maxTokensField: max_tokens
+      # Use pi's current catalog so retired free models are not kept here.
+      models: []
 
 # ---------------------------------------------------------------------------
 # Memory
@@ -250,7 +237,7 @@ tools:
     shutdown_grace_seconds: 30  # let active workers finish before aborting
     # The service/container stop timeout must exceed this grace plus 10 seconds.
     # max_turns: 20  # steer workers to wrap up near this many turns
-    # model: "opencode/minimax-m2.5-free"  # default model for workers
+    # model: "opencode/mimo-v2.6-flash-free"  # default model for workers
     # thinking_level: "medium"  # default thinking level for workers
 
 # ---------------------------------------------------------------------------

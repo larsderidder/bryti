@@ -19,6 +19,7 @@ import path from "node:path";
 import type { AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
 import {
   createAgentSession,
+  createCodemodeExtension,
   DefaultResourceLoader,
   ModelRegistry,
   SessionManager,
@@ -29,15 +30,13 @@ import type { Config } from "./config.js";
 import type { CoreMemory } from "./memory/core-memory.js";
 import { repairToolUseResultPairing } from "./compaction/transcript-repair.js";
 import { createProjectionStore, formatProjectionsForPrompt, type ProjectionStore } from "./projection/index.js";
-import { registerToolCapabilities, getToolCapabilities } from "./trust/index.js";
 import { createBrytiSettingsManager, createModelInfra, resolveModel } from "./model-infra.js";
 import { buildSystemPrompt, buildToolSection, SILENT_REPLY_TOKEN, type ToolSummary } from "./system-prompt.js";
-import { quarantineInvalidExtensionTools } from "./tools/schema-validation.js";
 import { createTopicDeliveryTracker } from "./channels/topic-delivery.js";
-import {
-  configureDynamicToolLoading,
-  createToolSearch,
-} from "./tools/tool-search.js";
+import { createTranscriptRepairExtension } from "./compaction/session-repair.js";
+import { createBrytiMcpExtension } from "./tools/mcp.js";
+import { createExtensionToolPolicy, type ExtensionTrustContext } from "./tools/extension-policy.js";
+import { createToolDiscoveryExtension } from "./tools/tool-search.js";
 
 // Re-export for backward compatibility with index.ts
 export { SILENT_REPLY_TOKEN };
@@ -66,7 +65,7 @@ export interface UserSession {
    */
   projectionStore: ProjectionStore;
   /** Clean up event listeners. Does NOT delete the session file. */
-  dispose(): void;
+  dispose(): void | Promise<void>;
 }
 
 
@@ -155,6 +154,7 @@ export async function loadUserSession(
   customTools: AgentTool[],
   existingProjectionStore?: ProjectionStore,
   sessionKey = userId,
+  extensionTrust?: Omit<ExtensionTrustContext, "userId">,
 ): Promise<UserSession> {
   const { modelRuntime, modelRegistry, agentDir } = await createModelInfra(config);
 
@@ -175,13 +175,14 @@ export async function loadUserSession(
   const sessDir = userSessionDir(config, sessionKey);
   const isNewUser = !fs.existsSync(sessDir) || fs.readdirSync(sessDir).length === 0;
   const sessionManager = SessionManager.continueRecent(config.data_dir, sessDir);
-  const toolSearch = createToolSearch();
-  const sessionTools = [...customTools, toolSearch.tool];
+  const sessionTools = customTools;
+  const toolPolicy = createExtensionToolPolicy({ ...extensionTrust, userId });
   const promptTools: ToolSummary[] = sessionTools.map((tool) => ({
     name: tool.name,
     description: tool.description,
   }));
   const extensionToolNames = new Set<string>();
+  const trustedCodemodeDefinitions = new WeakSet<object>();
 
   // --- 2. Resource loader setup with system prompt override closure ---
   // The override closure captures core memory and the projection store so it
@@ -234,6 +235,42 @@ export async function loadUserSession(
     agentDir,
     additionalExtensionPaths,
     additionalSkillPaths,
+    extensionFactories: [
+      { name: "bryti-codemode", factory: (pi) => createCodemodeExtension({ mode: "on", models: false })({
+        ...pi,
+        registerTool(definition) {
+          trustedCodemodeDefinitions.add(definition);
+          pi.registerTool(definition);
+        },
+      }) },
+      { name: "bryti-mcp", factory: toolPolicy.wrapFactory(createBrytiMcpExtension(config.data_dir, userId)) },
+      { name: "bryti-transcript-repair", factory: createTranscriptRepairExtension() },
+      { name: "bryti-tool-search", factory: createToolDiscoveryExtension((activeTools) => {
+        promptTools.splice(0, promptTools.length, ...activeTools.map((tool) => ({
+          name: tool.name, description: tool.description,
+        })));
+      }) },
+    ],
+    extensionsOverride: (base) => {
+      extensionToolNames.clear();
+      for (const extension of base.extensions) {
+        if (extension.path === "<inline:bryti-tool-search>") {
+          continue;
+        }
+        for (const [name, registered] of extension.tools) {
+          // Only definitions captured from the SDK factory bypass agent-written extension policy.
+          if (trustedCodemodeDefinitions.has(registered.definition)) {
+            continue;
+          }
+          const definition = toolPolicy.protect(registered.definition);
+          extension.tools.set(name, { ...registered, definition });
+          if (definition.exposure !== "hidden") {
+            extensionToolNames.add(name);
+          }
+        }
+      }
+      return base;
+    },
     settingsManager: createBrytiSettingsManager(config, config.data_dir, agentDir),
     systemPromptOverride: () => {
       // Expire projections older than 24 hours before injecting them into the
@@ -256,6 +293,7 @@ export async function loadUserSession(
   await loader.reload();
 
   const settingsManager = createBrytiSettingsManager(config, config.data_dir, agentDir);
+  settingsManager.applyOverrides({ defaultTools: ["+codemode"] });
 
   // --- 3. Session creation + extension loading ---
   const { session, extensionsResult } = await createAgentSession({
@@ -269,24 +307,18 @@ export async function loadUserSession(
     sessionManager,
     settingsManager,
   });
+  await session.bindExtensions({
+    uiContext: {
+      ...session.extensionRunner.createContext().ui,
+      notify: (message, level) => console.log(`[extensions:${level ?? "info"}] ${message}`),
+    },
+    onError: (error) => console.error(`[extensions] ${error.extensionPath}: ${error.error}`),
+  });
   // Log extension loading results
   if (extensionsResult.extensions.length > 0) {
     for (const extension of extensionsResult.extensions) {
       const toolNames = [...extension.tools.keys()];
       console.log(`[extensions] Loaded: ${extension.path} (tools: ${toolNames.join(", ") || "none"})`);
-      for (const toolName of toolNames) {
-        extensionToolNames.add(toolName);
-        // Register extension tools as elevated by default (they can do anything).
-        // Skip if already registered with specific capabilities (e.g., shell_exec).
-        const existing = getToolCapabilities(toolName);
-        if (existing.level === "safe") {
-          registerToolCapabilities(toolName, {
-            level: "elevated",
-            capabilities: ["network", "filesystem", "shell"],
-            reason: "Extension tool with unrestricted access.",
-          });
-        }
-      }
     }
     console.log(`[extensions] ${extensionsResult.extensions.length} extension(s) loaded, ${extensionToolNames.size} tool(s) registered`);
   }
@@ -296,56 +328,9 @@ export async function loadUserSession(
     }
   }
 
-  const discoveredExtensionToolNames = new Set(extensionToolNames);
-  const schemaIssues = quarantineInvalidExtensionTools(session, extensionToolNames);
-  const quarantinedToolNames = new Set(schemaIssues.map((issue) => issue.toolName));
-  if (schemaIssues.length > 0) {
-    for (const issue of schemaIssues) {
-      console.error(`[extensions] Quarantined tool ${issue.toolName}: ${issue.message}`);
-    }
-    for (const toolName of quarantinedToolNames) {
-      extensionToolNames.delete(toolName);
-    }
-  }
-
-  // --- 4. Tool registration ---
-  // Keep Bryti's core tools active and defer extension tools until search_tools
-  // finds a relevant capability. Tool activation is additive, preserving pi's
-  // provider prompt cache while avoiding dozens of unused schemas per request.
-  configureDynamicToolLoading(
-    toolSearch,
-    session,
-    discoveredExtensionToolNames,
-    (activeTools) => {
-      promptTools.splice(
-        0,
-        promptTools.length,
-        ...activeTools.map((tool) => ({
-          name: tool.name,
-          description: tool.description,
-        })),
-      );
-    },
-    quarantinedToolNames,
-  );
-  await session.reload();
-
-  // --- 5. Transcript repair on load ---
-  // Fix any tool-call/result pairing issues that could have been written into
-  // the session file from a previous run (partial writes, races, crashes).
-  const currentMessages = session.messages;
-  if (currentMessages.length > 0) {
-    const report = repairToolUseResultPairing(currentMessages);
-    if (report.changed) {
-      session.agent.state.messages = report.messages;
-      console.log(
-        `Transcript repair on load for user ${userId}: ` +
-        `added=${report.added.length} ` +
-        `droppedDuplicates=${report.droppedDuplicateCount} ` +
-        `droppedOrphans=${report.droppedOrphanCount}`,
-      );
-    }
-  }
+  // Native discovery persists activation through the SDK's canonical loadout changes.
+  // Repair is applied by the context extension after each canonical projection.
+  repairSessionTranscript(session, userId);
 
   // --- 6. Event subscription setup ---
   // Subscribe to session events for compaction telemetry and the tool-call
@@ -453,6 +438,7 @@ export async function loadUserSession(
     }
   });
 
+  let disposal: Promise<void> | undefined;
   const userSession: UserSession = {
     session,
     modelRegistry,
@@ -464,19 +450,31 @@ export async function loadUserSession(
         path: e.path,
         error: String(e.error),
       })),
-      ...schemaIssues.map((issue) => ({
-        path: `tool:${issue.toolName}`,
-        error: `Tool quarantined because its schema is not provider-safe: ${issue.message}`,
+      ...[...toolPolicy.quarantinedNames].map((toolName) => ({
+        path: `tool:${toolName}`,
+        error: "Tool quarantined because its schema is not provider-safe",
       })),
     ],
     projectionStore,
     dispose() {
-      unsubscribe();
-      session.dispose();
-      // Close only if we own the store (it was not passed in by the caller).
-      if (!existingProjectionStore) {
-        projectionStore.close();
+      if (!disposal) {
+        disposal = (async () => {
+          try {
+            await session.abort();
+          } finally {
+            try {
+              await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+            } finally {
+              unsubscribe();
+              session.dispose();
+              if (!existingProjectionStore) {
+                projectionStore.close();
+              }
+            }
+          }
+        })();
       }
+      return disposal;
     },
   };
   userSessionRef = userSession;
@@ -488,14 +486,10 @@ export async function loadUserSession(
  * Catches pairing issues from the previous turn (partial writes, races).
  */
 export function repairSessionTranscript(session: AgentSession, userId: string): void {
+  session.refreshContext();
   const messages = session.messages;
-  if (messages.length === 0) {
-    return;
-  }
-
   const report = repairToolUseResultPairing(messages);
   if (report.changed) {
-    session.agent.state.messages = report.messages;
     console.log(
       `Transcript repair pre-prompt for user ${userId}: ` +
       `added=${report.added.length} ` +

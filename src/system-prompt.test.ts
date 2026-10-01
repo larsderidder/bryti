@@ -10,7 +10,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { buildSystemPrompt, SILENT_REPLY_TOKEN } from "./system-prompt.js";
+import { buildSystemPrompt, buildToolSection, SILENT_REPLY_TOKEN, type ToolSummary } from "./system-prompt.js";
 import type { Config } from "./config.js";
 import { PERSONAL_ASSISTANT_DEFAULTS } from "./config.js";
 
@@ -44,7 +44,7 @@ function makeConfig(overrides: Partial<Config["agent_def"]> = {}): Config {
   } as unknown as Config;
 }
 
-const noTools = [];
+const noTools: ToolSummary[] = [];
 const noExtensions = new Set<string>();
 const noProjections = "(none)";
 
@@ -120,7 +120,7 @@ describe("personal-assistant preset", () => {
   it("tells the agent to search for deferred extension tools", () => {
     const config = makeConfig();
     const prompt = buildSystemPrompt(config, "", noTools, noExtensions, noProjections);
-    expect(prompt).toContain("use `search_tools` first");
+    expect(prompt).toContain("use `tool_search` first");
   });
 });
 
@@ -223,5 +223,24 @@ describe("datetime section", () => {
     const prompt = buildSystemPrompt(config, "", noTools, noExtensions, noProjections);
     expect(prompt).toContain("UTC");
     expect(prompt).not.toContain("Europe/Amsterdam");
+  });
+});
+
+describe("codemode tool guidance", () => {
+  it("keeps the generated catalog out of the custom prompt and explains when to use scripts", () => {
+    const prompt = buildToolSection([
+      { name: "codemode", description: "Generated sandbox catalog: PRIVATE_TOOL_DECLARATIONS" },
+      { name: "read", description: "Read files" },
+    ], new Set());
+    expect(prompt).toContain("codemode:");
+    expect(prompt).not.toContain("PRIVATE_TOOL_DECLARATIONS");
+    expect(prompt).toContain("filter, join, or aggregate");
+    expect(prompt).toContain("Prefer direct calls");
+    expect(prompt).toContain("Return only what you need");
+    expect(prompt).toContain("read: Read files");
+  });
+
+  it("does not advertise codemode when the tool is absent", () => {
+    expect(buildToolSection([{ name: "read", description: "Read files" }], new Set())).not.toContain("codemode");
   });
 });

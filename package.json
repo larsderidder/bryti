@@ -34,13 +34,16 @@
     "web-e2ee:invite": "npm run cli -- web-e2ee invite"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.19.0"
+  },
+  "allowScripts": {
+    "better-sqlite3@12.10.0": true
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.74.0",
-    "@earendil-works/pi-agent-core": "0.85.1",
-    "@earendil-works/pi-ai": "0.85.1",
-    "@earendil-works/pi-coding-agent": "0.85.1",
+    "@earendil-works/pi-agent-core": "0.99.1",
+    "@earendil-works/pi-ai": "0.99.1",
+    "@earendil-works/pi-coding-agent": "0.99.1",
     "@mozilla/readability": "^0.6.0",
     "@types/markdown-it": "^14.1.2",
     "@whiskeysockets/baileys": "^7.0.0-rc.9",
@@ -50,6 +53,7 @@
     "grammy": "^1.35.0",
     "linkedom": "^0.18.12",
     "markdown-it": "^14.1.1",
+    "proper-lockfile": "4.1.2",
     "qrcode-terminal": "^0.12.0",
     "sqlite-vec": "^0.1.7-alpha.2",
     "tweetnacl": "^1.0.3",
@@ -69,6 +73,7 @@
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22",
+    "@types/proper-lockfile": "^4.1.4",
     "@types/qrcode-terminal": "^0.12.2",
     "@types/ws": "^8.18.1",
     "tsx": "^4.21.0",

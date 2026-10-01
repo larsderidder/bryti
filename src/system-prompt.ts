@@ -42,13 +42,19 @@ export function buildToolSection(
   const lines = [...tools]
     .sort((a, b) => a.name.localeCompare(b.name))
     .map((tool) => {
-      const description = (tool.description ?? "No description provided.")
-        .replace(/\s+/g, " ")
-        .trim();
+      let description = tool.description ?? "No description provided.";
+      if (tool.name === "codemode") {
+        // The SDK already declares its full generated catalog in the tool description.
+        description = "Run JavaScript to compose tools and filter, join, or aggregate results.";
+      }
+      description = description.replace(/\s+/g, " ").trim();
       const sourceSuffix = extensionToolNames.has(tool.name) ? " (extension)" : "";
       return `- ${tool.name}: ${description}${sourceSuffix}`;
     });
 
+  if (tools.some((tool) => tool.name === "codemode")) {
+    lines.push("", "Use codemode to batch or chain tool calls and filter, join, or aggregate large results before returning them to your context. Prefer direct calls for simple operations or when you need to inspect the full result. Return only what you need to answer the user. Tool calls have real side effects; a failed script does not undo completed operations.");
+  }
   if (tools.some((tool) => tool.name === "command_start")) {
     lines.push("", "For long-running commands and coding sessions, use command_start rather than detached bash, nohup, setsid, or sleep/poll loops. End the turn after dispatch; a durable completion event returns here for review. Read the actual output and verify the whole task before work_reconcile. Do not create a second reminder for the same completion, repeat actions with uncertain effects, or treat exit status as release approval.");
   }
@@ -120,7 +126,7 @@ function buildExtensionsSection(): string {
     `Tools marked "(extension)" come from TypeScript files in your extensions directory. ` +
     `You can read, rewrite, replace, or create them using the \`read\` and \`file_write\` tools.\n\n` +
     `Extensions are loaded from: data/files/extensions/\n\n` +
-    `Extension tools are loaded on demand. If a capability is missing, use \`search_tools\` first. ` +
+    `Extension and MCP tools are loaded on demand. If a capability is missing, use \`tool_search\` first. ` +
     `If no matching tool is found, the extension may require an environment variable. ` +
     `Read the extension file to find out which variable it needs, then tell the user to add it to .env and restart.\n\n` +
     `Only create extensions when the user asks for capabilities you don't have. ` +

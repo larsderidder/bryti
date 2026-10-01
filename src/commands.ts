@@ -171,7 +171,7 @@ export interface SlashCommandContext {
   trustStore?: TrustStore;
   workStore?: WorkStore;
   /** Callback to dispose and delete a user session. */
-  disposeSession: (userId: string, threadId?: string) => void;
+  disposeSession: (userId: string, threadId?: string) => void | Promise<void>;
   /** Send a message to the user. */
   sendMessage: (channelId: string, text: string, opts?: SendOpts) => Promise<string>;
   /** Trigger a restart. */
@@ -249,7 +249,7 @@ export async function handleSlashCommand(
     // Dispose and delete only the active thread session. Shared memory,
     // reminders, and the activity log are retained.
     const threadId = getActiveThread(context.config.data_dir, msg.userId);
-    context.disposeSession(msg.userId, threadId);
+    await context.disposeSession(msg.userId, threadId);
     await context.sendMessage(msg.channelId, "Current thread history cleared.");
     return true;
   }

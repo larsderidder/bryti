@@ -52,17 +52,17 @@ cron: []
     expect(config.models.providers).toHaveLength(1);
   });
 
-  it("uses GPT-6 Astra when no primary model is configured", () => {
+  it("uses GPT-6.1 Sol when no primary model is configured", () => {
     fs.writeFileSync(path.join(tempDir, "config.yml"), `
 telegram:
   token: test-token
 models:
   providers:
-    - name: openai-codex
-      api: openai-codex-responses
+    - name: openai
+      api: openai-responses
       models: []
 `);
-    expect(loadConfig().agent.model).toBe("openai-codex/gpt-6-astra");
+    expect(loadConfig().agent.model).toBe("openai/gpt-6.1-sol");
   });
 
   it("parses required embedding policy", () => {
@@ -74,8 +74,8 @@ memory:
     required: true
 models:
   providers:
-    - name: openai-codex
-      api: openai-codex-responses
+    - name: openai
+      api: openai-responses
       models: []
 `);
     expect(loadConfig().memory.embeddings.required).toBe(true);
@@ -87,8 +87,8 @@ telegram:
   token: test-token
 models:
   providers:
-    - name: openai-codex
-      api: openai-codex-responses
+    - name: openai
+      api: openai-responses
       models: []
 tools:
   workers:
@@ -103,8 +103,8 @@ telegram:
   token: test-token
 models:
   providers:
-    - name: openai-codex
-      api: openai-codex-responses
+    - name: openai
+      api: openai-responses
       models: []
 tools:
   workers:

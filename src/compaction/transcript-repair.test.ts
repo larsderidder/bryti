@@ -58,6 +58,9 @@ describe("repairToolUseResultPairing", () => {
     // Repaired sequence: assistant -> synthetic result -> user (follow up)
     const roles = result.messages.map((m) => (m as { role: string }).role);
     expect(roles).toEqual(["user", "assistant", "toolResult", "user"]);
+    expect(result.added[0].content[0]).toMatchObject({
+      text: expect.stringContaining("Do not retry side effects"),
+    });
   });
 
   it.each(["error", "aborted"] as const)("does not synthesize results for a %s assistant turn", (stopReason) => {
@@ -164,5 +167,26 @@ describe("repairToolUseResultPairing", () => {
       (m) => (m as { role: string }).role === "toolResult",
     );
     expect(toolResults).toHaveLength(2);
+  });
+
+  it("detects reordered parallel results even without displaced user messages", () => {
+    const assistant = assistantMsg("call-A");
+    if (assistant.role !== "assistant") {
+      throw new Error("Expected an assistant fixture");
+    }
+    assistant.content.push({ type: "toolCall", id: "call-B", name: "test_tool", arguments: {} });
+    const first = toolResultMsg("call-A");
+    const second = toolResultMsg("call-B");
+    const result = repairToolUseResultPairing([assistant, second, first]);
+    expect(result.changed).toBe(true);
+    expect(result.messages).toEqual([assistant, first, second]);
+    expect(repairToolUseResultPairing(result.messages).changed).toBe(false);
+  });
+
+  it("does not report a repair when results already precede a follow-up user message", () => {
+    const messages = [assistantMsg("call"), toolResultMsg("call"), userMsg("continue")];
+    const result = repairToolUseResultPairing(messages);
+    expect(result.changed).toBe(false);
+    expect(result.messages).toBe(messages);
   });
 });

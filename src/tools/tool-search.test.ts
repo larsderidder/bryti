@@ -1,193 +1,52 @@
 import { describe, expect, it, vi } from "vitest";
-import type { ToolInfo } from "@earendil-works/pi-coding-agent";
-import {
-  configureDynamicToolLoading,
-  createToolSearch,
-  getInitialToolNames,
-} from "./tool-search.js";
+import { Type } from "typebox";
+import type { ExtensionAPI, ExtensionToolContext, ToolDefinition, ToolInfo } from "@earendil-works/pi-coding-agent";
+import { createToolDiscoveryExtension, TOOL_SEARCH_NAME } from "./tool-search.js";
 
-function tool(name: string, description: string): ToolInfo {
-  return {
-    name,
-    description,
-    parameters: {},
-    promptGuidelines: [],
-    sourceInfo: {
-      path: `<test:${name}>`,
-      source: "test",
-      scope: "temporary",
-      origin: "top-level",
-    },
-  } as ToolInfo;
+function catalog() {
+  const tools = [
+    { name: "read", description: "Read files", exposure: "direct", parameters: Type.Object({}) },
+    { name: "gdrive_read", description: "Read documents", exposure: "deferred",
+      parameters: Type.Object({ spreadsheet: Type.String({ description: "Financial Google sheets" }) }),
+      namespace: { name: "google_workspace" } },
+    { name: "unsafe", description: "Financial Google sheets", exposure: "hidden", parameters: Type.Object({}) },
+  ] as ToolInfo[];
+  let active = ["read", TOOL_SEARCH_NAME];
+  let search: ToolDefinition | undefined;
+  const onChanged = vi.fn();
+  const events = new Map<string, (...args: unknown[]) => void>();
+  const pi = {
+    registerTool(definition: ToolDefinition) { search = definition; },
+    getAllTools: () => tools,
+    getActiveTools: () => active,
+    setActiveTools(names: string[]) { active = names; },
+    on(name: string, callback: (...args: unknown[]) => void) { events.set(name, callback); },
+  } as unknown as ExtensionAPI;
+  createToolDiscoveryExtension(onChanged)(pi);
+  return { search: search!, onChanged, events, active: () => active };
 }
 
-describe("getInitialToolNames", () => {
-  it("keeps core tools active and defers extension tools", () => {
-    const tools = [
-      tool("read", "Read files"),
-      tool("memory_archival_search", "Search memory"),
-      tool("search_tools", "Load more tools"),
-      tool("search_gdrive", "Search Google Drive"),
-      tool("gdrive_read", "Read Google Drive files"),
-    ];
-
-    const active = getInitialToolNames(
-      tools,
-      new Set(["search_gdrive", "gdrive_read"]),
-    );
-
-    expect(active).toEqual([
-      "read",
-      "memory_archival_search",
-      "search_tools",
-    ]);
-  });
-});
-
-describe("configureDynamicToolLoading", () => {
-  it("starts with core tools and reports later activations", async () => {
-    const tools = [
-      tool("read", "Read files"),
-      tool("search_tools", "Load more tools"),
-      tool("search_gdrive", "Search Google Drive files"),
-    ];
-    let activeNames = tools.map((item) => item.name);
-    const activeSnapshots: string[][] = [];
-    const controller = createToolSearch();
-
-    configureDynamicToolLoading(
-      controller,
-      {
-        getAllTools: () => tools,
-        getActiveToolNames: () => activeNames,
-        setActiveToolsByName: (names) => {
-          activeNames = names;
-        },
-      },
-      new Set(["search_gdrive"]),
-      (activeTools) => {
-        activeSnapshots.push(activeTools.map((item) => item.name));
-      },
-    );
-
-    expect(activeNames).toEqual(["read", "search_tools"]);
-    expect(activeSnapshots).toEqual([["read", "search_tools"]]);
-
-    await controller.tool.execute(
-      "call-1",
-      { query: "google drive" },
-      undefined,
-      undefined,
-    );
-
-    expect(activeNames).toEqual(["read", "search_tools", "search_gdrive"]);
-    expect(activeSnapshots.at(-1)).toEqual([
-      "read",
-      "search_tools",
-      "search_gdrive",
-    ]);
+describe("native tool discovery", () => {
+  it("registers just the native search tool and activates it by default", () => {
+    const { search } = catalog();
+    expect(search.name).toBe("tool_search");
+    expect(search.defaultActive).toBe(true);
+    expect(search.exposure).toBe("model-only");
   });
 
-  it("never exposes quarantined extension tools", async () => {
-    const tools = [
-      tool("read", "Read files"),
-      tool("search_tools", "Load more tools"),
-      tool("unsafe_extension_tool", "Unsafe extension capability"),
-    ];
-    let activeNames = tools.map((item) => item.name);
-    const controller = createToolSearch();
-
-    configureDynamicToolLoading(
-      controller,
-      {
-        getAllTools: () => tools,
-        getActiveToolNames: () => activeNames,
-        setActiveToolsByName: (names) => {
-          activeNames = names;
-        },
-      },
-      new Set(["unsafe_extension_tool"]),
-      () => {},
-      new Set(["unsafe_extension_tool"]),
-    );
-
-    const result = await controller.tool.execute(
-      "call-2",
-      { query: "unsafe extension" },
-      undefined,
-      undefined,
-    );
-
-    expect(activeNames).toEqual(["read", "search_tools"]);
-    expect(result.content[0]).toMatchObject({
-      type: "text",
-      text: "No inactive tools found for: unsafe extension",
-    });
-  });
-});
-
-describe("createToolSearch", () => {
-  it("loads matching inactive tools without disabling active tools", async () => {
-    let activeNames = ["read", "search_tools"];
-    const setActiveToolNames = vi.fn((names: string[]) => {
-      activeNames = names;
-    });
-    const controller = createToolSearch();
-    controller.bind({
-      getTools: () => [
-        tool("read", "Read files"),
-        tool("search_tools", "Load more tools"),
-        tool("search_gdrive", "Search Google Drive files"),
-        tool("gdrive_read", "Read a Google Drive file"),
-        tool("search_gmail", "Search Gmail messages"),
-      ],
-      getActiveToolNames: () => activeNames,
-      setActiveToolNames,
-    });
-
-    const result = await controller.tool.execute(
-      "call-1",
-      { query: "google drive", limit: 2 },
-      undefined,
-      undefined,
-    );
-
-    expect(setActiveToolNames).toHaveBeenCalledWith([
-      "read",
-      "search_tools",
-      "gdrive_read",
-      "search_gdrive",
-    ]);
-    expect(result.content[0]).toMatchObject({
-      type: "text",
-      text: "Loaded tools: gdrive_read, search_gdrive",
-    });
-    expect(result.addedToolNames).toEqual(["gdrive_read", "search_gdrive"]);
+  it("searches schema metadata and activates additively without exposing quarantine", async () => {
+    const { search, onChanged, active } = catalog();
+    const result = await search.execute("call", { query: "financial sheets", limit: 3 },
+      undefined, undefined, {} as ExtensionToolContext);
+    expect(active()).toEqual(["read", "tool_search", "gdrive_read"]);
+    expect(result.details).toEqual({ loaded: ["gdrive_read"] });
+    expect(onChanged.mock.calls.at(-1)?.[0].map((tool: ToolInfo) => tool.name)).toEqual(["read", "gdrive_read"]);
   });
 
-  it("returns a bounded no-match result without changing tools", async () => {
-    const setActiveToolNames = vi.fn();
-    const controller = createToolSearch();
-    controller.bind({
-      getTools: () => [
-        tool("read", "Read files"),
-        tool("search_tools", "Load more tools"),
-      ],
-      getActiveToolNames: () => ["read", "search_tools"],
-      setActiveToolNames,
-    });
-
-    const result = await controller.tool.execute(
-      "call-2",
-      { query: "weather radar" },
-      undefined,
-      undefined,
-    );
-
-    expect(setActiveToolNames).not.toHaveBeenCalled();
-    expect(result.content[0]).toMatchObject({
-      type: "text",
-      text: "No inactive tools found for: weather radar",
-    });
+  it("refreshes the prompt catalog on session start and subsequent turns", () => {
+    const { onChanged, events } = catalog();
+    events.get("session_start")!({}, { sessionManager: { buildSessionProjection: () => ({ messages: [] }) } });
+    events.get("before_agent_start")!();
+    expect(onChanged).toHaveBeenCalledTimes(2);
   });
 });
