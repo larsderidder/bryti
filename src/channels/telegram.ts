@@ -18,6 +18,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { Bot, InlineKeyboard, InputFile, type Context } from "grammy";
+import { AbortController as TelegramAbortController } from "abort-controller";
 import { deliveryNotSent, deliveryUnknown, isDeliveryError } from "./delivery.js";
 import type { ApprovalResult, AudioAttachment, ChannelBridge, IncomingMessage, SendOpts } from "./types.js";
 import { markdownToIR, chunkMarkdownIR, type MarkdownLinkSpan } from "./markdown/ir.js";
@@ -1180,10 +1181,15 @@ export class TelegramBridge implements ChannelBridge {
       return null;
     }
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), TELEGRAM_FILE_DOWNLOAD_TIMEOUT_MS);
+    // grammY uses abort-controller's signal type; native fetch uses Node's signal.
+    const metadataController = new TelegramAbortController();
+    const timer = setTimeout(() => {
+      controller.abort();
+      metadataController.abort();
+    }, TELEGRAM_FILE_DOWNLOAD_TIMEOUT_MS);
     try {
       const file = await withTimeout(
-        this.bot.api.getFile(doc.file_id, controller.signal), TELEGRAM_FILE_DOWNLOAD_TIMEOUT_MS, "PDF metadata lookup timed out",
+        this.bot.api.getFile(doc.file_id, metadataController.signal), TELEGRAM_FILE_DOWNLOAD_TIMEOUT_MS, "PDF metadata lookup timed out",
       );
       if (!file.file_path) {
         return null;
@@ -1206,6 +1212,8 @@ export class TelegramBridge implements ChannelBridge {
       return null;
     } finally {
       clearTimeout(timer);
+      metadataController.abort();
+      controller.abort();
     }
   }
 
