@@ -1,4 +1,5 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { basename } from "node:path";
 import axios from "axios";
 
 const execFileMock = vi.hoisted(() => vi.fn());
@@ -32,6 +33,14 @@ const readableHtml = `
 describe("createFetchUrlTool", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.stubEnv("ARGUS_AUTHORITY_URL", undefined);
+    vi.stubEnv("ARGUS_ENV", undefined);
+    vi.stubEnv("ARGUS_MCP_STANDALONE", undefined);
+    vi.stubEnv("ARGUS_DATA_ROOT", undefined);
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
   });
 
   it("requires HTTPS by default", async () => {
@@ -96,18 +105,43 @@ describe("createFetchUrlTool", () => {
     expect(result.content[0].text).toContain("Readable page text.");
     expect(result.details?.backend).toBe("argus");
     expect(mockedAxios.get).not.toHaveBeenCalled();
-    expect(execFileMock).toHaveBeenCalledWith(
-      "argus-test",
-      ["extract", "-u", "https://93.184.216.34/article", "--json"],
-      expect.objectContaining({
-        timeout: 45000,
-        env: expect.objectContaining({
-          ARGUS_SEARXNG_BASE_URL: "https://search.example.com",
-          ARGUS_SEARXNG_ENABLED: "true",
-        }),
-      }),
-      expect.any(Function),
-    );
+    const [bin, args, options] = execFileMock.mock.calls[0];
+    expect(bin).toBe("argus-test");
+    expect(args).toEqual(["extract", "-u", "https://93.184.216.34/article", "--json"]);
+    expect(options.timeout).toBe(45000);
+    expect(options.env.ARGUS_SEARXNG_BASE_URL).toBe("https://search.example.com");
+    expect(options.env.ARGUS_SEARXNG_ENABLED).toBe("true");
+    expect(options.env.ARGUS_MCP_STANDALONE).toBe("true");
+    expect(basename(options.env.ARGUS_DATA_ROOT)).toBe("argus-cli");
+  });
+
+  it.each([
+    { authority: undefined, environment: undefined, standalone: undefined, expected: "true" },
+    { authority: "http://127.0.0.1:8271", environment: undefined, standalone: undefined, expected: undefined },
+    { authority: undefined, environment: " PRODUCTION ", standalone: undefined, expected: undefined },
+    { authority: undefined, environment: undefined, standalone: "false", expected: "false" },
+    { authority: undefined, environment: undefined, standalone: "true", root: "/tmp/operator-argus", expected: "true" },
+  ])("preserves Argus execution configuration: $authority, $environment, $standalone", async (config) => {
+    vi.stubEnv("ARGUS_AUTHORITY_URL", config.authority);
+    vi.stubEnv("ARGUS_ENV", config.environment);
+    vi.stubEnv("ARGUS_MCP_STANDALONE", config.standalone);
+    vi.stubEnv("ARGUS_DATA_ROOT", config.root);
+    execFileMock.mockImplementationOnce((_bin, _args, _options, callback) => {
+      callback(null, JSON.stringify({ title: "T", text: "Content." }), "");
+    });
+
+    const tool = createFetchUrlTool(45000, { backend: "argus" });
+    await tool.execute("id", { url: "https://93.184.216.34/article" });
+
+    expect(execFileMock.mock.calls[0][2].env.ARGUS_MCP_STANDALONE).toBe(config.expected);
+    const root = execFileMock.mock.calls[0][2].env.ARGUS_DATA_ROOT;
+    if (config.root) {
+      expect(root).toBe(config.root);
+    } else if (config.expected === "true") {
+      expect(basename(root)).toBe("argus-cli");
+    } else {
+      expect(root).toBeUndefined();
+    }
   });
 
   it("passes optional Argus domain, mode, and max_chars arguments", async () => {

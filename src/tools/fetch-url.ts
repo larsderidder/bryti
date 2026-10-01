@@ -8,6 +8,8 @@
  */
 
 import { execFile } from "node:child_process";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import axios from "axios";
 import { parseHTML } from "linkedom";
@@ -46,10 +48,25 @@ const fetchUrlSchema = Type.Object({
 
 type FetchUrlInput = Static<typeof fetchUrlSchema>;
 
+/** Keep local CLI extraction isolated from service state without overriding authority configuration. */
 function argusEnv(searxngUrl?: string): NodeJS.ProcessEnv {
   const env = { ...process.env };
-  if (!env.ARGUS_SEARXNG_BASE_URL && searxngUrl) env.ARGUS_SEARXNG_BASE_URL = searxngUrl;
-  if (!env.ARGUS_SEARXNG_ENABLED && env.ARGUS_SEARXNG_BASE_URL) env.ARGUS_SEARXNG_ENABLED = "true";
+  if (!env.ARGUS_SEARXNG_BASE_URL && searxngUrl) {
+    env.ARGUS_SEARXNG_BASE_URL = searxngUrl;
+  }
+  if (!env.ARGUS_SEARXNG_ENABLED && env.ARGUS_SEARXNG_BASE_URL) {
+    env.ARGUS_SEARXNG_ENABLED = "true";
+  }
+  if (!env.ARGUS_AUTHORITY_URL?.trim()
+    && env.ARGUS_ENV?.trim().toLowerCase() !== "production") {
+    if (env.ARGUS_MCP_STANDALONE === undefined) {
+      env.ARGUS_MCP_STANDALONE = "true";
+    }
+    // Standalone registration must not overwrite the long-lived service's provider configuration.
+    if (["1", "true", "yes"].includes(env.ARGUS_MCP_STANDALONE.trim().toLowerCase()) && !env.ARGUS_DATA_ROOT) {
+      env.ARGUS_DATA_ROOT = join(env.XDG_DATA_HOME || join(homedir(), ".local", "share"), "argus-cli");
+    }
+  }
   return env;
 }
 
