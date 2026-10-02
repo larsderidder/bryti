@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { writeJsonAtomic } from "../durable-file.js";
 
 export type CapabilityLevel = "safe" | "guarded" | "elevated";
 export type Capability = "network" | "filesystem" | "shell";
@@ -11,6 +12,12 @@ export interface ToolCapabilities {
   level: CapabilityLevel;
   capabilities?: Capability[];
   reason?: string;
+  /** Operator-vetted read-only implementations may skip the first-use prompt after ALLOW. */
+  approvalRequired?: boolean;
+  /** Policy changes must be evaluated and explicitly approved on every invocation. */
+  requiresFreshApproval?: boolean;
+  /** Bind exact-call grants to an application-identified extension implementation. */
+  sourceId?: string;
 }
 
 export interface ApprovalProvenance {
@@ -21,6 +28,7 @@ export interface ApprovalProvenance {
   automationId?: string;
   channelThreadId?: string;
   source?: string;
+  toolSource?: string;
 }
 
 export interface ApprovalRecord {
@@ -248,6 +256,7 @@ const PROVENANCE_KEYS = [
   "channelThreadId",
   "automationId",
   "source",
+  "toolSource",
 ] as const;
 
 function normalizeProvenance(provenance?: ApprovalProvenance): ApprovalProvenance | undefined {
@@ -270,6 +279,9 @@ function normalizeProvenance(provenance?: ApprovalProvenance): ApprovalProvenanc
 function matchesProvenance(record: ApprovalRecord, provenance?: ApprovalProvenance): boolean {
   const stored = record.provenance;
   const current = normalizeProvenance(provenance);
+  if (current?.toolSource && current.toolSource !== stored?.toolSource) {
+    return false;
+  }
   if (!stored) {
     return !current;
   }
@@ -328,6 +340,7 @@ function invocationKey(toolName: string, args: unknown, provenance?: ApprovalPro
     scope?.channelThreadId ?? "",
     scope?.automationId ?? "",
     scope?.source ?? "",
+    scope?.toolSource ?? "",
   ].join("\u0000");
 }
 
@@ -375,7 +388,7 @@ export function createTrustStore(dataDir: string, preApproved: string[] = []): T
       .filter((record) => record.duration === "always")
       .filter(isRecordValid)
       .sort((left, right) => left.grantedAt.localeCompare(right.grantedAt));
-    fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf-8");
+    writeJsonAtomic(filePath, data);
   }
 
   function findToolRecord(toolName: string): ApprovalRecord | undefined {

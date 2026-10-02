@@ -1,5 +1,14 @@
-import { describe, it, expect } from "vitest";
-import { parseVerdict, buildGuardrailPrompt } from "./guardrail.js";
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { parseVerdict, buildGuardrailPrompt, evaluateToolCall } from "./guardrail.js";
+import type { Config } from "../config.js";
+import type { ModelInfra } from "../model-infra.js";
+
+const { complete, resolve } = vi.hoisted(() => ({ complete: vi.fn(), resolve: vi.fn() }));
+vi.mock("@earendil-works/pi-ai/compat", () => ({ completeSimple: complete }));
+vi.mock("../model-infra.js", () => ({
+  createModelInfra: vi.fn(), resolveModel: resolve,
+  resolveFirstModel: (candidates: string[]) => resolve(candidates[0]),
+}));
 
 describe("parseVerdict", () => {
   it("parses ALLOW with reason", () => {
@@ -92,5 +101,73 @@ describe("buildGuardrailPrompt", () => {
       toolDescription: "Makes HTTP requests to external services",
     });
     expect(prompt).toContain("Makes HTTP requests");
+  });
+});
+
+
+describe("guardrail model fallback", () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    resolve.mockImplementation((name: string) => ({ provider: name.split("/")[0], id: name.split("/")[1] }));
+    complete.mockResolvedValue({ stopReason: "stop", content: [{ type: "text", text: "ALLOW: routine read" }] });
+  });
+
+  const config = { agent: { model: "primary/model", fallback_models: ["fallback/model"] } } as Config;
+  const input = { toolName: "read_test", args: "{}" };
+
+  function infrastructure(auth: ReturnType<typeof vi.fn>): ModelInfra {
+    return { modelRegistry: { getApiKeyAndHeaders: auth } } as unknown as ModelInfra;
+  }
+
+  it("tries the fallback when the primary model cannot authenticate", async () => {
+    const auth = vi.fn()
+      .mockResolvedValueOnce({ ok: false, error: "invalid_grant" })
+      .mockResolvedValueOnce({ ok: true, apiKey: "test" });
+    expect(await evaluateToolCall(config, input, infrastructure(auth))).toEqual({ verdict: "ALLOW", reason: "routine read" });
+    expect(complete.mock.calls[0][0].provider).toBe("fallback");
+  });
+
+  it("tries the fallback when authentication throws", async () => {
+    const auth = vi.fn().mockRejectedValueOnce(new Error("refresh failed"))
+      .mockResolvedValueOnce({ ok: true, apiKey: "test" });
+    expect((await evaluateToolCall(config, input, infrastructure(auth))).verdict).toBe("ALLOW");
+  });
+
+  it("tries the fallback after a provider error without weakening a BLOCK verdict", async () => {
+    const auth = vi.fn().mockResolvedValue({ ok: true, apiKey: "test" });
+    complete.mockResolvedValueOnce({ stopReason: "error", errorMessage: "unavailable", content: [] })
+      .mockResolvedValueOnce({ stopReason: "stop", content: [{ type: "text", text: "BLOCK: unsafe" }] });
+    expect(await evaluateToolCall(config, input, infrastructure(auth))).toEqual({ verdict: "BLOCK", reason: "unsafe" });
+    expect(complete).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not seek a more permissive answer after ASK", async () => {
+    const auth = vi.fn().mockResolvedValue({ ok: true, apiKey: "test" });
+    complete.mockResolvedValue({ stopReason: "stop", content: [{ type: "text", text: "ASK: confirm destination" }] });
+    expect((await evaluateToolCall(config, input, infrastructure(auth))).verdict).toBe("ASK");
+    expect(complete).toHaveBeenCalledOnce();
+  });
+
+  it("fails closed when all candidates cannot authenticate, without exposing provider errors", async () => {
+    const auth = vi.fn().mockResolvedValue({ ok: false, error: "private provider response" });
+    const result = await evaluateToolCall(config, input, infrastructure(auth));
+    expect(result.verdict).toBe("ASK");
+    expect(result.reason).not.toContain("private provider response");
+    expect(auth).toHaveBeenCalledTimes(2);
+    expect(complete).not.toHaveBeenCalled();
+  });
+
+
+  it("stops fallback attempts when the supervising call is cancelled", async () => {
+    const controller = new AbortController();
+    const auth = vi.fn().mockResolvedValue({ ok: true, apiKey: "test" });
+    complete.mockImplementation(async (_model, _context, options) => {
+      expect(options.signal).toBeInstanceOf(AbortSignal);
+      controller.abort();
+      throw new Error("request aborted");
+    });
+    expect((await evaluateToolCall(config, input, infrastructure(auth), controller.signal)).verdict).toBe("ASK");
+    expect(complete).toHaveBeenCalledOnce();
+    expect(auth).toHaveBeenCalledOnce();
   });
 });

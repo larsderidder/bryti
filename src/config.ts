@@ -399,8 +399,12 @@ export interface Config {
   active_hours?: ActiveHoursConfig;
   /** Trust and permission settings. */
   trust: {
-    /** Tools pre-approved for elevated access (skip permission prompts). */
+    /** Tool availability grants skip first-use prompts, but retain argument guardrail checks. */
     approved_tools: string[];
+    /** Human response window, independent of model inactivity. Default 30 minutes. */
+    approval_timeout_ms?: number;
+    /** Operator-reviewed read-only extension implementations, pinned to their source bytes. */
+    read_only_extensions?: Array<{ path: string; sha256: string; tools: string[] }>;
   };
   /**
    * Agent definition: identity-specific config (tool groups, prompt sections,
@@ -898,6 +902,8 @@ export function loadConfig(configPath?: string): Config {
     active_hours: (substituted.active_hours as ActiveHoursConfig | undefined) ?? undefined,
     trust: {
       approved_tools: ((substituted.trust as { approved_tools?: string[] })?.approved_tools) ?? [],
+      approval_timeout_ms: (substituted.trust as Config["trust"] | undefined)?.approval_timeout_ms,
+      read_only_extensions: (substituted.trust as Config["trust"] | undefined)?.read_only_extensions,
     },
     // Agent definition: prefer agent.yml if present, then look for agent_def
     // in config.yml, then fall back to personal-assistant defaults.
@@ -1007,6 +1013,26 @@ function validateConfig(config: Config): void {
         }
       } catch {
         errors.push(`models.providers.${provider.name}.proxy must be a valid URL`);
+      }
+    }
+  }
+
+  const approvalTimeout = config.trust.approval_timeout_ms;
+  if (approvalTimeout !== undefined && (!Number.isInteger(approvalTimeout) || approvalTimeout < 1_000 || approvalTimeout > 45 * 60 * 1000)) {
+    errors.push("trust.approval_timeout_ms must be an integer between 1000 and 2700000");
+  }
+  const readOnlyExtensions = config.trust.read_only_extensions;
+  if (readOnlyExtensions !== undefined) {
+    if (!Array.isArray(readOnlyExtensions)) {
+      errors.push("trust.read_only_extensions must be an array");
+    } else {
+      for (const binding of readOnlyExtensions) {
+        if (!binding || typeof binding.path !== "string" || !path.isAbsolute(binding.path)
+          || typeof binding.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(binding.sha256)
+          || !Array.isArray(binding.tools) || binding.tools.length === 0
+          || !binding.tools.every((name) => typeof name === "string" && /^[a-zA-Z0-9_-]+$/.test(name))) {
+          errors.push("trust.read_only_extensions requires an absolute path, lowercase SHA-256 and non-empty tool names");
+        }
       }
     }
   }

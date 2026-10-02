@@ -8,7 +8,7 @@ import path from "node:path";
 import nacl from "tweetnacl";
 import { deliveryNotSent, deliveryUnknown, isDeliveryError } from "./delivery.js";
 import type { DeliveryError } from "./delivery.js";
-import type { ApprovalResult, AudioAttachment, ChannelBridge, IncomingMessage, SendOpts } from "./types.js";
+import { DEFAULT_APPROVAL_TIMEOUT_MS, type ApprovalOpts, type ApprovalResult, type AudioAttachment, type ChannelBridge, type IncomingMessage, type SendOpts } from "./types.js";
 
 const TEXT_MESSAGE_TYPE = 0x01;
 const FILE_MESSAGE_TYPE = 0x17;
@@ -571,7 +571,7 @@ export class ThreemaBridge implements ChannelBridge {
   async stop(): Promise<void> {
     for (const pending of this.pendingApprovals.values()) {
       clearTimeout(pending.timeout);
-      pending.resolve("deny");
+      pending.resolve("cancelled");
     }
     this.pendingApprovals.clear();
 
@@ -686,27 +686,42 @@ export class ThreemaBridge implements ChannelBridge {
     channelId: string,
     prompt: string,
     approvalKey: string,
-    timeoutMs = 5 * 60 * 1000,
+    timeoutMs = DEFAULT_APPROVAL_TIMEOUT_MS,
+    opts?: ApprovalOpts,
   ): Promise<ApprovalResult> {
+    if (opts?.signal?.aborted) {
+      return "cancelled";
+    }
     await this.sendMessage(
       channelId,
       `${prompt}\n\nReply YES to allow once, ALWAYS to always allow, or NO to deny.`,
     );
 
     return new Promise<ApprovalResult>((resolve) => {
-      const timeout = setTimeout(async () => {
-        const pending = this.pendingApprovals.get(channelId);
-        if (!pending || pending.approvalKey !== approvalKey) return;
-        this.pendingApprovals.delete(channelId);
-        resolve("deny");
-        try {
-          await this.sendMessage(channelId, "Permission request expired (auto-denied).");
-        } catch {
-          // Best-effort notification.
+      // Only one text approval can be addressed per sender.
+      this.pendingApprovals.get(channelId)?.resolve("cancelled");
+      const onAbort = () => settle("cancelled");
+      const settle = (result: ApprovalResult) => {
+        clearTimeout(timeout);
+        opts?.signal?.removeEventListener("abort", onAbort);
+        if (this.pendingApprovals.get(channelId)?.approvalKey === approvalKey) {
+          this.pendingApprovals.delete(channelId);
         }
+        if (opts?.allowAlways === false && result === "allow_always") {
+          resolve("cancelled");
+          return;
+        }
+        resolve(result);
+      };
+      const timeout = setTimeout(() => {
+        settle("expired");
+        void this.sendMessage(channelId, "Permission request expired without a decision. No action was taken; this is not a denial.").catch(() => {});
       }, timeoutMs);
-
-      this.pendingApprovals.set(channelId, { approvalKey, resolve, timeout });
+      this.pendingApprovals.set(channelId, { approvalKey, resolve: settle, timeout });
+      opts?.signal?.addEventListener("abort", onAbort, { once: true });
+      if (opts?.signal?.aborted) {
+        onAbort();
+      }
     });
   }
 

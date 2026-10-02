@@ -78,10 +78,12 @@ describe("Bryti session loading", () => {
     if (nativeGoogle) {
       config.google = { users: { owner: { default_account: "personal" } } };
     }
-    const approval = vi.fn().mockResolvedValue("allow_once");
+    const approval = vi.fn().mockResolvedValue("allow");
+    const guidelines = "Read the fixture project status; require approval before publishing its records.";
     userSession = await loadUserSession(config, createCoreMemory(directory), "owner", createGoogleTools(config, "owner"), undefined, "owner", {
       trustStore: createTrustStore(directory),
       context: { config, getLastUserMessage: () => "write a record", onApprovalNeeded: approval,
+        getOperationalGuidelines: () => guidelines,
         evaluateToolCall: async () => ({ verdict: "ASK", reason: "Confirm" }) },
     });
     expect(userSession.extensionErrors).toEqual([]);
@@ -97,7 +99,10 @@ describe("Bryti session loading", () => {
       expect(userSession.session.getToolDefinition("google_calendar_list")?.description).toBe("Legacy Google fixture");
     }
     faux.setResponses([
-      fauxAssistantMessage(fauxToolCall("tool_search", { query: "fixture record" }), { stopReason: "toolUse" }),
+      (context) => {
+        expect(JSON.stringify(context.messages)).toContain(guidelines);
+        return fauxAssistantMessage(fauxToolCall("tool_search", { query: "fixture record" }), { stopReason: "toolUse" });
+      },
       fauxAssistantMessage(fauxToolCall("contract_record", { value: "confirmed" }), { stopReason: "toolUse" }),
       fauxAssistantMessage("Done"),
     ]);

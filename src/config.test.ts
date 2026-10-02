@@ -43,6 +43,29 @@ describe("Config", () => {
     expect(() => loadConfig()).toThrow();
   });
 
+
+  it("loads bounded approval waits and operator-pinned read-only extension tools", () => {
+    const trust = { approval_timeout_ms: 30 * 60 * 1000,
+      read_only_extensions: [{ path: "/srv/extensions/calendar.ts", sha256: "a".repeat(64), tools: ["calendar_read"] }] };
+    fs.writeFileSync(path.join(tempDir, "config.yml"), JSON.stringify({
+      telegram: { token: "test-token" }, models: { providers: [{ name: "openai", api: "openai-responses", models: [] }] }, trust,
+    }));
+    expect(loadConfig().trust).toEqual({ approved_tools: [], ...trust });
+  });
+
+  it.each([
+    { approval_timeout_ms: 0 }, { approval_timeout_ms: 46 * 60 * 1000 }, { approval_timeout_ms: "1800000" },
+    { read_only_extensions: "all" }, { read_only_extensions: [null] },
+    { read_only_extensions: [{ path: "relative.ts", sha256: "a".repeat(64), tools: ["read"] }] },
+    { read_only_extensions: [{ path: "/srv/read.ts", sha256: "not-a-pin", tools: ["read"] }] },
+    { read_only_extensions: [{ path: "/srv/read.ts", sha256: "a".repeat(64), tools: [] }] },
+  ])("rejects unsafe trust configuration %j", (trust) => {
+    fs.writeFileSync(path.join(tempDir, "config.yml"), JSON.stringify({
+      telegram: { token: "test-token" }, models: { providers: [{ name: "openai", api: "openai-responses", models: [] }] }, trust,
+    }));
+    expect(() => loadConfig()).toThrow("trust.");
+  });
+
   it("should load minimal config", () => {
     const configContent = `
 agent:

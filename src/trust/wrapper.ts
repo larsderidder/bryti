@@ -10,17 +10,19 @@ import {
   type ApprovalProvenance,
   type TrustStore,
 } from "./store.js";
+import type { ToolCapabilities } from "./store.js";
 import { evaluateToolCall, type GuardrailInput, type GuardrailResult } from "./guardrail.js";
 import type { Config } from "../config.js";
-import type { ApprovalResult } from "../channels/types.js";
+import type { ApprovalResult, ApprovalOpts } from "../channels/types.js";
 import type { ModelInfra } from "../model-infra.js";
 
-export type ApprovalCallback = (prompt: string, approvalKey: string) => Promise<ApprovalResult>;
+export type ApprovalCallback = (prompt: string, approvalKey: string, opts?: ApprovalOpts) => Promise<ApprovalResult>;
 export type GuardrailEvaluator = (input: GuardrailInput) => Promise<GuardrailResult>;
 
 export interface TrustWrapperContext {
   config: Config;
   getLastUserMessage: () => string | undefined;
+  getOperationalGuidelines?: () => string;
   onApprovalNeeded?: ApprovalCallback;
   modelInfra?: ModelInfra;
   evaluateToolCall?: GuardrailEvaluator;
@@ -105,10 +107,16 @@ function buildApprovalPrompt(
   reason: string,
   params: unknown,
   capsReason?: string,
+  freshApproval = false,
 ): string {
   const description = humanToolDescription(toolName, capsReason);
   const operation = buildOperationSummary(toolName, params);
-  const argsSummary = summarizeToolArgs(params);
+  let argsSummary = summarizeToolArgs(params);
+  let scope = "Approval scope: Allow once runs only this call. Same call for 30 days stores this exact argument set, scoped to the current user, source, platform, channel, topic, and thread when known.";
+  if (freshApproval) {
+    argsSummary = summarizeToolArgs(params, 16_000);
+    scope = "Approval scope: This policy revision only. Every future change requires a new guardrail check and explicit approval.";
+  }
   return [
     `<b>${escapeHtml(heading)}</b>`,
     "",
@@ -116,7 +124,7 @@ function buildApprovalPrompt(
     `Operation: ${escapeHtml(operation)}`,
     `Arguments: ${escapeHtml(argsSummary)}`,
     `Check: ${escapeHtml(reason)}`,
-    "Approval scope: Allow once runs only this call. Always stores this exact argument set for 30 days, scoped to the current user, source, platform, channel, topic, and thread when known.",
+    scope,
   ].join("\n");
 }
 
@@ -129,17 +137,18 @@ async function runGuardrail(
   if (!context?.config) {
     return { verdict: "ASK", reason: "Guardrail unavailable." };
   }
-  const input: GuardrailInput = {
-    toolName: tool.name,
-    args: canonicalizeToolArgs(params),
-    userMessage: context.getLastUserMessage?.(),
-    toolDescription: tool.description,
-  };
   try {
+    const input: GuardrailInput = {
+      toolName: tool.name,
+      args: canonicalizeToolArgs(params),
+      userMessage: context.getLastUserMessage?.(),
+      toolDescription: tool.description,
+      operationalGuidelines: context.getOperationalGuidelines?.(),
+    };
     if (context.evaluateToolCall) {
       return await awaitAbortable(context.evaluateToolCall(input), signal);
     }
-    return await awaitAbortable(evaluateToolCall(context.config, input, context.modelInfra), signal);
+    return await awaitAbortable(evaluateToolCall(context.config, input, context.modelInfra, signal), signal);
   } catch {
     return { verdict: "ASK", reason: "Guardrail unavailable." };
   }
@@ -181,28 +190,33 @@ export function wrapToolWithTrustCheck<T extends AgentTool<any>>(
   trustStore: TrustStore,
   userId: string,
   context?: TrustWrapperContext,
+  capabilities?: ToolCapabilities,
 ): T {
   const originalExecute = tool.execute;
 
   const wrappedExecute: typeof originalExecute = async (toolCallId, params, signal, onUpdate) => {
-    const caps = getToolCapabilities(tool.name);
+    const caps = capabilities ?? getToolCapabilities(tool.name);
+    const freshApproval = caps.requiresFreshApproval || tool.name === "operational_guidelines_update";
 
-    if (caps.level === "safe" || caps.level === "guarded") {
+    if (!freshApproval && (caps.level === "safe" || caps.level === "guarded")) {
       return originalExecute.call(tool, toolCallId, params, signal, onUpdate);
     }
 
     const provenance = buildProvenance(userId, context);
+    if (caps.sourceId) {
+      provenance.toolSource = caps.sourceId;
+    }
     if (signalAborted(signal)) {
       return aborted(tool.name);
     }
-    if (trustStore.consumeInvocationOnce(tool.name, params, provenance)) {
+    if (!freshApproval && trustStore.consumeInvocationOnce(tool.name, params, provenance)) {
       if (signalAborted(signal)) {
         return aborted(tool.name);
       }
       return originalExecute.call(tool, toolCallId, params, signal, onUpdate);
     }
 
-    if (trustStore.isInvocationApproved(tool.name, params, provenance)) {
+    if (!freshApproval && trustStore.isInvocationApproved(tool.name, params, provenance)) {
       if (signalAborted(signal)) {
         return aborted(tool.name);
       }
@@ -222,7 +236,7 @@ export function wrapToolWithTrustCheck<T extends AgentTool<any>>(
     }
 
     const toolAvailable = trustStore.hasToolApproval(tool.name);
-    const needsApproval = !toolAvailable || guardrailResult.verdict === "ASK";
+    const needsApproval = freshApproval || (caps.approvalRequired !== false && !toolAvailable) || guardrailResult.verdict === "ASK";
     if (!needsApproval) {
       trustStore.consumeOnce(tool.name);
     }
@@ -240,6 +254,7 @@ export function wrapToolWithTrustCheck<T extends AgentTool<any>>(
         reason,
         params,
         caps.reason,
+        freshApproval,
       );
 
       if (!context?.onApprovalNeeded) {
@@ -254,7 +269,7 @@ export function wrapToolWithTrustCheck<T extends AgentTool<any>>(
 
       const argsHash = hashToolArgs(params);
       const approvalKey = `trust:${userId}:${tool.name}:${argsHash.slice(0, 16)}:${toolCallId}`;
-      const result = await awaitAbortable(context.onApprovalNeeded(prompt, approvalKey), signal);
+      const result = await awaitAbortable(context.onApprovalNeeded(prompt, approvalKey, { signal, allowAlways: !freshApproval }), signal);
       if (result === ABORTED_PROMISE) {
         return aborted(tool.name);
       }
@@ -264,8 +279,23 @@ export function wrapToolWithTrustCheck<T extends AgentTool<any>>(
       if (result === "deny") {
         return denied(tool.name);
       }
+      if (result === "expired") {
+        return {
+          content: [{ type: "text", text: `Permission request for ${tool.name} expired without a decision. The action was not taken. This is not a user denial. You may consider requesting approval later if the task is still relevant, but do not retry immediately, loop, or bypass approval.` }],
+          details: { approval: "expired", executed: false },
+        };
+      }
+      if ((result !== "allow" && result !== "allow_always") || (freshApproval && result === "allow_always")) {
+        return {
+          content: [{ type: "text", text: `Permission request for ${tool.name} was cancelled. The action was not taken; no user denial was recorded.` }],
+          details: { approval: "cancelled", executed: false },
+        };
+      }
 
-      if (result === "allow_always") {
+      if (freshApproval) {
+        // The policy tool consumes this ephemeral authorization before persisting its audit receipt.
+        trustStore.approveInvocation(tool.name, params, "once", { userId, source: "guidelines" });
+      } else if (result === "allow_always") {
         const expiresAt = nextAlwaysApprovalExpiry();
         if (!toolAvailable) {
           trustStore.approve(tool.name, "always", provenance, expiresAt);

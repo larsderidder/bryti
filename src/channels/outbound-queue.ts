@@ -3,7 +3,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { ensureDeliveryError, safeDeliveryErrorMessage } from "./delivery.js";
 import type { DeliveryError } from "./delivery.js";
-import type { ApprovalResult, ChannelBridge, IncomingMessage, Platform, SendOpts } from "./types.js";
+import type { ApprovalOpts, ApprovalResult, ChannelBridge, IncomingMessage, Platform, SendOpts } from "./types.js";
 import { writeJsonAtomic } from "../durable-file.js";
 
 type OutboundState = "pending" | "sending" | "delivered" | "failed" | "unknown";
@@ -297,7 +297,7 @@ export class DurableOutboundBridge implements ChannelBridge {
     prompt: string,
     approvalKey: string,
     timeoutMs?: number,
-    opts?: SendOpts,
+    opts?: ApprovalOpts,
   ): Promise<ApprovalResult> {
     return this.inner.sendApprovalRequest(channelId, prompt, approvalKey, timeoutMs, opts);
   }

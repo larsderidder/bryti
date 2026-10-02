@@ -175,10 +175,9 @@ You can steer a running worker mid-task to narrow its focus or redirect its rese
 
 ### Guardrail
 
-Elevated tools (shell commands, HTTP requests, extension-loaded tools) go through two checks:
+Elevated tools use a guardrail to evaluate the call's arguments against the last user message and approved operational guidelines. Provider or authentication failures try `agent.guardrail_model`, the primary model, then fallback models within a shared timeout; a safety verdict ends evaluation. If every model is unavailable, the call requires explicit approval.
 
-1. **Tool-level approval**: is this tool allowed at all? First use requires your permission via inline buttons or text.
-2. **Call-level evaluation**: an LLM call evaluates the specific arguments against what you asked for, and decides whether to escalate. Like a call-based sudo. The prompt is small (~300 tokens in, ~20 out), so it uses the primary model for reliability without meaningful cost impact.
+First use also requires tool approval, except for read-only extension tools reviewed and pinned by the operator through `trust.read_only_extensions`. These bindings include the source path, SHA-256 and specific tool names; source changes remove the read-only classification and invalidate exact-call grants for the old implementation. Server-provided read-only hints do not grant permissions, and a source pin does not sandbox an extension or verify its dependencies.
 
 Pre-approve tools in config to skip the first-use prompt:
 
@@ -188,6 +187,10 @@ trust:
     - shell_exec
     - http_request
 ```
+
+Approval requests wait 30 minutes by default, configurable through `trust.approval_timeout_ms` with a 45-minute maximum. Waiting for a human pauses model and tool inactivity deadlines, while the overall turn limit remains one hour. Expiry means no decision arrived and no action ran; Bryti may consider asking later without immediately retrying or bypassing approval. An explicit denial stops the action. Pending requests are cancelled on abort or shutdown and are not restored after a restart.
+
+The "Same call for 30 days" button stores exact arguments and conversation scope, including an automation occurrence when present. Operational guidelines are per-user: `operational_guidelines_read` returns their current content and revision, and `operational_guidelines_update` proposes a replacement. Each update gets a fresh guardrail check against the existing policy and explicit approval; saved grants cannot approve subsequent policy changes. Guidelines enter the main session's prompt and guardrail checks. The stored revision must match its latest approval receipt, so editing, deleting or replaying the guideline file cannot silently replace approved policy. This uses Bryti's existing trusted state boundary; unrestricted shell access is not a filesystem sandbox.
 
 ### Self-extending
 

@@ -276,10 +276,18 @@ export async function loadUserSession(
           const prompt = buildSystemPromptSections(config, coreMemory.read(), promptTools, extensionToolNames,
             projectionText, { isNewUser: isNewUser && !hasPreviousAnswer });
           event.systemPromptOptions.customPrompt = prompt.instructions;
-          for (const key of ["bryti_tools", "bryti_memory", "bryti_projections", "bryti_datetime"]) {
+          for (const key of ["bryti_tools", "bryti_memory", "bryti_projections", "bryti_datetime", "bryti_operational_guidelines"]) {
             delete event.systemPromptOptions.sections[key];
           }
           Object.assign(event.systemPromptOptions.sections, prompt.sections);
+          try {
+            const guidelines = extensionTrust?.context?.getOperationalGuidelines?.();
+            if (guidelines) {
+              event.systemPromptOptions.sections.bryti_operational_guidelines = guidelines;
+            }
+          } catch {
+            event.systemPromptOptions.sections.bryti_operational_guidelines = "Operational guidelines are unavailable. Do not assume standing authorization; request explicit approval for elevated actions.";
+          }
         });
       } },
       { name: "bryti-provider-diagnostics", factory: createProviderDiagnosticsExtension(diagnostics) },
@@ -302,7 +310,7 @@ export async function loadUserSession(
           if (trustedCodemodeDefinitions.has(registered.definition) || trustedSessionDefinitions.has(registered.definition)) {
             continue;
           }
-          const definition = toolPolicy.protect(registered.definition);
+          const definition = toolPolicy.protect(registered.definition, extension.path);
           extension.tools.set(name, { ...registered, definition });
           if (definition.exposure !== "hidden") {
             extensionToolNames.add(name);

@@ -67,9 +67,9 @@ agent:
   # Model for the background reflection pass (defaults to primary model)
   # reflection_model: "opencode/mimo-v2.6-flash-free"
 
-  # Model for the LLM guardrail (defaults to primary model).
+  # Preferred guardrail model, followed by the primary and fallback models on provider/auth failures.
   # The guardrail only classifies tool calls (ALLOW/ASK/BLOCK), so a small
-  # cheap model works well here — lower latency and lower cost per call.
+  # cheap model works well here, with lower latency and cost per call.
   # guardrail_model: "anthropic/claude-haiku-4-5"
 
 # Optional append-only cleanup of older successful application-owned read results.
@@ -353,6 +353,15 @@ tools:
 
 # trust:
 #   approved_tools: [shell_exec, http_request]
+#   # Human response time does not count as model/tool inactivity. Range: 1000 to 2700000.
+#   approval_timeout_ms: 1800000
+#   # Operator-only classification, after reviewing the implementation and its dependencies.
+#   # Pin with sha256sum; changing the source disables its read-only classification.
+#   # MCP/server readOnlyHint annotations cannot grant this permission.
+#   read_only_extensions:
+#     - path: /srv/bryti/data/files/extensions/calendar.ts
+#       sha256: REPLACE_WITH_REVIEWED_FILE_SHA256
+#       tools: [google_calendar_list, google_calendar_events, google_calendar_today]
 
 # active_hours:
 #   start: "08:00"

@@ -476,6 +476,52 @@ describe("wrapToolWithTrustCheck", () => {
     expect(store.hasToolApproval("test_unresolved_approval_abort")).toBe(false);
     expect(store.isInvocationApproved("test_unresolved_approval_abort", args, { userId: "user1", source: "agent" })).toBe(false);
   });
+
+
+  it("reports expiry without claiming that the user denied permission or executing the call", async () => {
+    registerToolCapabilities("test_expired", { level: "elevated" });
+    const calls: string[] = [];
+    const store = createTrustStore(tmpDir);
+    const wrapped = wrapToolWithTrustCheck(makeCountingTool("test_expired", calls), store, "user1", {
+      config: makeConfig(), getLastUserMessage: () => "run tests",
+      evaluateToolCall: async () => ({ verdict: "ASK", reason: "confirm" }),
+      onApprovalNeeded: async () => "expired",
+    });
+    const result = await wrapped.execute("call", {});
+    expect(result.content[0].text).toContain("expired");
+    expect(result.content[0].text).not.toContain("User denied");
+    expect(result.content[0].text).toContain("later");
+    expect(calls).toEqual([]);
+    expect(store.listApproved()).toEqual([]);
+  });
+
+  it("does not execute a cancelled or unknown approval response", async () => {
+    registerToolCapabilities("test_cancelled", { level: "elevated" });
+    const calls: string[] = [];
+    const wrapped = wrapToolWithTrustCheck(makeCountingTool("test_cancelled", calls), createTrustStore(tmpDir), "user1", {
+      config: makeConfig(), getLastUserMessage: () => "run tests",
+      evaluateToolCall: async () => ({ verdict: "ASK", reason: "confirm" }),
+      onApprovalNeeded: async () => "cancelled",
+    });
+    const result = await wrapped.execute("call", {});
+    expect(result.content[0].text).toContain("cancelled");
+    expect(calls).toEqual([]);
+  });
+
+
+  it.each([undefined, "original-source"])("does not reuse an exact grant after the extension implementation changes: %s", async (originalSource) => {
+    registerToolCapabilities("test_changed_source", { level: "elevated" });
+    const calls: string[] = [];
+    const store = createTrustStore(tmpDir);
+    store.approveInvocation("test_changed_source", {}, "always", { userId: "user1", source: "agent", toolSource: originalSource });
+    const evaluate = vi.fn(async () => ({ verdict: "BLOCK" as const, reason: "changed implementation" }));
+    const wrapped = wrapToolWithTrustCheck(makeCountingTool("test_changed_source", calls), store, "user1", {
+      config: makeConfig(), getLastUserMessage: () => "read integration", evaluateToolCall: evaluate,
+    }, { level: "elevated", sourceId: "changed-source" });
+    await wrapped.execute("call", {});
+    expect(evaluate).toHaveBeenCalledOnce();
+    expect(calls).toEqual([]);
+  });
 });
 
 describe("wrapToolsWithTrustChecks", () => {

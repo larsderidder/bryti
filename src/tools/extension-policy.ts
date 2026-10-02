@@ -3,6 +3,10 @@ import type { ExtensionFactory, ToolDefinition } from "@earendil-works/pi-coding
 import { registerToolCapabilities, type TrustStore } from "../trust/store.js";
 import { wrapToolWithTrustCheck, type TrustWrapperContext } from "../trust/wrapper.js";
 import { validateToolSchema } from "./schema-validation.js";
+import fs from "node:fs";
+import path from "node:path";
+import crypto from "node:crypto";
+import type { ToolCapabilities } from "../trust/store.js";
 
 export interface ExtensionTrustContext {
   trustStore?: TrustStore;
@@ -15,7 +19,7 @@ export function createExtensionToolPolicy(options: ExtensionTrustContext) {
   const protectedDefinitions = new WeakSet<object>();
   const quarantinedNames = new Set<string>();
 
-  const protect = <T extends ToolDefinition<any, any, any>>(definition: T): T => {
+  const protect = <T extends ToolDefinition<any, any, any>>(definition: T, sourcePath?: string): T => {
     if (protectedDefinitions.has(definition)) {
       return definition;
     }
@@ -39,6 +43,25 @@ export function createExtensionToolPolicy(options: ExtensionTrustContext) {
       level: "elevated", capabilities: ["network", "filesystem", "shell"],
       reason: "Extension tool with unrestricted access.",
     });
+    const binding = options.context?.config.trust?.read_only_extensions?.find((entry) =>
+      sourcePath && path.isAbsolute(sourcePath) && path.resolve(entry.path) === path.resolve(sourcePath)
+      && entry.tools.includes(definition.name));
+    const sourceDigest = (): string | undefined => {
+      if (!sourcePath || !path.isAbsolute(sourcePath)) {
+        return undefined;
+      }
+      try {
+        const stat = fs.statSync(sourcePath);
+        if (!stat.isFile() || stat.size > 1_000_000) {
+          return undefined;
+        }
+        return crypto.createHash("sha256").update(fs.readFileSync(sourcePath)).digest("hex");
+      } catch {
+        return undefined;
+      }
+    };
+    const registrationDigest = sourceDigest();
+    const reviewedAtRegistration = Boolean(binding && registrationDigest === binding.sha256);
     const protectedDefinition: T = {
       ...definition,
       exposure,
@@ -53,7 +76,18 @@ export function createExtensionToolPolicy(options: ExtensionTrustContext) {
           ...definition,
           execute: (id, params, abortSignal, update) => definition.execute(id, params, abortSignal, update, context),
         };
-        return wrapToolWithTrustCheck(executable, options.trustStore, options.userId, options.context)
+        const digest = sourceDigest();
+        const sourceId = `${sourcePath ?? "<runtime>"}:${registrationDigest ?? "unverified"}:${digest ?? "unverified"}`;
+        let capabilities: ToolCapabilities = {
+          level: "elevated", capabilities: ["network", "filesystem", "shell"],
+          reason: "Extension tool with unrestricted access.",
+          sourceId,
+        };
+        if (reviewedAtRegistration && digest === binding?.sha256) {
+          capabilities = { level: "elevated", capabilities: ["network"], approvalRequired: false,
+            sourceId, reason: "Operator-reviewed read-only integration. Guardrail evaluation still applies." };
+        }
+        return wrapToolWithTrustCheck(executable, options.trustStore, options.userId, options.context, capabilities)
           .execute(callId, args, signal, onUpdate);
       },
     };

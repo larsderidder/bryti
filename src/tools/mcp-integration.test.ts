@@ -38,7 +38,7 @@ describe("native MCP session contracts", () => {
     fs.rmSync(directory, { recursive: true, force: true });
   });
 
-  async function setup(approval = vi.fn().mockResolvedValue("allow_once"),
+  async function setup(approval = vi.fn().mockResolvedValue("allow"),
     manager = SessionManager.inMemory(directory), additional: ExtensionFactory[] = []) {
     const agentDirectory = path.join(directory, "agent");
     const userDirectory = path.join(directory, "users", "owner");
@@ -164,7 +164,7 @@ describe("native MCP session contracts", () => {
     expect(approval).toHaveBeenCalledOnce();
     expect(outcome?.result.content[0]).toMatchObject({ text: expect.stringContaining("denied permission") });
     expect(outcome?.result.structuredContent).toBeUndefined();
-    approval.mockResolvedValue("allow_once");
+    approval.mockResolvedValue("allow");
     faux.setResponses([
       fauxAssistantMessage(fauxToolCall("nested_write", {}), { stopReason: "toolUse" }),
       fauxAssistantMessage("Allowed"),

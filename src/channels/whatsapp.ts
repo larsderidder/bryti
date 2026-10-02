@@ -19,7 +19,7 @@ import type { ILogger } from "@whiskeysockets/baileys/lib/Utils/logger.js";
 import { Boom } from "@hapi/boom";
 import qrcode from "qrcode-terminal";
 import { deliveryNotSent, deliveryUnknown, isDeliveryError } from "./delivery.js";
-import type { ApprovalResult, ChannelBridge, IncomingMessage, SendOpts } from "./types.js";
+import { DEFAULT_APPROVAL_TIMEOUT_MS, type ApprovalOpts, type ApprovalResult, type ChannelBridge, type IncomingMessage, type SendOpts } from "./types.js";
 import { withTimeout } from "../util/timeout.js";
 
 type MessageHandler = (msg: IncomingMessage) => Promise<void>;
@@ -241,6 +241,11 @@ export class WhatsAppBridge implements ChannelBridge {
 
   async stop(): Promise<void> {
     this.shouldReconnect = false;
+    for (const pending of this.pendingApprovals.values()) {
+      pending.resolve("cancelled");
+    }
+    this.pendingApprovals.clear();
+    this.approvalByMessageId.clear();
     if (this.socket) {
       this.socket.end(undefined);
       this.socket = null;
@@ -304,8 +309,12 @@ export class WhatsAppBridge implements ChannelBridge {
     channelId: string,
     prompt: string,
     approvalKey: string,
-    timeoutMs = 5 * 60 * 1000,
+    timeoutMs = DEFAULT_APPROVAL_TIMEOUT_MS,
+    opts?: ApprovalOpts,
   ): Promise<ApprovalResult> {
+    if (opts?.signal?.aborted) {
+      return "cancelled";
+    }
     // WhatsApp has no inline buttons for non-Business accounts.
     // Fall back to text instructions; parse the next message from this user.
     const messageId = await this.sendMessage(
@@ -314,22 +323,30 @@ export class WhatsAppBridge implements ChannelBridge {
     );
 
     return new Promise<ApprovalResult>((resolve) => {
-      this.pendingApprovals.set(approvalKey, { resolve, messageId });
-      if (messageId) this.approvalByMessageId.set(messageId, approvalKey);
-
-      setTimeout(async () => {
-        if (this.pendingApprovals.has(approvalKey)) {
-          const pending = this.pendingApprovals.get(approvalKey);
-          this.pendingApprovals.delete(approvalKey);
-          if (pending?.messageId) this.approvalByMessageId.delete(pending.messageId);
-          resolve("deny");
-          try {
-            await this.sendMessage(channelId, "Permission request expired (auto-denied).");
-          } catch {
-            // Best-effort notification
-          }
+      const onAbort = () => settle("cancelled");
+      const settle = (result: ApprovalResult) => {
+        clearTimeout(timer);
+        opts?.signal?.removeEventListener("abort", onAbort);
+        this.pendingApprovals.delete(approvalKey);
+        this.approvalByMessageId.delete(messageId);
+        if (opts?.allowAlways === false && result === "allow_always") {
+          resolve("cancelled");
+          return;
         }
+        resolve(result);
+      };
+      const timer = setTimeout(() => {
+        settle("expired");
+        void this.sendMessage(channelId, "Permission request expired without a decision. No action was taken; this is not a denial.").catch(() => {});
       }, timeoutMs);
+      this.pendingApprovals.set(approvalKey, { resolve: settle, messageId });
+      if (messageId) {
+        this.approvalByMessageId.set(messageId, approvalKey);
+      }
+      opts?.signal?.addEventListener("abort", onAbort, { once: true });
+      if (opts?.signal?.aborted) {
+        onAbort();
+      }
     });
   }
 

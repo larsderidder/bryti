@@ -92,7 +92,7 @@ export default (pi) => {
     telegram: { allowed_users: [] }, whatsapp: { enabled: false }, integrations: {}, cron: [],
     trust: { approved_tools: [] },
   } as unknown as Config;
-  const approval = vi.fn().mockResolvedValue("allow_once");
+  const approval = vi.fn().mockResolvedValue("allow");
   const evaluate = vi.fn<(input: GuardrailInput) => Promise<GuardrailResult>>().mockResolvedValue({ verdict: "ASK", reason: "Confirm records" });
   const store = createTrustStore(directory);
   const load = async (sessionKey = userId) => {

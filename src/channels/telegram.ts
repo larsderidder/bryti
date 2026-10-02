@@ -20,7 +20,7 @@ import path from "node:path";
 import { Bot, InlineKeyboard, InputFile, type Context } from "grammy";
 import { AbortController as TelegramAbortController } from "abort-controller";
 import { deliveryNotSent, deliveryUnknown, isDeliveryError } from "./delivery.js";
-import type { ApprovalResult, AudioAttachment, ChannelBridge, IncomingMessage, SendOpts } from "./types.js";
+import { DEFAULT_APPROVAL_TIMEOUT_MS, type ApprovalOpts, type ApprovalResult, type AudioAttachment, type ChannelBridge, type IncomingMessage, type SendOpts } from "./types.js";
 import { markdownToIR, chunkMarkdownIR, type MarkdownLinkSpan } from "./markdown/ir.js";
 import { renderMarkdownWithMarkers } from "./markdown/render.js";
 import {
@@ -367,6 +367,7 @@ export class TelegramBridge implements ChannelBridge {
   /** Approval identity is bound to the requester and the exact message. */
   private pendingApprovals = new Map<string, {
     userId: string; channelId: string; channelThreadId?: string; messageId: number;
+    allowAlways?: boolean;
     resolve: (result: ApprovalResult) => void;
   }>();
   /** Media group buffer: media_group_id → accumulated entry */
@@ -626,6 +627,10 @@ export class TelegramBridge implements ChannelBridge {
 
       const pending = this.pendingApprovals.get(key);
       if (pending) {
+        if (resultStr === "allow_always" && pending.allowAlways === false) {
+          await ctx.answerCallbackQuery({ text: "This change requires approval for each update", show_alert: true });
+          return;
+        }
         const message = ctx.callbackQuery.message;
         let channelThreadId: string | undefined;
         if (message && "message_thread_id" in message && message.message_thread_id !== undefined) {
@@ -639,18 +644,23 @@ export class TelegramBridge implements ChannelBridge {
         this.pendingApprovals.delete(key);
         pending.resolve(resultStr);
         // Edit the message to remove the buttons and show the result
-        const label = resultStr === "allow" ? "✓ Allowed once"
-          : resultStr === "allow_always" ? "✓ Always allowed"
-          : "✗ Denied";
+        let label = "✗ Denied";
+        if (resultStr === "allow") {
+          label = "✓ Allowed once";
+        } else if (resultStr === "allow_always") {
+          label = "✓ Same call allowed for 30 days";
+        }
         try {
           await ctx.editMessageReplyMarkup({ reply_markup: undefined });
           await ctx.editMessageText(
-            (ctx.callbackQuery.message?.text ?? "") + `\n\n<i>${label}</i>`,
-            { parse_mode: "HTML" },
+            (ctx.callbackQuery.message?.text ?? "") + `\n\n${label}`,
           );
         } catch {
           // Message may have been deleted or too old — ignore
         }
+      } else {
+        await ctx.answerCallbackQuery({ text: "This approval request is no longer active. Ask for a new request if the task is still relevant.", show_alert: true });
+        return;
       }
 
       await ctx.answerCallbackQuery();
@@ -702,7 +712,7 @@ export class TelegramBridge implements ChannelBridge {
     this.mediaGroupBuffer.clear();
 
     for (const pending of this.pendingApprovals.values()) {
-      pending.resolve("deny");
+      pending.resolve("cancelled");
     }
     this.pendingApprovals.clear();
 
@@ -893,10 +903,13 @@ export class TelegramBridge implements ChannelBridge {
     channelId: string,
     prompt: string,
     approvalKey: string,
-    timeoutMs = 5 * 60 * 1000,
-    opts?: SendOpts,
+    timeoutMs = DEFAULT_APPROVAL_TIMEOUT_MS,
+    opts?: ApprovalOpts,
   ): Promise<ApprovalResult> {
     const bot = await this.requireBot();
+    if (opts?.signal?.aborted) {
+      return "cancelled";
+    }
     let userId = opts?.approverUserId;
     if (!userId && /^\d+$/.test(channelId)) {
       userId = channelId;
@@ -909,15 +922,33 @@ export class TelegramBridge implements ChannelBridge {
     // as the callback key and map it back to the full approvalKey internally.
     const shortKey = crypto.createHash("sha256").update(approvalKey).digest("hex").slice(0, 12);
 
-    const keyboard = new InlineKeyboard()
-      .text("✓ Allow once", `a:${shortKey}:allow`)
-      .text("✓ Always allow", `a:${shortKey}:always`)
-      .row()
-      .text("✗ Deny", `a:${shortKey}:deny`);
+    const keyboard = new InlineKeyboard().text("✓ Allow once", `a:${shortKey}:allow`);
+    if (opts?.allowAlways !== false) {
+      keyboard.text("✓ Same call for 30 days", `a:${shortKey}:always`);
+    }
+    keyboard.row().text("✗ Deny", `a:${shortKey}:deny`);
+
+    let fragments = [prompt];
+    if (prompt.length > 3500) {
+      // Our approval formatter uses these tags and entities; preserve all argument text.
+      const plain = prompt.replace(/<\/?(?:b|i|code|pre)>/g, "")
+        .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+      fragments = chunkMessage(plain, 3500).map((fragment) => fragment
+        .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"));
+    }
+    const finalPrompt = fragments.pop() ?? prompt;
+    for (const fragment of fragments) {
+      if (opts?.signal?.aborted) {
+        return "cancelled";
+      }
+      await withRetry(() => withTimeout(bot.api.sendMessage(parseInt(channelId, 10), fragment,
+        { parse_mode: "HTML", ...this.telegramThreadOptions(opts) }),
+      TELEGRAM_API_TIMEOUT_MS, "Telegram approval details"));
+    }
 
     const sent = await withRetry(() =>
       withTimeout(
-        bot.api.sendMessage(parseInt(channelId, 10), prompt, {
+        bot.api.sendMessage(parseInt(channelId, 10), finalPrompt, {
           parse_mode: "HTML",
           reply_markup: keyboard,
           ...this.telegramThreadOptions(opts),
@@ -928,34 +959,31 @@ export class TelegramBridge implements ChannelBridge {
     );
 
     return new Promise<ApprovalResult>((resolve) => {
+      const onAbort = () => pending.resolve("cancelled");
       const pending = {
         userId, channelId, channelThreadId: opts?.channelThreadId, messageId: sent.message_id,
-        resolve: (result: ApprovalResult) => { clearTimeout(timer); resolve(result); },
-      };
-      this.pendingApprovals.set(shortKey, pending);
-
-      // Auto-deny on timeout and notify the user
-      const timer = setTimeout(async () => {
-        if (this.pendingApprovals.get(shortKey) === pending) {
-          this.pendingApprovals.delete(shortKey);
-          pending.resolve("deny");
-          try {
-            await withRetry(() =>
-              withTimeout(
-                this.bot!.api.sendMessage(
-                  parseInt(channelId, 10),
-                  "⏱ Permission request expired (auto-denied).",
-                  this.telegramThreadOptions(opts),
-                ),
-                TELEGRAM_API_TIMEOUT_MS,
-                "Telegram approval timeout sendMessage",
-              ),
-            );
-          } catch {
-            // Best-effort notification
+        allowAlways: opts?.allowAlways !== false,
+        resolve: (result: ApprovalResult) => {
+          clearTimeout(timer);
+          opts?.signal?.removeEventListener("abort", onAbort);
+          if (this.pendingApprovals.get(shortKey) === pending) {
+            this.pendingApprovals.delete(shortKey);
           }
-        }
-      }, timeoutMs);
+          resolve(result);
+          if (result === "expired" || result === "cancelled") {
+            const label = "Permission request " + result + ". No action was taken; no denial was recorded.";
+            void withTimeout(bot.api.editMessageText(parseInt(channelId, 10), sent.message_id,
+              `${finalPrompt}\n\n<i>${label}</i>`, { parse_mode: "HTML", reply_markup: { inline_keyboard: [] } }),
+            TELEGRAM_API_TIMEOUT_MS, "Telegram approval settlement").catch(() => {});
+          }
+        },
+      };
+      const timer = setTimeout(() => pending.resolve("expired"), timeoutMs);
+      this.pendingApprovals.set(shortKey, pending);
+      opts?.signal?.addEventListener("abort", onAbort, { once: true });
+      if (opts?.signal?.aborted) {
+        onAbort();
+      }
     });
   }
 

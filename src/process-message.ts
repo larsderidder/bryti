@@ -65,12 +65,14 @@ import {
   PROMPT_INACTIVITY_TIMEOUT_MS,
   runPromptWithActivityWatchdog,
   describePromptTimeout,
+  type PromptActivity,
 } from "./prompt-lifecycle.js";
 import { acquireSessionTurn } from "./compaction/proactive.js";
 import type { WorkStore } from "./work/store.js";
 import { isDeliveryError } from "./channels/delivery.js";
 import { isCurrentProjectionWork, OBSOLETE_PROJECTION_WORK } from "./projection/occurrence.js";
 import { commandRecoveryNotice, isCommandContinuationCurrent } from "./work/commands.js";
+import { createOperationalGuidelines } from "./trust/guidelines.js";
 import { extractPdfAttachment } from "./documents/pdf.js";
 
 /** Recheck after session loading too: cancellation can happen in another thread. */
@@ -134,6 +136,8 @@ export interface AppState {
   workStore?: WorkStore;
   workerLifecycle?: WorkerLifecycle;
   deliveryTargets?: Map<string, IncomingMessage>;
+  /** Application-owned approval events, separate from model and extension activity. */
+  approvalListeners?: Map<string, (event: PromptActivity) => void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -482,8 +486,11 @@ export async function getOrLoadSession(
     () => state.deliveryTargets?.get(sessionKey) ?? msg,
     state.workerLifecycle,
   );
+  const operationalGuidelines = createOperationalGuidelines(state.config.data_dir, userId, state.trustStore);
+  tools.push(...operationalGuidelines.tools);
 
   const trustContext: TrustWrapperContext = {
+    getOperationalGuidelines: () => operationalGuidelines.read().content,
     config: state.config,
     modelInfra,
     get source() {
@@ -503,11 +510,18 @@ export async function getOrLoadSession(
       return source;
     },
     getLastUserMessage: () => state.lastUserMessages.get(sessionKey),
-    onApprovalNeeded: async (prompt, approvalKey) => {
+    onApprovalNeeded: async (prompt, approvalKey, opts) => {
       const target = state.deliveryTargets?.get(sessionKey) ?? msg;
       const bridge = getBridge(state, target.platform);
-      return bridge.sendApprovalRequest(target.channelId, prompt, approvalKey, undefined,
-        { channelThreadId: target.channelThreadId, approverUserId: target.userId });
+      const listener = state.approvalListeners?.get(sessionKey);
+      listener?.({ type: "approval_wait_start", toolCallId: approvalKey });
+      try {
+        return await bridge.sendApprovalRequest(target.channelId, prompt, approvalKey,
+          state.config.trust.approval_timeout_ms,
+          { ...opts, channelThreadId: target.channelThreadId, approverUserId: target.userId });
+      } finally {
+        listener?.({ type: "approval_wait_end", toolCallId: approvalKey });
+      }
     },
   };
   const wrappedTools = wrapToolsWithTrustChecks(
@@ -809,7 +823,15 @@ export async function processMessage(
     usageWindow = { session, entryOffset: session.sessionManager?.getEntries().length, startedAt: promptStart };
     const promptResult = await runPromptWithActivityWatchdog({
       sessionKey,
-      subscribe: (listener) => session.subscribe(listener),
+      subscribe: (listener) => {
+        state.approvalListeners ??= new Map();
+        state.approvalListeners.set(sessionKey, listener);
+        const unsubscribe = session.subscribe(listener);
+        return () => {
+          unsubscribe();
+          state.approvalListeners?.delete(sessionKey);
+        };
+      },
       abort: () => session.abort(),
       operation: (controls) => promptWithFallback(
         session,

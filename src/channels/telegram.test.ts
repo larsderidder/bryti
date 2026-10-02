@@ -733,4 +733,46 @@ describe("approval ownership", () => {
       await bridge.stop();
     }
   });
+
+
+  it("keeps approvals available beyond five minutes and distinguishes expiry", async () => {
+    const bridge = new TelegramBridge("test-token", [123]);
+    await bridge.start();
+    const settled = vi.fn();
+    const pending = bridge.sendApprovalRequest("123", "Confirm", "expiry").then(settled);
+    await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+    expect(settled).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(25 * 60 * 1000);
+    await pending;
+    expect(settled).toHaveBeenCalledWith("expired");
+    expect(grammyMocks.MockBot.instances[0].api.editMessageText).toHaveBeenCalledWith(
+      123, 101, expect.stringContaining("expired"), expect.objectContaining({ reply_markup: { inline_keyboard: [] } }),
+    );
+    await bridge.stop();
+  });
+
+  it("cancels approval waits on shutdown instead of reporting denial", async () => {
+    const bridge = new TelegramBridge("test-token", [123]);
+    await bridge.start();
+    const pending = bridge.sendApprovalRequest("123", "Confirm", "shutdown");
+    await vi.advanceTimersByTimeAsync(0);
+    await bridge.stop();
+    await expect(pending).resolves.toBe("cancelled");
+  });
+
+
+  it("shows a full long policy proposal before attaching approval buttons", async () => {
+    const bridge = new TelegramBridge("test-token", [123]);
+    await bridge.start();
+    const marker = "END OF PROPOSED POLICY";
+    const pending = bridge.sendApprovalRequest("123", `<b>Policy proposal</b>\n${"policy details ".repeat(700)}${marker}`, "long-policy");
+    await vi.advanceTimersByTimeAsync(0);
+    const calls = grammyMocks.MockBot.instances[0].api.sendMessage.mock.calls as unknown as Array<[number, string, { reply_markup?: unknown }]>;
+    expect(calls.length).toBeGreaterThan(1);
+    expect(calls.at(-1)?.[1]).toContain(marker);
+    expect(calls.slice(0, -1).every((call) => !call[2].reply_markup)).toBe(true);
+    expect(calls.at(-1)?.[2].reply_markup).toBeDefined();
+    await bridge.stop();
+    await expect(pending).resolves.toBe("cancelled");
+  });
 });

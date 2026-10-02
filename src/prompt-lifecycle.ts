@@ -47,7 +47,9 @@ export async function runPromptWithActivityWatchdog<T>(
   const startedAt = Date.now();
   const hardDeadline = startedAt + maxDurationMs;
   let lastActivityAt = startedAt;
-  const tools = new Map<string, { name: string; deadline: number }>();
+  const tools = new Map<string, { name: string; startedAt: number; deadline: number }>();
+  const approvalWaits = new Set<string>();
+  let approvalStartedAt: number | undefined;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let settled = false;
   let timedOut = false;
@@ -77,7 +79,9 @@ export async function runPromptWithActivityWatchdog<T>(
     let deadline = hardDeadline;
     let reason: PromptTimeout["reason"] = "prompt_deadline";
     let toolName: string | undefined;
-    if (tools.size > 0) {
+    if (approvalWaits.size > 0) {
+      // Human response time is not a hung model or tool. The hard turn limit remains.
+    } else if (tools.size > 0) {
       for (const tool of tools.values()) {
         if (tool.deadline < deadline) {
           deadline = tool.deadline;
@@ -111,6 +115,19 @@ export async function runPromptWithActivityWatchdog<T>(
       return;
     }
     lastActivityAt = Date.now();
+    if (event?.type === "approval_wait_start" && event.toolCallId) {
+      if (approvalWaits.size === 0) {
+        approvalStartedAt = Date.now();
+      }
+      approvalWaits.add(event.toolCallId);
+    } else if (event?.type === "approval_wait_end" && event.toolCallId && approvalWaits.delete(event.toolCallId)) {
+      if (approvalWaits.size === 0 && approvalStartedAt !== undefined) {
+        for (const tool of tools.values()) {
+          tool.deadline += Date.now() - Math.max(approvalStartedAt, tool.startedAt);
+        }
+        approvalStartedAt = undefined;
+      }
+    }
     if (event?.type === "tool_execution_start" && event.toolCallId && !tools.has(event.toolCallId)) {
       let durationMs = timeoutMs;
       // Only bash's timeout is a known execution contract, not an arbitrary tool argument.
@@ -120,7 +137,7 @@ export async function runPromptWithActivityWatchdog<T>(
           durationMs = Math.min(seconds * 1000, maxDurationMs) + toolGraceMs;
         }
       }
-      tools.set(event.toolCallId, { name: event.toolName ?? "unknown", deadline: Date.now() + durationMs });
+      tools.set(event.toolCallId, { name: event.toolName ?? "unknown", startedAt: Date.now(), deadline: Date.now() + durationMs });
     } else if (event?.type === "tool_execution_end" && event.toolCallId) {
       tools.delete(event.toolCallId);
     }

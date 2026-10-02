@@ -194,4 +194,58 @@ describe("runPromptWithActivityWatchdog", () => {
     await vi.advanceTimersByTimeAsync(1000);
     await expect(result).resolves.toMatchObject({ status: "timeout", reason: "tool_deadline" });
   });
+
+
+  it("pauses tool deadlines during overlapping human approval waits", async () => {
+    vi.useFakeTimers();
+    let activity: (event?: { type: string; toolCallId?: string; toolName?: string }) => void = () => {};
+    const result = runPromptWithActivityWatchdog({
+      sessionKey: "u1", timeoutMs: 1000, maxDurationMs: 10_000,
+      subscribe(listener) { activity = listener; return () => {}; },
+      abort: vi.fn().mockResolvedValue(undefined), operation: () => new Promise(() => {}),
+    });
+    activity({ type: "tool_execution_start", toolCallId: "outer", toolName: "codemode" });
+    await vi.advanceTimersByTimeAsync(400);
+    activity({ type: "approval_wait_start", toolCallId: "a" });
+    activity({ type: "approval_wait_start", toolCallId: "b" });
+    await vi.advanceTimersByTimeAsync(2000);
+    activity({ type: "approval_wait_end", toolCallId: "a" });
+    await vi.advanceTimersByTimeAsync(2000);
+    activity({ type: "approval_wait_end", toolCallId: "b" });
+    await vi.advanceTimersByTimeAsync(599);
+    expect(vi.getTimerCount()).toBeGreaterThan(0);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(result).resolves.toMatchObject({ reason: "tool_deadline", elapsedMs: 5000 });
+  });
+
+  it("still bounds the whole prompt while approval is pending", async () => {
+    vi.useFakeTimers();
+    let activity: (event?: { type: string; toolCallId?: string }) => void = () => {};
+    const result = runPromptWithActivityWatchdog({
+      sessionKey: "u1", timeoutMs: 1000, maxDurationMs: 2500,
+      subscribe(listener) { activity = listener; return () => {}; },
+      abort: vi.fn().mockResolvedValue(undefined), operation: () => new Promise(() => {}),
+    });
+    activity({ type: "approval_wait_start", toolCallId: "a" });
+    await vi.advanceTimersByTimeAsync(2500);
+    await expect(result).resolves.toMatchObject({ reason: "prompt_deadline" });
+  });
+
+
+  it("only credits the overlapping wait time to tools started during approval", async () => {
+    vi.useFakeTimers();
+    let activity: (event?: { type: string; toolCallId?: string; toolName?: string }) => void = () => {};
+    const result = runPromptWithActivityWatchdog({
+      sessionKey: "u1", timeoutMs: 1000, maxDurationMs: 10_000,
+      subscribe(listener) { activity = listener; return () => {}; },
+      abort: vi.fn().mockResolvedValue(undefined), operation: () => new Promise(() => {}),
+    });
+    activity({ type: "approval_wait_start", toolCallId: "a" });
+    await vi.advanceTimersByTimeAsync(2000);
+    activity({ type: "tool_execution_start", toolCallId: "nested", toolName: "read" });
+    await vi.advanceTimersByTimeAsync(3000);
+    activity({ type: "approval_wait_end", toolCallId: "a" });
+    await vi.advanceTimersByTimeAsync(1000);
+    await expect(result).resolves.toMatchObject({ reason: "tool_deadline", elapsedMs: 6000 });
+  });
 });
