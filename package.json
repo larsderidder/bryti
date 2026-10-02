@@ -16,6 +16,7 @@
   "files": [
     "dist/",
     "!dist/dev-cli.*",
+    "scripts/prepare-dependencies.mjs",
     "config.example.yml",
     "run.sh",
     "Dockerfile",
@@ -23,12 +24,14 @@
   ],
   "scripts": {
     "build": "tsc && cp -r defaults dist/ && mkdir -p dist/web-e2ee && cp -r src/web-e2ee/static dist/web-e2ee/",
+    "prepare:dependencies": "node scripts/prepare-dependencies.mjs",
+    "postinstall": "npm run prepare:dependencies",
     "dev": "tsx src/cli.ts serve",
     "start": "node dist/cli.js serve",
     "cli": "node dist/cli.js",
     "dev-cli": "node dist/dev-cli.js",
     "clean": "rm -rf dist",
-    "test": "vitest run",
+    "test": "node --test scripts/prepare-dependencies.test.mjs && vitest run",
     "test:watch": "vitest",
     "check": "npm test && npm run build && node scripts/check-pdf-worker.mjs",
     "web-e2ee:invite": "npm run cli -- web-e2ee invite"
@@ -51,6 +54,7 @@
     "abort-controller": "3.0.0",
     "axios": "^1.20.0",
     "better-sqlite3": "^12.6.2",
+    "brace-expansion": "5.0.12",
     "clawpdf": "0.3.2",
     "croner": "^9.0.0",
     "grammy": "^1.35.0",

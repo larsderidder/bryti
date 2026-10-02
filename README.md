@@ -366,6 +366,8 @@ bryti google login --user-id USER_ID --account personal --email owner@example.co
 
 Run `npm run check` to run the tests, build the application, and verify the compiled PDF worker against local text and image fixtures.
 
+The pinned pi SDK bundles an older `brace-expansion` that npm overrides do not replace. `npm run prepare:dependencies` removes that copy and verifies that the SDK resolves the pinned root dependency, without changing the lockfile or executing dependency code. Normal installs run it through `postinstall`. After any install with `--ignore-scripts`, run it explicitly before tests, builds or startup. The preparation step must be reviewed when changing the SDK version.
+
 Found a bug or have an idea? [Open an issue](https://github.com/larsderidder/bryti/issues). Pull requests welcome.
 
 ## License
