@@ -19,14 +19,25 @@ export interface UsageRecord {
   output_tokens: number;
   cost_usd: number;
   latency_ms: number;
+  cache_read_tokens?: number;
+  cache_write_tokens?: number;
+  model_calls?: number;
+  usage_operations?: number;
+  models?: Array<{ model: string; input_tokens: number; output_tokens: number; cache_read_tokens: number;
+    cache_write_tokens: number; cost_usd: number; model_calls: number; usage_operations: number }>;
+  kind?: "main" | "worker" | "maintenance";
 }
 
 export interface UsageSummary {
   date: string;
   total_messages: number;
+  total_workers: number;
   total_input_tokens: number;
   total_output_tokens: number;
   total_cost_usd: number;
+  total_cache_read_tokens: number;
+  total_cache_write_tokens: number;
+  total_model_calls: number;
   by_user: Record<
     string,
     {
@@ -134,9 +145,13 @@ export function createUsageTracker(dataDir: string): UsageTracker {
       const summary: UsageSummary = {
         date: day,
         total_messages: 0,
+        total_workers: 0,
         total_input_tokens: 0,
         total_output_tokens: 0,
         total_cost_usd: 0,
+        total_cache_read_tokens: 0,
+        total_cache_write_tokens: 0,
+        total_model_calls: 0,
         by_user: {},
       };
 
@@ -149,10 +164,17 @@ export function createUsageTracker(dataDir: string): UsageTracker {
         if (!line.trim()) continue;
         try {
           const record = JSON.parse(line) as UsageRecord;
-          summary.total_messages += 1;
+          if (record.kind === "worker") {
+            summary.total_workers += 1;
+          } else if (record.kind !== "maintenance") {
+            summary.total_messages += 1;
+          }
           summary.total_input_tokens += record.input_tokens;
           summary.total_output_tokens += record.output_tokens;
           summary.total_cost_usd = roundUsd(summary.total_cost_usd + record.cost_usd);
+          summary.total_cache_read_tokens += record.cache_read_tokens ?? 0;
+          summary.total_cache_write_tokens += record.cache_write_tokens ?? 0;
+          summary.total_model_calls += record.model_calls ?? 1;
 
           const userSummary = summary.by_user[record.user_id] || {
             messages: 0,
@@ -160,7 +182,9 @@ export function createUsageTracker(dataDir: string): UsageTracker {
             output_tokens: 0,
             cost_usd: 0,
           };
-          userSummary.messages += 1;
+          if (record.kind !== "worker" && record.kind !== "maintenance") {
+            userSummary.messages += 1;
+          }
           userSummary.input_tokens += record.input_tokens;
           userSummary.output_tokens += record.output_tokens;
           userSummary.cost_usd = roundUsd(userSummary.cost_usd + record.cost_usd);

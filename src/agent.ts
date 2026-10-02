@@ -31,13 +31,18 @@ import type { CoreMemory } from "./memory/core-memory.js";
 import { repairToolUseResultPairing } from "./compaction/transcript-repair.js";
 import { createProjectionStore, formatProjectionsForPrompt, type ProjectionStore } from "./projection/index.js";
 import { createBrytiSettingsManager, createModelInfra, resolveModel } from "./model-infra.js";
-import { buildSystemPrompt, buildToolSection, SILENT_REPLY_TOKEN, type ToolSummary } from "./system-prompt.js";
+import { buildSystemPrompt, buildSystemPromptSections, SILENT_REPLY_TOKEN, type ToolSummary } from "./system-prompt.js";
 import { createTopicDeliveryTracker } from "./channels/topic-delivery.js";
 import { createTranscriptRepairExtension } from "./compaction/session-repair.js";
 import { createBrytiMcpExtension } from "./tools/mcp.js";
 import { createExtensionToolPolicy, type ExtensionTrustContext } from "./tools/extension-policy.js";
 import { createToolDiscoveryExtension } from "./tools/tool-search.js";
 import { GOOGLE_TOOL_NAMES } from "./integrations/google-tools.js";
+import { CONTEXT_READ_TOOLS, createContextManagementExtension } from "./context-management.js";
+import { createDiagnosticWriter, createSessionDiagnostics, createProviderDiagnosticsExtension } from "./session-diagnostics.js";
+import { isSessionTurnReserved } from "./compaction/proactive.js";
+import { collectSessionUsage } from "./session-usage.js";
+import { createUsageTracker } from "./usage.js";
 
 // Re-export for backward compatibility with index.ts
 export { SILENT_REPLY_TOKEN };
@@ -184,6 +189,12 @@ export async function loadUserSession(
   }));
   const extensionToolNames = new Set<string>();
   const trustedCodemodeDefinitions = new WeakSet<object>();
+  const trustedSessionDefinitions = new WeakSet<object>();
+  const eligibleContextTools = new Set(sessionTools.map((tool) => tool.name).filter((name) => CONTEXT_READ_TOOLS.has(name)));
+  const diagnostics = createSessionDiagnostics({ userId, sessionKey, sessionId: sessionManager.getSessionId(),
+    captureProvider: config.diagnostics?.capture_provider,
+    write: createDiagnosticWriter(config.data_dir, config.diagnostics?.max_file_bytes),
+  });
 
   // --- 2. Resource loader setup with system prompt override closure ---
   // The override closure captures core memory and the projection store so it
@@ -251,6 +262,27 @@ export async function loadUserSession(
           name: tool.name, description: tool.description,
         })));
       }) },
+      { name: "bryti-context-management", factory: (pi) => createContextManagementExtension(
+        sessionManager, config.context_management, eligibleContextTools,
+      )({ ...pi, registerTool(definition) {
+        trustedSessionDefinitions.add(definition);
+        pi.registerTool(definition);
+      } }) },
+      { name: "bryti-prompt-sections", factory: (pi) => {
+        pi.on("before_agent_start", (event) => {
+          projectionStore.autoExpire(24);
+          const projectionText = formatProjectionsForPrompt(projectionStore.getUpcoming(7));
+          const hasPreviousAnswer = sessionManager.getBranch().some((entry) => entry.type === "message" && entry.message.role === "assistant");
+          const prompt = buildSystemPromptSections(config, coreMemory.read(), promptTools, extensionToolNames,
+            projectionText, { isNewUser: isNewUser && !hasPreviousAnswer });
+          event.systemPromptOptions.customPrompt = prompt.instructions;
+          for (const key of ["bryti_tools", "bryti_memory", "bryti_projections", "bryti_datetime"]) {
+            delete event.systemPromptOptions.sections[key];
+          }
+          Object.assign(event.systemPromptOptions.sections, prompt.sections);
+        });
+      } },
+      { name: "bryti-provider-diagnostics", factory: createProviderDiagnosticsExtension(diagnostics) },
     ],
     extensionsOverride: (base) => {
       extensionToolNames.clear();
@@ -259,13 +291,15 @@ export async function loadUserSession(
           continue;
         }
         for (const [name, registered] of extension.tools) {
+          // A same-name extension must not make its results eligible for automatic cleanup.
+          eligibleContextTools.delete(name);
           if (config.google?.users && Object.hasOwn(config.google.users, userId) && GOOGLE_TOOL_NAMES.has(name)) {
             // Explicit native-account opt-in must never leave the legacy shared-token tools reachable.
             extension.tools.delete(name);
             continue;
           }
           // Only definitions captured from the SDK factory bypass agent-written extension policy.
-          if (trustedCodemodeDefinitions.has(registered.definition)) {
+          if (trustedCodemodeDefinitions.has(registered.definition) || trustedSessionDefinitions.has(registered.definition)) {
             continue;
           }
           const definition = toolPolicy.protect(registered.definition);
@@ -367,6 +401,16 @@ export async function loadUserSession(
   const toolCallCounts = new Map<string, number>();
   const trackTopicDelivery = createTopicDeliveryTracker(config, userId, sessionKey);
   const unsubscribe = session.subscribe((event: AgentSessionEvent) => {
+    diagnostics.event(event);
+    if (userSessionRef && !isSessionTurnReserved(userSessionRef) && event.type === "entry_appended" &&
+      (event.entry.type === "usage" || event.entry.type === "compaction" || event.entry.type === "branch_summary")) {
+      const usage = collectSessionUsage(config, [event.entry]);
+      if (usage.usage_operations > 0) {
+        createUsageTracker(config.data_dir).append({ user_id: userId, kind: "maintenance",
+          model: usage.models[0]?.model ?? "auxiliary", latency_ms: 0, ...usage })
+          .catch(() => { console.warn("[usage] Unable to record maintenance accounting"); });
+      }
+    }
     try {
       trackTopicDelivery(event);
     } catch (error) {
@@ -472,6 +516,7 @@ export async function loadUserSession(
               await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
             } finally {
               unsubscribe();
+              diagnostics.close();
               session.dispose();
               if (!existingProjectionStore) {
                 projectionStore.close();
@@ -642,17 +687,9 @@ export async function promptWithFallback(
   throw lastError ?? new Error("All models in fallback chain failed");
 }
 
-/**
- * Reload the system prompt so it picks up any core memory or projection
- * changes the agent made during the previous turn.
- *
- * TODO: session.reload() reloads the full resource set, which includes any
- * skill files on disk. If skill loading becomes slow (many/large skill files),
- * consider caching the parsed skill content and only re-reading core memory
- * and projections on each turn.
- */
+/** Refresh canonical context without rebuilding extensions; prompt sections read live state before each run. */
 export async function refreshSystemPrompt(session: AgentSession): Promise<void> {
-  await session.reload();
+  session.refreshContext();
 }
 
 // Re-export AgentSession type for callers that need it

@@ -52,6 +52,11 @@ export function isProactiveCompactionRunning(userSession: UserSession): boolean 
   return sessionLifecycle.get(userSession)?.proactiveCompaction != null;
 }
 
+/** Whether message processing owns the accounting window for this session. */
+export function isSessionTurnReserved(userSession: UserSession): boolean {
+  return (sessionLifecycle.get(userSession)?.turnReservations ?? 0) > 0;
+}
+
 /** Reserve a queued message turn, waiting for any scheduled compaction first. */
 export async function acquireSessionTurn(userSession: UserSession): Promise<() => void> {
   const state = getSessionLifecycle(userSession);

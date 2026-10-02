@@ -88,6 +88,17 @@ describe("UsageTracker", () => {
     expect(summary.by_user["user-1"].cost_usd).toBe(0.0029);
     expect(summary.by_user["user-2"].messages).toBe(1);
   });
+
+  it("includes worker and maintenance usage without inflating message counts", async () => {
+    const tracker = createUsageTracker(tempDir);
+    for (const kind of ["main", "worker", "maintenance"] as const) {
+      await tracker.append({ kind, user_id: "owner", model: "fixture", input_tokens: 10, output_tokens: 5,
+        cache_read_tokens: 100, cache_write_tokens: 20, cost_usd: 1, latency_ms: 1, model_calls: 1 });
+    }
+    expect(await tracker.summarize()).toMatchObject({ total_messages: 1, total_workers: 1,
+      total_input_tokens: 30, total_output_tokens: 15, total_cache_read_tokens: 300, total_cache_write_tokens: 60,
+      total_model_calls: 3, total_cost_usd: 3, by_user: { owner: { messages: 1, cost_usd: 3 } } });
+  });
 });
 
 describe("usage cost helpers", () => {

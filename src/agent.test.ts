@@ -318,21 +318,23 @@ describe("promptWithFallback", () => {
 });
 
 describe("refreshSystemPrompt", () => {
-  it("calls session.reload()", async () => {
+  it("refreshes canonical context without reloading extensions", async () => {
     const session = {
       reload: vi.fn().mockResolvedValue(undefined),
+      refreshContext: vi.fn(),
     } as unknown as AgentSession;
 
     await refreshSystemPrompt(session);
 
-    expect(session.reload).toHaveBeenCalledOnce();
+    expect(session.refreshContext).toHaveBeenCalledOnce();
+    expect(session.reload).not.toHaveBeenCalled();
   });
 
-  it("is called before each prompt so core memory changes are visible", async () => {
-    // Verify the ordering contract: reload must be called before prompt.
+  it("refreshes before prompting; live memory is read by the native prompt-section hook", async () => {
+    // Canonical history is refreshed before the next SDK run.
     const order: string[] = [];
     const session = {
-      reload: vi.fn().mockImplementation(async () => { order.push("reload"); }),
+      refreshContext: vi.fn().mockImplementation(() => { order.push("refresh"); }),
       prompt: vi.fn().mockImplementation(async () => { order.push("prompt"); }),
       get messages() {
         return [{ role: "assistant", stopReason: "end_turn", content: [] }];
@@ -342,6 +344,6 @@ describe("refreshSystemPrompt", () => {
     await refreshSystemPrompt(session);
     await session.prompt("hi");
 
-    expect(order).toEqual(["reload", "prompt"]);
+    expect(order).toEqual(["refresh", "prompt"]);
   });
 });

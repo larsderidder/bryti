@@ -72,6 +72,18 @@ agent:
   # cheap model works well here — lower latency and lower cost per call.
   # guardrail_model: "anthropic/claude-haiku-4-5"
 
+# Optional append-only cleanup of older successful application-owned read results.
+context_management:
+  enabled: false
+  min_chars: 8000
+  keep_chars: 1500
+  keep_recent_turns: 2
+
+# Private bounded lifecycle logs. Provider capture stores metadata, never payloads.
+diagnostics:
+  capture_provider: false
+  max_file_bytes: 5242880  # 5 MiB, plus one rotated predecessor
+
 # ---------------------------------------------------------------------------
 # Channels (enable at least one)
 # ---------------------------------------------------------------------------

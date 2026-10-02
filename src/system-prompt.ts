@@ -362,3 +362,33 @@ export function buildSystemPrompt(
 
   return parts.join("\n\n");
 }
+
+/** Separate changing context from instructions so the SDK can persist minimal prompt deltas. */
+export function buildSystemPromptSections(
+  config: Config,
+  coreMemory: string,
+  tools: ToolSummary[],
+  extensionToolNames: Set<string>,
+  projections: string,
+  opts?: { isNewUser?: boolean },
+): { instructions: string; sections: Record<string, string> } {
+  const dynamicSections = new Set<PromptSection>(["datetime", "tools", "core_memory", "projections"]);
+  const stableConfig = { ...config, agent_def: { ...config.agent_def,
+    prompt_sections: config.agent_def.prompt_sections.filter((section) => !dynamicSections.has(section)),
+  } };
+  const sections: Record<string, string> = {};
+  const selected = new Set(config.agent_def.prompt_sections);
+  if (selected.has("tools")) {
+    sections.bryti_tools = buildToolSection(tools, extensionToolNames);
+  }
+  if (selected.has("core_memory") && coreMemory) {
+    sections.bryti_memory = buildCoreMemorySection(coreMemory);
+  }
+  if (selected.has("projections")) {
+    sections.bryti_projections = buildProjectionsSection(projections, config.agent_def.prompt_tone);
+  }
+  if (selected.has("datetime")) {
+    sections.bryti_datetime = buildDateTimeSection(config.agent.timezone);
+  }
+  return { instructions: buildSystemPrompt(stableConfig, "", [], new Set(), "", opts), sections };
+}

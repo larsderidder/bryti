@@ -18,6 +18,7 @@ import { SILENT_REPLY_TOKEN } from "./agent.js";
 import { createHistoryManager } from "./history.js";
 import { createCoreMemory } from "./memory/core-memory.js";
 import { createUsageTracker } from "./usage.js";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { createTrustStore, setPendingApproval, checkPendingApproval } from "./trust/index.js";
 import type { ChannelBridge, IncomingMessage } from "./channels/types.js";
 import type { UserSession } from "./agent.js";
@@ -356,6 +357,7 @@ describe("processMessage pipeline", () => {
         role: "custom", content: expect.stringContaining(deliveryText),
       });
       userSession.session.messages.push(assistantMsg("Those shops came from your watcher.") as any);
+      manager.appendMessage(fauxAssistantMessage("Those shops came from your watcher."));
     });
     const state = makeState(config, userSession, tmpDir);
     state.sessions = new Map([[getSessionKey(userId, threadId), userSession]]);
@@ -458,6 +460,31 @@ describe("processMessage pipeline", () => {
     expect(record.user_id).toBe("12345");
     expect(record.input_tokens).toBe(100);
     expect(record.output_tokens).toBe(50);
+  });
+
+  it("accounts from canonical entries across compaction, nested usage, and multiple assistant responses", async () => {
+    const userSession = makeUserSession("12345");
+    const manager = SessionManager.inMemory(tmpDir);
+    const old = manager.appendMessage(fauxAssistantMessage("Old history"));
+    Object.defineProperty(userSession.session, "sessionManager", { value: manager });
+    Object.defineProperty(userSession.session, "messages", { get: () => manager.buildSessionContext().messages });
+    const usage = { input: 10, output: 5, cacheRead: 100, cacheWrite: 20, totalTokens: 135,
+      cost: { input: 0, output: 0, cacheRead: 0.1, cacheWrite: 0.2, total: 0.3 } };
+    vi.spyOn(userSession.session, "prompt").mockImplementation(async () => {
+      manager.appendMessage({ ...fauxAssistantMessage("Intermediate answer"), usage });
+      manager.appendMessage({ role: "toolResult", toolName: "codemode", toolCallId: "fixture", isError: false,
+        content: [{ type: "text", text: "Nested result" }], timestamp: 1, usage });
+      manager.appendUsage("cache_warm", "fixture", "fixture", usage);
+      manager.appendCompaction("Summary", old, 100, {}, false, usage);
+      manager.appendMessage({ ...fauxAssistantMessage("Final answer"), usage });
+    });
+    const state = makeState(config, userSession, tmpDir);
+    await processMessage(state, incomingMsg("Do work"));
+    const summary = await state.usageTracker.summarize();
+    expect(summary.total_input_tokens).toBe(50);
+    expect(summary.total_output_tokens).toBe(25);
+    expect(summary.total_cost_usd).toBe(1.5);
+    expect((state.bridges[0] as ReturnType<typeof makeBridge>).sent.some((message) => message.text.includes("Intermediate answer"))).toBe(true);
   });
 
   it("hides thinking blocks by default", async () => {
@@ -761,9 +788,9 @@ describe("processMessage pipeline", () => {
     const userSession = makeUserSession("12345", Array.from({ length: 6 }, () => assistantMsg("old")));
     const compact = vi.fn().mockResolvedValue(undefined);
     userSession.session.compact = compact;
-    let finishReload!: () => void;
-    vi.spyOn(userSession.session, "reload").mockImplementation(() => new Promise<void>((resolve) => {
-      finishReload = resolve;
+    let finishPrompt!: () => void;
+    vi.spyOn(userSession.session, "prompt").mockImplementationOnce(() => new Promise<void>((resolve) => {
+      finishPrompt = resolve;
     }));
     const state = makeState(config, userSession, tmpDir);
     const processing = processMessage(state, incomingMsg("hello"));
@@ -773,14 +800,14 @@ describe("processMessage pipeline", () => {
       await tryCompact(userSession, "nightly");
       expect(compact).not.toHaveBeenCalled();
     } finally {
-      finishReload();
+      finishPrompt();
       await processing;
     }
     await tryCompact(userSession, "nightly");
     expect(compact).toHaveBeenCalledOnce();
   });
 
-  it("waits for proactive compaction before reloading or repairing the session", async () => {
+  it("waits for proactive compaction before refreshing canonical context", async () => {
     vi.useFakeTimers();
     const userSession = makeUserSession("12345", Array.from({ length: 6 }, () => assistantMsg("old")));
     let finishCompact!: () => void;
@@ -802,7 +829,8 @@ describe("processMessage pipeline", () => {
       await compacting;
       await processing;
     }
-    expect(reload).toHaveBeenCalledOnce();
+    expect(reload).not.toHaveBeenCalled();
+    expect(repair).toHaveBeenCalled();
   });
 
   it("does not time out an active prompt based on total runtime", async () => {

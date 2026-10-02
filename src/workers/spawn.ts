@@ -22,11 +22,14 @@ import { createParallelTools } from "../tools/parallel-search.js";
 import { createFetchUrlTool } from "../tools/fetch-url.js";
 import { createWorkerScopedTools } from "./scoped-tools.js";
 import type { WorkerRegistry } from "./registry.js";
-import type { ProjectionStore } from "../projection/store.js";
+import type { ProjectionStore, ProjectionTarget } from "../projection/store.js";
 import { createBrytiSettingsManager, createModelInfra, resolveModel, resolveFirstModel } from "../model-infra.js";
 import { attachWorkerRunTracker, type WorkerProgress, type WorkerRuntimePaths } from "./tracker.js";
 import { writeWorkerStatus } from "./recovery.js";
 import { stopWorker } from "./lifecycle.js";
+import { createDiagnosticWriter, createSessionDiagnostics } from "../session-diagnostics.js";
+import { collectSessionUsage } from "../session-usage.js";
+import { createUsageTracker } from "../usage.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -133,6 +136,7 @@ export type WorkerTriggerCallback = (triggered: Array<{ id: string; summary: str
 
 export async function spawnWorkerSession(opts: {
   config: Config;
+  owner?: ProjectionTarget;
   workerId: string;
   workerDir: string;
   task: string;
@@ -269,10 +273,14 @@ export async function spawnWorkerSession(opts: {
   }
 
   // ---- Timeout setup --------------------------------------------------------
+  const diagnostics = createSessionDiagnostics({ userId: opts.owner?.userId ?? "operator", sessionId: session.sessionId,
+    sessionKey: `worker:${workerId}`, write: createDiagnosticWriter(config.data_dir, config.diagnostics?.max_file_bytes) });
+  diagnostics.workerState("running", Math.max(0, Date.now() - (registry.get(workerId)?.startedAt.getTime() ?? Date.now())));
   registry.update(workerId, {
     abort: () => session.abort(),
     steer: async (guidance: string) => {
-      await session.steer(guidance);
+      const disposition = await session.steer(guidance);
+      tracker.recordSteering(disposition);
     },
   });
 
@@ -280,6 +288,7 @@ export async function spawnWorkerSession(opts: {
     session,
     workerDir,
     maxTurns,
+    diagnostics,
     writeStatus(progress, paths) {
       const entry = registry.get(workerId);
       writeStatusFile(workerDir, {
@@ -302,7 +311,8 @@ export async function spawnWorkerSession(opts: {
   if (pendingSteering) {
     registry.update(workerId, { pendingSteering: null });
     try {
-      await session.steer(pendingSteering);
+      const disposition = await session.steer(pendingSteering);
+      tracker.recordSteering(disposition);
     } catch (err) {
       console.warn(`[worker] ${workerId} failed to apply queued steering: ${(err as Error).message}`);
     }
@@ -520,6 +530,21 @@ export async function spawnWorkerSession(opts: {
   } finally {
     clearTimeout(timeoutHandle);
     await timeoutTask;
+    diagnostics.workerState(registry.get(workerId)?.status ?? "unknown");
+    diagnostics.close();
+    try {
+      let usage = { input_tokens: tracker.progress.input_tokens, output_tokens: tracker.progress.output_tokens,
+        cache_read_tokens: tracker.progress.cache_read_tokens, cache_write_tokens: tracker.progress.cache_write_tokens,
+        cost_usd: tracker.progress.cost_usd, model_calls: tracker.progress.turns_completed, usage_operations: tracker.progress.turns_completed,
+        models: [] as ReturnType<typeof collectSessionUsage>["models"] };
+      if (session.sessionManager) {
+        usage = collectSessionUsage(config, session.sessionManager.getEntries());
+      }
+      await createUsageTracker(config.data_dir).append({ user_id: opts.owner?.userId ?? "operator", kind: "worker",
+        model: modelString, latency_ms: Date.now() - (registry.get(workerId)?.startedAt.getTime() ?? Date.now()), ...usage });
+    } catch {
+      console.warn("[usage] Unable to record worker accounting");
+    }
     tracker.unsubscribe();
     session.dispose();
     if (timeoutTask && registry.get(workerId)?.status === "timeout") {

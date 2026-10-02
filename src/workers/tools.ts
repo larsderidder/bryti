@@ -49,6 +49,7 @@ interface WorkerLaunchSpec {
   toolNames: AllowedTool[];
   timeoutMs: number;
   maxTurns?: number;
+  owner?: ProjectionTarget;
 }
 
 // Re-export for use in other modules
@@ -173,6 +174,7 @@ export function createWorkerTools(
     const run = spawnWorkerSession({
       config,
       workerId: entry.workerId,
+      owner: spec.owner,
       workerDir: entry.workerDir,
       task: spec.task,
       modelOverride: spec.modelOverride,
@@ -364,7 +366,8 @@ export function createWorkerTools(
       }
       try {
         if (getTarget) {
-          registerWorkerOwner(config.data_dir, workerId, getTarget());
+          launchSpec.owner = { ...getTarget() };
+          registerWorkerOwner(config.data_dir, workerId, launchSpec.owner);
         }
       } catch {
         registry.remove(workerId);

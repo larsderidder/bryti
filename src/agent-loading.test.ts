@@ -22,7 +22,8 @@ vi.mock("./model-infra.js", async (importActual) => {
   };
 });
 
-import { loadUserSession, type UserSession } from "./agent.js";
+import { loadUserSession, refreshSystemPrompt, type UserSession } from "./agent.js";
+import { Type } from "typebox";
 
 let directory: string;
 let userSession: UserSession | undefined;
@@ -73,7 +74,7 @@ describe("Bryti session loading", () => {
       agent_def: { ...PERSONAL_ASSISTANT_DEFAULTS, extension_files: [extension], skill_files: [] },
       telegram: { allowed_users: [] }, whatsapp: { enabled: false }, integrations: {}, cron: [],
       trust: { approved_tools: [] },
-    } as Config;
+    } as unknown as Config;
     if (nativeGoogle) {
       config.google = { users: { owner: { default_account: "personal" } } };
     }
@@ -105,5 +106,67 @@ describe("Bryti session loading", () => {
     expect(userSession.session.messages.find((message) => message.role === "toolResult" && message.toolName === "contract_record"))
       .toMatchObject({ isError: false, content: [{ type: "text", text: "confirmed" }] });
     expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  it("persists only changing prompt sections and recovers shortened reads after restart", async () => {
+    directory = fs.mkdtempSync(path.join(os.tmpdir(), "bryti-context-load-"));
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Network disabled"));
+    const agentDir = path.join(directory, ".pi");
+    const runtime = await ModelRuntime.create({ authPath: path.join(agentDir, "auth.json"),
+      modelsStorePath: path.join(agentDir, "models-store.json"), refreshOnCreate: false });
+    const faux = fauxProvider();
+    runtime.registerNativeProvider(faux.provider);
+    await runtime.setRuntimeApiKey(faux.getModel().provider, "offline-test");
+    infrastructure = { modelRuntime: runtime, modelRegistry: new ModelRegistry(runtime), agentDir };
+    const model = faux.getModel();
+    const config = { data_dir: directory,
+      agent: { system_prompt: "Standing instructions", model: `${model.provider}/${model.id}`, thinking_level: "off", timezone: "UTC" },
+      models: { providers: [] }, integrations: {},
+      agent_def: { ...PERSONAL_ASSISTANT_DEFAULTS, extension_files: [], skill_files: [],
+        prompt_sections: PERSONAL_ASSISTANT_DEFAULTS.prompt_sections.filter((section) => section !== "first_conversation") },
+      context_management: { enabled: true, min_chars: 1000, keep_chars: 400, keep_recent_turns: 1 },
+    } as unknown as Config;
+    const memory = createCoreMemory(directory);
+    memory.append("Owner", "Original fact");
+    const original = "Untrusted evidence ".repeat(200);
+    const readTool = { name: "read", label: "Read", description: "Read fixture", parameters: Type.Object({}),
+      execute: async () => ({ content: [{ type: "text" as const, text: original }], details: {} }) };
+    userSession = await loadUserSession(config, memory, "owner", [readTool]);
+    faux.setResponses([fauxAssistantMessage(fauxToolCall("read", {}), { stopReason: "toolUse" }), fauxAssistantMessage("Read complete")]);
+    await userSession.session.prompt("Read fixture");
+    const entry = userSession.session.sessionManager.getEntries().find((entry) => entry.type === "message" && entry.message.role === "toolResult")!;
+    const reload = vi.spyOn(userSession.session, "reload");
+    memory.append("Owner", "Updated fact");
+    await refreshSystemPrompt(userSession.session);
+    faux.setResponses([fauxAssistantMessage("Next answer")]);
+    await userSession.session.prompt("Continue");
+    expect(reload).not.toHaveBeenCalled();
+    const patches = userSession.session.sessionManager.getEntries().filter((entry) => entry.type === "message" && entry.message.role === "system");
+    expect(patches.some((entry) => entry.type === "message" && entry.message.role === "system" &&
+      entry.message.sections?.bryti_memory?.includes("Updated fact") && !entry.message.sections?.preamble)).toBe(true);
+    faux.setResponses([fauxAssistantMessage("Another answer")]);
+    await userSession.session.prompt("Another request");
+    expect(userSession.session.sessionManager.getEntries().some((candidate) => candidate.type === "context_edit" && candidate.targetId === entry.id)).toBe(true);
+    await userSession.dispose();
+    config.context_management!.enabled = false;
+    userSession = await loadUserSession(config, memory, "owner", [readTool]);
+    expect(userSession.session.getActiveToolNames()).toContain("context_result_read");
+    faux.setResponses([
+      (context) => {
+        expect(JSON.stringify(context.messages)).not.toContain(original);
+        return fauxAssistantMessage(fauxToolCall("codemode", {
+          code: `const result = await tools.context_result_read({entry_id: ${JSON.stringify(entry.id)}}); console.log(result);`,
+        }), { stopReason: "toolUse" });
+      },
+      (context) => {
+        expect(JSON.stringify(context.messages)).toContain(original);
+        return fauxAssistantMessage("Recovered without repeating the read");
+      },
+    ]);
+    await userSession.session.prompt("Recover the original evidence");
+    const trace = fs.readFileSync(path.join(directory, "logs", "diagnostics.jsonl"), "utf8")
+      .trim().split("\n").map((line) => JSON.parse(line));
+    expect(trace.some((row) => row.tool_name === "context_result_read" && row.parent_tool_call_id && row.outcome === "success")).toBe(true);
+    expect(JSON.stringify(trace)).not.toContain(original);
   });
 });

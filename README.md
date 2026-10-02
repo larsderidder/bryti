@@ -221,6 +221,20 @@ Credentials and refresh locks stay in that user's directory, while headers and e
 
 The main session can use pi's native `codemode` to batch tool calls and filter, join, or aggregate results before they enter model context. Direct tool calls remain available. Scripts run in a QuickJS sandbox without direct filesystem or network access; nested calls retain the tools' existing approvals and audit events. Classifier calls are disabled, and workers do not receive codemode. Only script output reaches the model. Failed scripts do not undo completed tool operations.
 
+### Context management
+
+pi stores changing prompt content in named sections. Memory and projections share this mechanism with the clock and tool listings, so their updates persist without reloading extensions for each message.
+
+Set `context_management.enabled: true` to abbreviate older text-only results from successful application-owned reads. The defaults protect the two most recent user turns and retain excerpts from results longer than 8,000 characters. Extension or MCP results stay intact, as do errors and image results; write tools or codemode are excluded too. Original entries remain in the append-only session file, and `context_result_read` recovers them from the active branch in bounded pages, even after cleanup is disabled. Disabling cleanup stops new edits.
+
+### Diagnostics and usage
+
+`data/logs/diagnostics.jsonl` follows each session from SDK run start to settlement, retaining parent IDs for nested tool calls. Worker states and retries are logged alongside compaction timing, while conversation and tool payloads are excluded along with HTTP headers and provider bodies. Files are private and rotate at `diagnostics.max_file_bytes`, keeping one predecessor; per-run record limits leave a truncation notice when exceeded.
+
+Optional `diagnostics.capture_provider: true` adds main-session request labels, HTTP status and response-header latency, plus bounded stream-event counts. It does not store provider payloads or enable extra model calls. Workers retain their scoped tools and do not load extensions or MCP servers.
+
+Daily usage records account from newly appended canonical entries, covering each assistant response inside a message, including intermediate replies and failures. Reported nested usage and compaction costs are included too; worker and idle maintenance usage are recorded without counting them as user messages. Cache read and write tokens remain separate in the per-model totals; unattributed usage has an `auxiliary` label. Configured input/output prices override native prices while preserving reported cache costs. Billing reconciliation requires provider records: unavailable usage is not estimated here, and older daily records are not backfilled.
+
 ### Google accounts
 
 Native Google tools use private accounts selected by the operator for each Bryti user. Enable them explicitly in `config.yml`:

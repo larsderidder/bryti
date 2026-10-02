@@ -14,6 +14,9 @@ import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { FetchUrlBackend } from "./tools/fetch-url.js";
 import { emailFromConfig } from "./integrations/email-config.js";
 import type { EmailConfig } from "./integrations/email-types.js";
+import { sessionControlsFromConfig } from "./session-controls.js";
+import type { ContextManagementConfig } from "./context-management.js";
+import type { DiagnosticsConfig } from "./session-diagnostics.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -388,6 +391,10 @@ export interface Config {
   voice?: VoiceConfig;
   /** Render scanned PDF pages for vision-capable models unless explicitly disabled. */
   documents?: { render_images?: boolean };
+  /** Optional abbreviation of older read-only results, off by default. */
+  context_management?: ContextManagementConfig;
+  /** Provider metadata capture is explicitly opt-in. Lifecycle records remain payload-free. */
+  diagnostics?: DiagnosticsConfig;
   /** Optional active hours window. Scheduler callbacks skip firing outside it. */
   active_hours?: ActiveHoursConfig;
   /** Trust and permission settings. */
@@ -887,6 +894,7 @@ export function loadConfig(configPath?: string): Config {
     },
     voice: voiceFromConfig(substituted),
     documents: { render_images: booleanFrom((substituted.documents as Record<string, unknown> | undefined)?.render_images, true) },
+    ...sessionControlsFromConfig(substituted),
     active_hours: (substituted.active_hours as ActiveHoursConfig | undefined) ?? undefined,
     trust: {
       approved_tools: ((substituted.trust as { approved_tools?: string[] })?.approved_tools) ?? [],

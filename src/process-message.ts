@@ -31,6 +31,7 @@ import {
   promptWithFallback,
   SILENT_REPLY_TOKEN,
   type UserSession,
+  type AgentSession,
 } from "./agent.js";
 import { createProjectionStore } from "./projection/index.js";
 import { createModelInfra } from "./model-infra.js";
@@ -53,6 +54,7 @@ import {
   resolveModelCost,
   type UsageTracker,
 } from "./usage.js";
+import { collectSessionUsage } from "./session-usage.js";
 import { handleSlashCommand } from "./commands.js";
 import { DEFAULT_THREAD_ID, getActiveThread, getSessionKey } from "./threads.js";
 import {
@@ -736,6 +738,7 @@ export async function processMessage(
   await getBridge(state, msg.platform).sendTyping(msg.channelId, sendOptsFor(msg));
 
   let releaseSessionTurn: (() => void) | undefined;
+  let usageWindow: { session: AgentSession; entryOffset?: number; startedAt: number } | undefined;
   try {
     const userSession = await getOrLoadSession(state, msg);
     releaseSessionTurn = await acquireSessionTurn(userSession);
@@ -803,6 +806,7 @@ export async function processMessage(
       msg = { ...msg, text: "[System: The owning reminder was cancelled or rescheduled. Inspect and report existing command results only. Do not continue development, deploy, or recreate the reminder.]\n\n" + msg.text };
     }
     const promptStart = Date.now();
+    usageWindow = { session, entryOffset: session.sessionManager?.getEntries().length, startedAt: promptStart };
     const promptResult = await runPromptWithActivityWatchdog({
       sessionKey,
       subscribe: (listener) => session.subscribe(listener),
@@ -850,7 +854,6 @@ export async function processMessage(
       state.sessions.delete(sessionKey);
       return;
     }
-    const latencyMs = Date.now() - promptStart;
     acknowledgeTopicDeliveries();
 
     const lastAssistant = toAssistantMessage(
@@ -860,11 +863,22 @@ export async function processMessage(
     // Collect text from ALL assistant messages generated during this turn,
     // not just the last one. The model may produce text in intermediate
     // turns (between tool calls) that the user should see.
-    const newAssistantMessages = session.messages
+    let newAssistantMessages = session.messages
       .slice(messageCountBefore)
       .filter((m) => m.role === "assistant")
       .map((m) => toAssistantMessage(m))
       .filter((m): m is NonNullable<typeof m> => m != null);
+    if (usageWindow.entryOffset !== undefined) {
+      newAssistantMessages = session.sessionManager.getEntries().slice(usageWindow.entryOffset)
+        .filter((entry) => entry.type === "message" && entry.message.role === "assistant")
+        .map((entry) => {
+          if (entry.type === "message") {
+            return toAssistantMessage(entry.message);
+          }
+          return undefined;
+        })
+        .filter((message): message is NonNullable<typeof message> => message != null);
+    }
 
     const allResponseTexts: string[] = [];
     const showThinking = state.config.response?.show_thinking === true;
@@ -875,30 +889,6 @@ export async function processMessage(
       }
     }
 
-    const inputTokens = lastAssistant?.usage?.input ?? 0;
-    const outputTokens = lastAssistant?.usage?.output ?? 0;
-    const model = modelNameForLog(
-      lastAssistant?.provider,
-      lastAssistant?.model,
-      state.config.agent.model,
-    );
-    const costConfig = resolveModelCost(
-      state.config,
-      lastAssistant?.provider,
-      lastAssistant?.model ?? state.config.agent.model,
-    );
-    const costUsd = costConfig
-      ? calculateCostUsd(inputTokens, outputTokens, costConfig)
-      : (lastAssistant?.usage?.cost?.total ?? 0);
-
-    await state.usageTracker.append({
-      user_id: msg.userId,
-      model,
-      input_tokens: inputTokens,
-      output_tokens: outputTokens,
-      cost_usd: costUsd,
-      latency_ms: latencyMs,
-    });
 
     const ctxUsage = session.getContextUsage();
     if (ctxUsage?.percent !== null && ctxUsage?.percent !== undefined) {
@@ -1015,6 +1005,28 @@ export async function processMessage(
       "Something went wrong processing your message. Please try again.",
     );
   } finally {
+    if (usageWindow) {
+      try {
+        const { session, entryOffset, startedAt } = usageWindow;
+        const last = toAssistantMessage(session.messages.filter((message) => message.role === "assistant").pop());
+        const record = { user_id: msg.userId, kind: "main" as const,
+          model: modelNameForLog(last?.provider, last?.model, state.config.agent.model),
+          input_tokens: last?.usage?.input ?? 0, output_tokens: last?.usage?.output ?? 0,
+          cost_usd: last?.usage?.cost?.total ?? 0, latency_ms: Date.now() - startedAt };
+        if (entryOffset !== undefined) {
+          Object.assign(record, collectSessionUsage(state.config, session.sessionManager.getEntries().slice(entryOffset)));
+        } else {
+          // Compatibility for callers without a canonical SDK manager.
+          const prices = resolveModelCost(state.config, last?.provider, last?.model ?? state.config.agent.model);
+          if (prices) {
+            record.cost_usd = calculateCostUsd(record.input_tokens, record.output_tokens, prices);
+          }
+        }
+        await state.usageTracker.append(record);
+      } catch {
+        console.warn("[usage] Unable to record turn accounting");
+      }
+    }
     releaseSessionTurn?.();
     deletePendingCheckpoint(state.config, msg.userId);
   }
