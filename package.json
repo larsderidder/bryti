@@ -43,7 +43,7 @@
     "better-sqlite3@12.10.0": true
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.74.0",
+    "@anthropic-ai/sdk": "^0.129.0",
     "@earendil-works/pi-agent-core": "0.99.1",
     "@earendil-works/pi-ai": "0.99.1",
     "@earendil-works/pi-coding-agent": "0.99.1",
