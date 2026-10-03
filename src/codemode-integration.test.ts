@@ -112,6 +112,19 @@ function script(code: string) {
 }
 
 describe("Bryti codemode", () => {
+  it("runs repeated guardrail-allowed deferred reads without an availability approval", async () => {
+    const { session, faux, approval, evaluate } = await setup();
+    evaluate.mockResolvedValue({ verdict: "ALLOW", reason: "routine read within operating guidelines" });
+    faux.setResponses([
+      script('await tools.contract_rows({filter: "first"}); await tools.contract_rows({filter: "second"}); text("Read both");'),
+      fauxAssistantMessage("Done"),
+    ]);
+    await session.prompt("Continue the standing read task");
+
+    expect(evaluate).toHaveBeenCalledTimes(2);
+    expect(approval).not.toHaveBeenCalled();
+    expect(session.getLastAssistantText()).toBe("Done");
+  });
   it("is active alongside direct tools, without exposing classifiers or treating it as an editable extension", async () => {
     const { session, faux, approval } = await setup();
     expect(session.getActiveToolNames()).toEqual(expect.arrayContaining(["codemode", "tool_search", "read"]));

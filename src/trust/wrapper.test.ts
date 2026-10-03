@@ -10,7 +10,7 @@ import {
   checkPendingApproval,
 } from "./store.js";
 import { wrapToolWithTrustCheck, wrapToolsWithTrustChecks, type ApprovalCallback } from "./wrapper.js";
-import type { GuardrailResult } from "./guardrail.js";
+import type { GuardrailInput, GuardrailResult } from "./guardrail.js";
 import type { Config } from "../config.js";
 
 let tmpDir: string;
@@ -79,6 +79,104 @@ function allowGuardrail(calls: unknown[]): (input: any) => Promise<GuardrailResu
 }
 
 describe("wrapToolWithTrustCheck", () => {
+  it("checks current guidelines and each changed argument set without asking for routine integration reads", async () => {
+    const calls: string[] = [];
+    const approve = vi.fn().mockResolvedValue("deny");
+    let guidelines = "Read configured Gmail for the daily briefing.";
+    const evaluate = vi.fn(async (_input: GuardrailInput) => ({ verdict: "ALLOW" as const, reason: "within guidelines" }));
+    const wrapped = wrapToolWithTrustCheck(makeCountingTool("gmail_get_message", calls), createTrustStore(tmpDir), "user1", {
+      config: makeConfig(), getLastUserMessage: () => "carry on",
+      getOperationalGuidelines: () => guidelines, evaluateToolCall: evaluate, onApprovalNeeded: approve,
+    }, { level: "elevated" });
+
+    await wrapped.execute("first", { messageId: "first" });
+    guidelines = "Read configured Gmail for the daily briefing and follow-up checks.";
+    await wrapped.execute("second", { messageId: "second" });
+
+    expect(calls).toHaveLength(2);
+    expect(approve).not.toHaveBeenCalled();
+    expect(evaluate.mock.calls.map(([input]) => input.operationalGuidelines)).toEqual([
+      "Read configured Gmail for the daily briefing.", guidelines,
+    ]);
+  });
+
+  it("still checks matching saved grants against current guidelines", async () => {
+    const store = createTrustStore(tmpDir);
+    store.approveInvocation("guideline_read", {}, "always", { userId: "user1", source: "agent" });
+    const calls: string[] = [];
+    const evaluate = vi.fn(async () => ({ verdict: "BLOCK" as const, reason: "outside current policy" }));
+    const wrapped = wrapToolWithTrustCheck(makeCountingTool("guideline_read", calls), store, "user1", {
+      config: makeConfig(), getLastUserMessage: () => "continue",
+      getOperationalGuidelines: () => "Do not access this account.", evaluateToolCall: evaluate,
+    }, { level: "elevated" });
+
+    const result = await wrapped.execute("call", {});
+    expect(result.content[0].text).toContain("Blocked");
+    expect(evaluate).toHaveBeenCalledWith(expect.objectContaining({ operationalGuidelines: "Do not access this account." }));
+    expect(calls).toEqual([]);
+  });
+
+  it("uses a matching scoped grant to satisfy ASK without skipping the safety check", async () => {
+    const store = createTrustStore(tmpDir);
+    store.approveInvocation("saved_confirmation", {}, "always", { userId: "user1", source: "agent" });
+    const calls: string[] = [];
+    const evaluate = vi.fn(async () => ({ verdict: "ASK" as const, reason: "confirm operation" }));
+    const approve = vi.fn().mockResolvedValue("deny");
+    const wrapped = wrapToolWithTrustCheck(makeCountingTool("saved_confirmation", calls), store, "user1", {
+      config: makeConfig(), getLastUserMessage: () => "continue", evaluateToolCall: evaluate, onApprovalNeeded: approve,
+    }, { level: "elevated" });
+
+    await wrapped.execute("call", {});
+    expect(calls).toHaveLength(1);
+    expect(evaluate).toHaveBeenCalledOnce();
+    expect(approve).not.toHaveBeenCalled();
+  });
+
+  it("requires a fresh decision when current guidelines differ from a saved confirmation", async () => {
+    const calls: string[] = [];
+    let guidelines = "Permit publishing to the project collection.";
+    const approve = vi.fn().mockResolvedValueOnce("allow_always").mockResolvedValue("deny");
+    const wrapped = wrapToolWithTrustCheck(makeCountingTool("policy_scoped_write", calls), createTrustStore(tmpDir), "user1", {
+      config: makeConfig(), getLastUserMessage: () => "continue",
+      getOperationalGuidelines: () => guidelines,
+      evaluateToolCall: async () => ({ verdict: "ASK", reason: "confirm publication" }), onApprovalNeeded: approve,
+    }, { level: "elevated" });
+
+    await wrapped.execute("first", {});
+    await wrapped.execute("same-policy", {});
+    guidelines = "Publication requires confirmation for every call.";
+    await wrapped.execute("second", {});
+    expect(calls).toHaveLength(2);
+    expect(approve).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not let saved confirmations bypass an unavailable guardrail", async () => {
+    const store = createTrustStore(tmpDir);
+    store.approveInvocation("unavailable_read", {}, "always", { userId: "user1", source: "agent" });
+    const calls: string[] = [];
+    const approve = vi.fn().mockResolvedValue("deny");
+    const wrapped = wrapToolWithTrustCheck(makeCountingTool("unavailable_read", calls), store, "user1", {
+      config: makeConfig(), getLastUserMessage: () => "continue",
+      evaluateToolCall: async () => { throw new Error("provider unavailable"); }, onApprovalNeeded: approve,
+    }, { level: "elevated" });
+
+    await wrapped.execute("call", {});
+    expect(calls).toEqual([]);
+    expect(approve).toHaveBeenCalledOnce();
+  });
+
+  it("does not let legacy tool availability grants satisfy ASK", async () => {
+    const calls: string[] = [];
+    const approve = vi.fn().mockResolvedValue("deny");
+    const wrapped = wrapToolWithTrustCheck(makeCountingTool("legacy_ask", calls), createTrustStore(tmpDir, ["legacy_ask"]), "user1", {
+      config: makeConfig(), getLastUserMessage: () => "continue",
+      evaluateToolCall: async () => ({ verdict: "ASK", reason: "confirm scope" }), onApprovalNeeded: approve,
+    }, { level: "elevated" });
+
+    await wrapped.execute("call", {});
+    expect(calls).toEqual([]);
+    expect(approve).toHaveBeenCalledOnce();
+  });
   it("allows Safe tools to execute normally", async () => {
     const tool = makeTool("memory_core_append", "saved");
     const store = createTrustStore(tmpDir);
@@ -88,12 +186,12 @@ describe("wrapToolWithTrustCheck", () => {
     expect(result.content[0].text).toBe("saved");
   });
 
-  it("blocks unapproved Elevated tools without inline approval", async () => {
+  it("executes a guardrail-allowed elevated call without first-use approval", async () => {
     registerToolCapabilities("test_elevated", {
       level: "elevated",
       capabilities: ["network"],
     });
-    const tool = makeTool("test_elevated", "should not run");
+    const tool = makeTool("test_elevated", "executed");
     const store = createTrustStore(tmpDir);
     const guardrailCalls: unknown[] = [];
     const wrapped = wrapToolWithTrustCheck(tool, store, "user1", {
@@ -103,7 +201,7 @@ describe("wrapToolWithTrustCheck", () => {
     });
 
     const result = await wrapped.execute("call1", { url: "https://example.com" });
-    expect(result.content[0].text).toContain("Permission required");
+    expect(result.content[0].text).toBe("executed");
     expect(guardrailCalls).toHaveLength(1);
   });
 
@@ -117,7 +215,7 @@ describe("wrapToolWithTrustCheck", () => {
     const wrapped = wrapToolWithTrustCheck(tool, store, "user2", {
       config: makeConfig(),
       getLastUserMessage: () => undefined,
-      evaluateToolCall: async () => ({ verdict: "ALLOW", reason: "safe" }),
+      evaluateToolCall: async () => ({ verdict: "ASK", reason: "confirm destination" }),
     });
 
     await wrapped.execute("call1", { url: "https://example.com" });
@@ -144,7 +242,10 @@ describe("wrapToolWithTrustCheck", () => {
       config: makeConfig(),
       getLastUserMessage: () => "post the webhook",
       onApprovalNeeded: approvalCallback,
-      evaluateToolCall: allowGuardrail(guardrailCalls),
+      evaluateToolCall: async (input) => {
+        guardrailCalls.push(input);
+        return { verdict: "ASK", reason: "confirm webhook" };
+      },
       source: { threadId: "main", platform: "telegram", channelId: "123" },
     });
 
@@ -186,7 +287,7 @@ describe("wrapToolWithTrustCheck", () => {
   });
 
 
-  it("consumes legacy one-time availability after a guardrail allow", async () => {
+  it("does not require renewed availability approval after a legacy one-time grant is consumed", async () => {
     registerToolCapabilities("test_legacy_once", {
       level: "elevated",
       capabilities: ["shell"],
@@ -205,12 +306,12 @@ describe("wrapToolWithTrustCheck", () => {
     await wrapped.execute("call1", { command: "npm test" });
     const result = await wrapped.execute("call2", { command: "npm test" });
 
-    expect(calls).toHaveLength(1);
+    expect(calls).toHaveLength(2);
     expect(guardrailCalls).toHaveLength(2);
-    expect(result.content[0].text).toContain("Permission required");
+    expect(result.content[0].text).toBe("executed");
   });
 
-  it("skips guardrail for matching exact argument grants", async () => {
+  it("rechecks exact argument grants and never lets them override BLOCK", async () => {
     registerToolCapabilities("test_exact", {
       level: "elevated",
       capabilities: ["shell"],
@@ -228,9 +329,9 @@ describe("wrapToolWithTrustCheck", () => {
 
     const result = await wrapped.execute("call1", { command: "npm test" });
 
-    expect(result.content[0].text).toBe("executed");
-    expect(calls).toHaveLength(1);
-    expect(guardrail).not.toHaveBeenCalled();
+    expect(result.content[0].text).toContain("Blocked");
+    expect(calls).toHaveLength(0);
+    expect(guardrail).toHaveBeenCalledOnce();
   });
 
   it("does not use exact grants for unmatched arguments", async () => {
@@ -276,7 +377,7 @@ describe("wrapToolWithTrustCheck", () => {
     await wrapped.execute("call2", { command: "npm test" });
 
     expect(calls).toHaveLength(2);
-    expect(guardrailCalls).toHaveLength(1);
+    expect(guardrailCalls).toHaveLength(2);
   });
 
   it("blocks when the guardrail blocks the first invocation", async () => {
@@ -315,7 +416,7 @@ describe("wrapToolWithTrustCheck", () => {
     });
 
     await wrapped.execute("call1", { url: "https://example.com" });
-    expect(store.hasToolApproval("test_inline_always")).toBe(true);
+    expect(store.hasToolApproval("test_inline_always")).toBe(false);
     expect(store.isInvocationApproved("test_inline_always", { url: "https://example.com" }, { userId: "userC", source: "agent" })).toBe(true);
     const [grant] = store.listApproved().filter((record) => record.kind === "invocation");
     expect(Date.parse(grant.expiresAt ?? "")).toBeGreaterThan(Date.now());
@@ -544,6 +645,6 @@ describe("wrapToolsWithTrustChecks", () => {
     expect(safeResult.content[0].text).toBe("ok");
 
     const elevatedResult = await wrapped[1].execute("c2", {});
-    expect(elevatedResult.content[0].text).toContain("Permission required");
+    expect(elevatedResult.content[0].text).toBe("blocked");
   });
 });

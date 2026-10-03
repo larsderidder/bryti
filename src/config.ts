@@ -334,6 +334,12 @@ export interface Config {
   tools: {
     web_search: {
       enabled: boolean;
+      /** Anonymous Parallel is primary; SearXNG is its visible fallback. */
+      provider?: "parallel" | "searxng" | "brave";
+      parallel_access?: "anonymous" | "authenticated";
+      parallel_api_key?: string;
+      parallel_api_key_file?: string;
+      parallel_max_requests_per_hour?: number;
       /** SearXNG instance URL (no trailing slash). Used by workers and the opt-in main-agent web group. */
       searxng_url: string;
       /** Brave Search API key. If set, used instead of SearXNG. */
@@ -351,6 +357,10 @@ export interface Config {
       require_https: boolean;
       /** Argus executable name or path. Defaults to ARGUS_BIN or "argus". */
       argus_bin?: string;
+      /** Explicitly enable hosted Firecrawl fallback. A key alone does not enable it. */
+      firecrawl?: { enabled: boolean; api_key?: string };
+      /** Use hosted Parallel only when direct extraction is unusable. */
+      parallel?: { enabled: boolean };
     };
     workers: {
       /** Maximum number of workers that may run concurrently. Default: 3. */
@@ -399,12 +409,10 @@ export interface Config {
   active_hours?: ActiveHoursConfig;
   /** Trust and permission settings. */
   trust: {
-    /** Tool availability grants skip first-use prompts, but retain argument guardrail checks. */
+    /** Legacy tool grants retained for compatibility; they do not bypass guardrail checks or satisfy ASK. */
     approved_tools: string[];
     /** Human response window, independent of model inactivity. Default 30 minutes. */
     approval_timeout_ms?: number;
-    /** Operator-reviewed read-only extension implementations, pinned to their source bytes. */
-    read_only_extensions?: Array<{ path: string; sha256: string; tools: string[] }>;
   };
   /**
    * Agent definition: identity-specific config (tool groups, prompt sections,
@@ -666,6 +674,23 @@ function toolsFromConfig(substituted: Record<string, unknown>, dataDir: string):
   const raw = (substituted.tools ?? {}) as Record<string, unknown>;
   const webRaw = (raw.web_search ?? {}) as Record<string, unknown>;
   const workersRaw = (raw.workers ?? {}) as Record<string, unknown>;
+  const fetchRaw = (raw.fetch_url ?? {}) as Record<string, unknown>;
+  const firecrawlRaw = (fetchRaw.firecrawl ?? {}) as Record<string, unknown>;
+  const parallelRaw = (fetchRaw.parallel ?? {}) as Record<string, unknown>;
+  if (webRaw.parallel_access !== undefined && !["anonymous", "authenticated"].includes(String(webRaw.parallel_access))) {
+    throw new Error("tools.web_search.parallel_access must be anonymous or authenticated");
+  }
+  if (webRaw.provider !== undefined && !["parallel", "searxng", "brave"].includes(String(webRaw.provider))) {
+    throw new Error("tools.web_search.provider must be parallel, searxng or brave");
+  }
+  const parallelLimit = toFiniteNumber(webRaw.parallel_max_requests_per_hour) ?? 100;
+  if (!Number.isInteger(parallelLimit) || parallelLimit < 1 || parallelLimit > 10_000) {
+    throw new Error("tools.web_search.parallel_max_requests_per_hour must be between 1 and 10000");
+  }
+  let fetchBackend: FetchUrlBackend = "readability";
+  if (fetchRaw.backend === "argus") {
+    fetchBackend = "argus";
+  }
   const searxngUrl = typeof webRaw.searxng_url === "string"
     ? webRaw.searxng_url.replace(/\/+$/, "")
     : "https://searx.be";
@@ -680,6 +705,11 @@ function toolsFromConfig(substituted: Record<string, unknown>, dataDir: string):
   return {
     web_search: {
       enabled: webRaw.enabled !== false,
+      provider: (webRaw.provider ?? "parallel") as "parallel" | "searxng" | "brave",
+      parallel_access: (webRaw.parallel_access ?? "anonymous") as "anonymous" | "authenticated",
+      parallel_api_key: optionalString(webRaw.parallel_api_key),
+      parallel_api_key_file: optionalString(webRaw.parallel_api_key_file),
+      parallel_max_requests_per_hour: parallelLimit,
       searxng_url: searxngUrl,
       brave_api_key: (webRaw.brave_api_key as string) ?? undefined,
       parallel_enabled: webRaw.parallel_enabled === true,
@@ -687,9 +717,11 @@ function toolsFromConfig(substituted: Record<string, unknown>, dataDir: string):
     fetch_url: {
       timeout_ms: 10000,
       require_https: true,
-      ...(raw.fetch_url as object | undefined),
-      backend: ((raw.fetch_url as Record<string, unknown> | undefined)?.backend === "argus" ? "argus" : "readability") as FetchUrlBackend,
-      argus_bin: optionalString((raw.fetch_url as Record<string, unknown> | undefined)?.argus_bin),
+      ...fetchRaw,
+      backend: fetchBackend,
+      argus_bin: optionalString(fetchRaw.argus_bin),
+      firecrawl: { enabled: firecrawlRaw.enabled === true, api_key: optionalString(firecrawlRaw.api_key) },
+      parallel: { enabled: parallelRaw.enabled !== false },
     },
     workers: {
       max_concurrent: 3,
@@ -903,7 +935,6 @@ export function loadConfig(configPath?: string): Config {
     trust: {
       approved_tools: ((substituted.trust as { approved_tools?: string[] })?.approved_tools) ?? [],
       approval_timeout_ms: (substituted.trust as Config["trust"] | undefined)?.approval_timeout_ms,
-      read_only_extensions: (substituted.trust as Config["trust"] | undefined)?.read_only_extensions,
     },
     // Agent definition: prefer agent.yml if present, then look for agent_def
     // in config.yml, then fall back to personal-assistant defaults.
@@ -1021,21 +1052,6 @@ function validateConfig(config: Config): void {
   if (approvalTimeout !== undefined && (!Number.isInteger(approvalTimeout) || approvalTimeout < 1_000 || approvalTimeout > 45 * 60 * 1000)) {
     errors.push("trust.approval_timeout_ms must be an integer between 1000 and 2700000");
   }
-  const readOnlyExtensions = config.trust.read_only_extensions;
-  if (readOnlyExtensions !== undefined) {
-    if (!Array.isArray(readOnlyExtensions)) {
-      errors.push("trust.read_only_extensions must be an array");
-    } else {
-      for (const binding of readOnlyExtensions) {
-        if (!binding || typeof binding.path !== "string" || !path.isAbsolute(binding.path)
-          || typeof binding.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(binding.sha256)
-          || !Array.isArray(binding.tools) || binding.tools.length === 0
-          || !binding.tools.every((name) => typeof name === "string" && /^[a-zA-Z0-9_-]+$/.test(name))) {
-          errors.push("trust.read_only_extensions requires an absolute path, lowercase SHA-256 and non-empty tool names");
-        }
-      }
-    }
-  }
 
   // --- Fallback models must reference known providers ---
 
@@ -1152,7 +1168,7 @@ function validateConfig(config: Config): void {
   // --- Web tools need configured backends ---
 
   if (config.tools.web_search.enabled && !config.tools.web_search.searxng_url && !config.tools.web_search.brave_api_key) {
-    warnings.push("web_search is enabled but neither searxng_url nor brave_api_key is configured. Web search won't be available.");
+    warnings.push("No independent SearXNG or Brave search fallback is configured. Anonymous Parallel does not require credentials.");
   }
   if (!Number.isInteger(config.tools.fetch_url.timeout_ms) || config.tools.fetch_url.timeout_ms <= 0) {
     errors.push("fetch_url.timeout_ms must be a positive integer");

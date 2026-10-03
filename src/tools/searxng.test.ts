@@ -37,6 +37,13 @@ describe("SearXNG request boundary", () => {
   it("rejects a non-finite result limit", () => {
     expect(() => parseSearxngResults(payload, NaN)).toThrow("result limit");
   });
+
+  it("reports engine failures instead of claiming a confirmed empty search", async () => {
+    const base = await endpoint((_request, response) => response.end(JSON.stringify({ results: [], unresponsive_engines: [["google", "timeout"]] })));
+    const result = await createWebSearchTool(base).execute("degraded", { query: "query" });
+    expect(result.isError).toBe(true);
+    expect(text(result)).toContain("not a confirmed no-match result");
+  });
   it("caches identical requests and preserves an instance's path prefix", async () => {
     const urls: string[] = [];
     const base = await endpoint((request, response) => {

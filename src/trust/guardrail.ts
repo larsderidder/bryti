@@ -8,10 +8,9 @@
  * Replaces static allowlists with contextual understanding: the model knows
  * that `rm -rf node_modules` is cleanup but `rm -rf /` is destruction.
  *
- * The guardrail only sees tool name, arguments, and the last user message.
- * It never sees the full conversation context, so prompt injection in prior
- * turns can't influence the safety check. If the LLM call fails for any
- * reason, it defaults to ASK (fail-safe, not fail-open).
+ * The guardrail sees tool name, arguments, description, the last user message,
+ * and current approved operational guidelines, never the full conversation.
+ * Failed evaluation defaults to ASK and cannot reuse a saved confirmation.
  */
 
 import { completeSimple } from "@earendil-works/pi-ai/compat";
@@ -29,6 +28,8 @@ export interface GuardrailResult {
   verdict: GuardrailVerdict;
   /** Short explanation for the user (shown when ASK or BLOCK). */
   reason: string;
+  /** No valid safety decision was available; saved confirmations cannot replace a fresh decision. */
+  evaluationFailed?: boolean;
 }
 
 export interface GuardrailInput {
@@ -102,26 +103,27 @@ function buildGuardrailPrompt(input: GuardrailInput): string {
 function parseVerdict(response: string): GuardrailResult {
   const lines = response.trim().split("\n");
 
-  // Scan all lines for "VERDICT: reason" pattern (models sometimes prefix with explanation)
+  let result: GuardrailResult | undefined;
+  // Explanatory prose must not turn "do not allow" into an ALLOW verdict.
   for (const raw of lines) {
-    const line = raw.trim();
-    const match = line.match(/^(ALLOW|ASK|BLOCK):\s*(.+)$/i);
-    if (match) {
-      return {
-        verdict: match[1].toUpperCase() as GuardrailVerdict,
-        reason: match[2].trim(),
-      };
+    const match = raw.trim().match(/^(ALLOW|ASK|BLOCK):\s*(.+)$/i);
+    if (!match) {
+      continue;
+    }
+    const verdict = match[1].toUpperCase() as GuardrailVerdict;
+    if (result && result.verdict !== verdict) {
+      return { verdict: "ASK", reason: "Guardrail returned conflicting verdicts; explicit approval is required.", evaluationFailed: true };
+    }
+    if (!result) {
+      result = { verdict, reason: match[2].trim() };
     }
   }
-
-  // Fallback: look for the verdict word anywhere in the response
-  const upper = response.toUpperCase();
-  if (upper.includes("BLOCK")) return { verdict: "BLOCK", reason: lines[0].trim() };
-  if (upper.includes("ALLOW")) return { verdict: "ALLOW", reason: lines[0].trim() };
-  if (upper.includes("ASK")) return { verdict: "ASK", reason: lines[0].trim() };
+  if (result) {
+    return result;
+  }
 
   // Unparseable: fail safe
-  return { verdict: "ASK", reason: `Guardrail returned unparseable response: ${lines[0].trim().slice(0, 100)}` };
+  return { verdict: "ASK", reason: `Guardrail returned unparseable response: ${lines[0].trim().slice(0, 100)}`, evaluationFailed: true };
 }
 
 // ---------------------------------------------------------------------------
@@ -209,7 +211,7 @@ export async function evaluateToolCall(
       controller.abort();
     }
   }
-  return { verdict: "ASK", reason: "Guardrail models unavailable; explicit approval is required." };
+  return { verdict: "ASK", reason: "Guardrail models unavailable; explicit approval is required.", evaluationFailed: true };
 }
 
 /**

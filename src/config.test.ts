@@ -44,21 +44,24 @@ describe("Config", () => {
   });
 
 
-  it("loads bounded approval waits and operator-pinned read-only extension tools", () => {
-    const trust = { approval_timeout_ms: 30 * 60 * 1000,
-      read_only_extensions: [{ path: "/srv/extensions/calendar.ts", sha256: "a".repeat(64), tools: ["calendar_read"] }] };
+  it("loads bounded approval waits", () => {
+    const trust = { approval_timeout_ms: 30 * 60 * 1000 };
     fs.writeFileSync(path.join(tempDir, "config.yml"), JSON.stringify({
       telegram: { token: "test-token" }, models: { providers: [{ name: "openai", api: "openai-responses", models: [] }] }, trust,
     }));
     expect(loadConfig().trust).toEqual({ approved_tools: [], ...trust });
   });
 
+  it("ignores obsolete read-only pins rather than requiring them for integration access", () => {
+    fs.writeFileSync(path.join(tempDir, "config.yml"), JSON.stringify({
+      telegram: { token: "test-token" }, models: { providers: [{ name: "openai", api: "openai-responses", models: [] }] },
+      trust: { read_only_extensions: "obsolete" },
+    }));
+    expect(loadConfig().trust).toEqual({ approved_tools: [] });
+  });
+
   it.each([
     { approval_timeout_ms: 0 }, { approval_timeout_ms: 46 * 60 * 1000 }, { approval_timeout_ms: "1800000" },
-    { read_only_extensions: "all" }, { read_only_extensions: [null] },
-    { read_only_extensions: [{ path: "relative.ts", sha256: "a".repeat(64), tools: ["read"] }] },
-    { read_only_extensions: [{ path: "/srv/read.ts", sha256: "not-a-pin", tools: ["read"] }] },
-    { read_only_extensions: [{ path: "/srv/read.ts", sha256: "a".repeat(64), tools: [] }] },
   ])("rejects unsafe trust configuration %j", (trust) => {
     fs.writeFileSync(path.join(tempDir, "config.yml"), JSON.stringify({
       telegram: { token: "test-token" }, models: { providers: [{ name: "openai", api: "openai-responses", models: [] }] }, trust,
@@ -203,6 +206,11 @@ cron: []
     expect(config.tools.fetch_url.timeout_ms).toBe(10000);
     expect(config.tools.fetch_url.backend).toBe("readability");
     expect(config.tools.fetch_url.require_https).toBe(true);
+    expect(config.tools.fetch_url.firecrawl?.enabled).toBe(false);
+    expect(config.tools.web_search.provider).toBe("parallel");
+    expect(config.tools.web_search.parallel_access).toBe("anonymous");
+    expect(config.tools.web_search.parallel_max_requests_per_hour).toBe(100);
+    expect(config.tools.fetch_url.parallel?.enabled).toBe(true);
     expect(config.agent.thinking_level).toBe("high");
     expect(config.tools.workers.thinking_level).toBe("medium");
     expect(config.web_e2ee).toEqual({
@@ -235,6 +243,8 @@ tools:
   fetch_url:
     backend: argus
     argus_bin: /usr/local/bin/argus
+    firecrawl:
+      api_key: placeholder
 cron: []
 `;
     fs.writeFileSync(path.join(tempDir, "config.yml"), configContent);
@@ -243,6 +253,7 @@ cron: []
 
     expect(config.tools.fetch_url.backend).toBe("argus");
     expect(config.tools.fetch_url.argus_bin).toBe("/usr/local/bin/argus");
+    expect(config.tools.fetch_url.firecrawl).toEqual({ enabled: false, api_key: "placeholder" });
   });
 
   it("should load configured thinking levels", () => {

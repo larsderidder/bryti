@@ -1,7 +1,6 @@
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import {
   canonicalizeToolArgs,
-  checkPermission,
   extractToolDestination,
   getToolCapabilities,
   setPendingApproval,
@@ -133,9 +132,9 @@ async function runGuardrail(
   params: unknown,
   context?: TrustWrapperContext,
   signal?: AbortSignal,
-): Promise<AbortableResult<GuardrailResult>> {
+): Promise<AbortableResult<GuardrailResult & { guidelinesHash?: string }>> {
   if (!context?.config) {
-    return { verdict: "ASK", reason: "Guardrail unavailable." };
+    return { verdict: "ASK", reason: "Guardrail unavailable.", evaluationFailed: true };
   }
   try {
     const input: GuardrailInput = {
@@ -145,12 +144,22 @@ async function runGuardrail(
       toolDescription: tool.description,
       operationalGuidelines: context.getOperationalGuidelines?.(),
     };
-    if (context.evaluateToolCall) {
-      return await awaitAbortable(context.evaluateToolCall(input), signal);
+    let guidelinesHash: string | undefined;
+    if (input.operationalGuidelines !== undefined) {
+      guidelinesHash = hashToolArgs(input.operationalGuidelines);
     }
-    return await awaitAbortable(evaluateToolCall(context.config, input, context.modelInfra, signal), signal);
+    let result: AbortableResult<GuardrailResult>;
+    if (context.evaluateToolCall) {
+      result = await awaitAbortable(context.evaluateToolCall(input), signal);
+    } else {
+      result = await awaitAbortable(evaluateToolCall(context.config, input, context.modelInfra, signal), signal);
+    }
+    if (result === ABORTED_PROMISE) {
+      return result;
+    }
+    return { ...result, guidelinesHash };
   } catch {
-    return { verdict: "ASK", reason: "Guardrail unavailable." };
+    return { verdict: "ASK", reason: "Guardrail unavailable.", evaluationFailed: true };
   }
 }
 
@@ -209,19 +218,6 @@ export function wrapToolWithTrustCheck<T extends AgentTool<any>>(
     if (signalAborted(signal)) {
       return aborted(tool.name);
     }
-    if (!freshApproval && trustStore.consumeInvocationOnce(tool.name, params, provenance)) {
-      if (signalAborted(signal)) {
-        return aborted(tool.name);
-      }
-      return originalExecute.call(tool, toolCallId, params, signal, onUpdate);
-    }
-
-    if (!freshApproval && trustStore.isInvocationApproved(tool.name, params, provenance)) {
-      if (signalAborted(signal)) {
-        return aborted(tool.name);
-      }
-      return originalExecute.call(tool, toolCallId, params, signal, onUpdate);
-    }
 
     const guardrailResult = await runGuardrail(tool, params, context, signal);
     if (guardrailResult === ABORTED_PROMISE) {
@@ -234,18 +230,24 @@ export function wrapToolWithTrustCheck<T extends AgentTool<any>>(
     if (guardrailResult.verdict === "BLOCK") {
       return blocked(guardrailResult.reason);
     }
+    if (guardrailResult.guidelinesHash) {
+      provenance.guidelinesHash = guardrailResult.guidelinesHash;
+    }
 
-    const toolAvailable = trustStore.hasToolApproval(tool.name);
-    const needsApproval = freshApproval || (caps.approvalRequired !== false && !toolAvailable) || guardrailResult.verdict === "ASK";
+    // A saved confirmation can satisfy ASK, but never bypass the current safety verdict.
+    let invocationApproved = false;
+    if (!freshApproval && !guardrailResult.evaluationFailed) {
+      invocationApproved = trustStore.consumeInvocationOnce(tool.name, params, provenance)
+        || trustStore.isInvocationApproved(tool.name, params, provenance);
+    }
+    const needsApproval = freshApproval || (guardrailResult.verdict === "ASK" && !invocationApproved);
     if (!needsApproval) {
       trustStore.consumeOnce(tool.name);
     }
     if (needsApproval) {
-      const permission = checkPermission(tool.name, trustStore);
-      let reason = permission.blockReason ?? guardrailResult.reason;
+      const reason = guardrailResult.reason;
       let heading = "Permission request";
       if (guardrailResult.verdict === "ASK") {
-        reason = guardrailResult.reason;
         heading = "Confirmation needed";
       }
       const prompt = buildApprovalPrompt(
@@ -297,9 +299,6 @@ export function wrapToolWithTrustCheck<T extends AgentTool<any>>(
         trustStore.approveInvocation(tool.name, params, "once", { userId, source: "guidelines" });
       } else if (result === "allow_always") {
         const expiresAt = nextAlwaysApprovalExpiry();
-        if (!toolAvailable) {
-          trustStore.approve(tool.name, "always", provenance, expiresAt);
-        }
         trustStore.approveInvocation(tool.name, params, "always", provenance, expiresAt);
       } else {
         trustStore.approveInvocation(tool.name, params, "once", provenance);

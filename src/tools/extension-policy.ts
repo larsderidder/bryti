@@ -43,9 +43,6 @@ export function createExtensionToolPolicy(options: ExtensionTrustContext) {
       level: "elevated", capabilities: ["network", "filesystem", "shell"],
       reason: "Extension tool with unrestricted access.",
     });
-    const binding = options.context?.config.trust?.read_only_extensions?.find((entry) =>
-      sourcePath && path.isAbsolute(sourcePath) && path.resolve(entry.path) === path.resolve(sourcePath)
-      && entry.tools.includes(definition.name));
     const sourceDigest = (): string | undefined => {
       if (!sourcePath || !path.isAbsolute(sourcePath)) {
         return undefined;
@@ -61,7 +58,6 @@ export function createExtensionToolPolicy(options: ExtensionTrustContext) {
       }
     };
     const registrationDigest = sourceDigest();
-    const reviewedAtRegistration = Boolean(binding && registrationDigest === binding.sha256);
     const protectedDefinition: T = {
       ...definition,
       exposure,
@@ -78,15 +74,11 @@ export function createExtensionToolPolicy(options: ExtensionTrustContext) {
         };
         const digest = sourceDigest();
         const sourceId = `${sourcePath ?? "<runtime>"}:${registrationDigest ?? "unverified"}:${digest ?? "unverified"}`;
-        let capabilities: ToolCapabilities = {
+        const capabilities: ToolCapabilities = {
           level: "elevated", capabilities: ["network", "filesystem", "shell"],
           reason: "Extension tool with unrestricted access.",
           sourceId,
         };
-        if (reviewedAtRegistration && digest === binding?.sha256) {
-          capabilities = { level: "elevated", capabilities: ["network"], approvalRequired: false,
-            sourceId, reason: "Operator-reviewed read-only integration. Guardrail evaluation still applies." };
-        }
         return wrapToolWithTrustCheck(executable, options.trustStore, options.userId, options.context, capabilities)
           .execute(callId, args, signal, onUpdate);
       },

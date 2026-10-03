@@ -231,10 +231,17 @@ models:
 
 tools:
   # Web search for workers and the optional main-agent `web` tool group.
-  # Set brave_api_key OR searxng_url. SearXNG can point at your own instance.
+  # Anonymous Parallel is primary. SearXNG is the independent fallback.
   web_search:
+    provider: parallel  # parallel | searxng | brave
+    parallel_access: anonymous  # no key or signup; authenticated is explicit opt-in
+    # These credentials are consulted only with parallel_access: authenticated.
+    # parallel_api_key: "${PARALLEL_API_KEY}"
+    # parallel_api_key_file: "/path/to/private/api-key"  # operator-owned, mode 0600
+    parallel_max_requests_per_hour: 100  # shared search/extract ceiling per process
+    # This resets on restart; authenticated account spending limits are separate.
     # brave_api_key: "${BRAVE_API_KEY}"  # https://api.search.brave.com/
-    searxng_url: "https://searx.be"
+    searxng_url: "https://search.xithing.eu"
     # Operator-controlled endpoint; HTTP/private hosts and path prefixes are supported.
     # HTTPS certificates are verified. Use NODE_EXTRA_CA_CERTS for a private CA.
     # SearXNG responses are bounded, cancellable, and cached briefly per tool instance.
@@ -242,13 +249,19 @@ tools:
     # Public research only: objectives, queries, URLs, and an opaque ID leave Bryti.
     parallel_enabled: false
 
-  # Safe URL extraction. Default backend is npm-native Readability so it works
-  # out of the box. Set backend: argus if you have Argus installed.
+  # Direct HTTP prefers native Markdown, otherwise extracts HTML with Readability.
+  # No browser execution or automatic archives. Argus remains an explicit opt-in.
   fetch_url:
     backend: readability  # readability | argus
     timeout_ms: 10000
     require_https: true
     # argus_bin: "argus"  # Optional for backend: argus, defaults to ARGUS_BIN or argus
+    parallel:
+      enabled: true  # one hosted fallback after unusable direct extraction
+    # Hosted content is labelled with unverified target-status/redirect metadata.
+    firecrawl:
+      enabled: false  # Sends the public URL to hosted Firecrawl only when enabled.
+      # api_key: "${FIRECRAWL_API_KEY}"  # A key alone does not enable paid fallback.
 
   workers:
     max_concurrent: 3
@@ -352,16 +365,9 @@ tools:
 #     message: "Good morning! Brief me on anything I need to know today."
 
 # trust:
-#   approved_tools: [shell_exec, http_request]
+#   # ALLOW runs without a first-use prompt; ASK needs scoped confirmation; BLOCK stops execution.
 #   # Human response time does not count as model/tool inactivity. Range: 1000 to 2700000.
 #   approval_timeout_ms: 1800000
-#   # Operator-only classification, after reviewing the implementation and its dependencies.
-#   # Pin with sha256sum; changing the source disables its read-only classification.
-#   # MCP/server readOnlyHint annotations cannot grant this permission.
-#   read_only_extensions:
-#     - path: /srv/bryti/data/files/extensions/calendar.ts
-#       sha256: REPLACE_WITH_REVIEWED_FILE_SHA256
-#       tools: [google_calendar_list, google_calendar_events, google_calendar_today]
 
 # active_hours:
 #   start: "08:00"

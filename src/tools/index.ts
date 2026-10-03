@@ -19,7 +19,7 @@ import { createCoreMemoryTools } from "./core-memory-tool.js";
 import { createArchivalMemoryTools } from "./archival-memory-tool.js";
 import { createConversationSearchTool } from "./conversation-search-tool.js";
 import { createFetchUrlTool } from "./fetch-url.js";
-import { createBraveSearchTool, createWebSearchTool } from "./web-search.js";
+import { createConfiguredSearchTool } from "./search-router.js";
 import { createParallelTools } from "./parallel-search.js";
 import { createProjectionTools, createProjectionStore, type ProjectionStore, type ProjectionTarget } from "../projection/index.js";
 import { createWorkerTools, createWorkerRegistry } from "../workers/index.js";
@@ -92,10 +92,8 @@ export function createTools(
   if (groups.has("web")) {
     if (config.tools.web_search.enabled) {
       const ws = config.tools.web_search;
-      if (ws.brave_api_key) {
-        tools.push(createBraveSearchTool(ws.brave_api_key));
-      } else if (ws.searxng_url) {
-        tools.push(createWebSearchTool(ws.searxng_url));
+      if (ws.provider === "parallel" || ws.brave_api_key || ws.searxng_url) {
+        tools.push(createConfiguredSearchTool(ws));
       }
       if (ws.parallel_enabled) {
         tools.push(...createParallelTools());
@@ -113,6 +111,17 @@ export function createTools(
       requireHttps: config.tools.fetch_url.require_https,
       argusBin: config.tools.fetch_url.argus_bin,
       searxngUrl: config.tools.web_search.searxng_url,
+      firecrawl: {
+        enabled: config.tools.fetch_url.firecrawl?.enabled === true,
+        apiKey: config.tools.fetch_url.firecrawl?.api_key,
+      },
+      parallel: {
+        enabled: config.tools.fetch_url.parallel?.enabled === true,
+        access: config.tools.web_search.parallel_access ?? "anonymous",
+        apiKey: config.tools.web_search.parallel_api_key,
+        apiKeyFile: config.tools.web_search.parallel_api_key_file,
+        maxRequestsPerHour: config.tools.web_search.parallel_max_requests_per_hour,
+      }
     }));
 
     registerToolCapabilities("web_search", {

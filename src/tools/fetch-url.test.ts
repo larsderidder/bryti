@@ -11,6 +11,8 @@ vi.mock("node:child_process", () => ({
 vi.mock("axios", () => ({
   default: {
     get: vi.fn(),
+    post: vi.fn(),
+    isAxiosError: vi.fn(() => false),
   },
 }));
 
@@ -64,7 +66,7 @@ describe("createFetchUrlTool", () => {
   });
 
   it("uses npm-native Readability by default", async () => {
-    mockedAxios.get.mockResolvedValueOnce({ data: readableHtml });
+    mockedAxios.get.mockResolvedValueOnce({ data: readableHtml, status: 200, headers: { "content-type": "text/html" } });
 
     const tool = createFetchUrlTool();
     const result = await tool.execute("id", { url: "https://93.184.216.34/article" });
@@ -76,7 +78,8 @@ describe("createFetchUrlTool", () => {
     expect(mockedAxios.get).toHaveBeenCalledWith(
       "https://93.184.216.34/article",
       expect.objectContaining({
-        maxRedirects: 5,
+        maxRedirects: 3,
+        proxy: false,
         lookup: expect.any(Function),
       }),
     );
@@ -171,7 +174,7 @@ describe("createFetchUrlTool", () => {
   });
 
   it("can allow HTTP when explicitly configured", async () => {
-    mockedAxios.get.mockResolvedValueOnce({ data: readableHtml });
+    mockedAxios.get.mockResolvedValueOnce({ data: readableHtml, status: 200, headers: { "content-type": "text/html" } });
 
     const tool = createFetchUrlTool(45000, { requireHttps: false });
     const result = await tool.execute("id", { url: "http://93.184.216.34/article" });
@@ -181,5 +184,69 @@ describe("createFetchUrlTool", () => {
       "http://93.184.216.34/article",
       expect.any(Object),
     );
+  });
+
+  it("prefers native Markdown and preserves request code", async () => {
+    mockedAxios.get.mockResolvedValueOnce({ data: "# Guide\n\n```bash\nexport PARALLEL_API_KEY=placeholder\n```", status: 200, headers: { "content-type": "text/markdown" } });
+    const result = await createFetchUrlTool().execute("id", { url: "https://93.184.216.34/guide" });
+    expect(result.content[0].text).toContain("```bash");
+    expect(result.details?.extractor).toBe("native-markdown");
+  });
+
+  it("rejects 404 pages instead of returning navigation as evidence", async () => {
+    mockedAxios.get.mockResolvedValueOnce({ data: "<h1>Page Not Found</h1>", status: 404, headers: { "content-type": "text/html" } });
+    const result = await createFetchUrlTool().execute("id", { url: "https://93.184.216.34/missing" });
+    expect(result.details?.error).toContain("HTTP 404");
+    expect(mockedAxios.post).not.toHaveBeenCalled();
+  });
+
+  it("does not enable paid fallback from an ambient key", async () => {
+    vi.stubEnv("FIRECRAWL_API_KEY", "placeholder");
+    mockedAxios.get.mockResolvedValueOnce({ data: "Denied", status: 403, headers: { "content-type": "text/plain" } });
+    const result = await createFetchUrlTool().execute("id", { url: "https://93.184.216.34/denied" });
+    expect(result.details?.error).toContain("HTTP 403");
+    expect(mockedAxios.post).not.toHaveBeenCalled();
+  });
+
+  it("checks Firecrawl target status independently of API success", async () => {
+    mockedAxios.get.mockResolvedValueOnce({ data: "Denied", status: 403, headers: { "content-type": "text/plain" } });
+    mockedAxios.post.mockResolvedValueOnce({ data: { success: true, data: { markdown: "Not found", metadata: { statusCode: 404 } } } });
+    const tool = createFetchUrlTool(10000, { firecrawl: { enabled: true, apiKey: "placeholder" } });
+    const result = await tool.execute("id", { url: "https://93.184.216.34/guide" });
+    expect(result.details?.error).toContain("Firecrawl target status");
+  });
+
+  it("rejects hex IPv4-mapped IPv6 before network access", async () => {
+    const result = await createFetchUrlTool().execute("id", { url: "https://[::ffff:7f00:1]/admin" });
+    expect(result.details?.error).toContain("Blocked");
+    expect(mockedAxios.get).not.toHaveBeenCalled();
+    expect(execFileMock).not.toHaveBeenCalled();
+  });
+
+  it("requires an explicit Argus backend for archive recovery", async () => {
+    const result = await createFetchUrlTool().execute("id", { url: "https://93.184.216.34/guide", mode: "archive_ingest" });
+    expect(result.details?.error).toContain("Archive recovery requires");
+    expect(mockedAxios.get).not.toHaveBeenCalled();
+    expect(execFileMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects failed-quality Argus content even when text is present", async () => {
+    execFileMock.mockImplementationOnce((_bin, _args, _options, callback) => {
+      callback(null, JSON.stringify({ text: "Page Not Found", quality_passed: false }), "");
+    });
+    const result = await createFetchUrlTool(10000, { backend: "argus" }).execute("id", { url: "https://93.184.216.34/missing" });
+    expect(result.details?.error).toContain("failed-quality");
+  });
+
+  it("only accepts archived Argus content in the explicit archive mode", async () => {
+    const output = { text: "Archived content", quality_passed: true, source_type: "archive" };
+    execFileMock.mockImplementation((_bin, _args, _options, callback) => {
+      callback(null, JSON.stringify(output), "");
+    });
+    const tool = createFetchUrlTool(10000, { backend: "argus" });
+    const rejected = await tool.execute("id", { url: "https://93.184.216.34/guide" });
+    expect(rejected.details?.error).toContain("requires archive_ingest");
+    const accepted = await tool.execute("id", { url: "https://93.184.216.34/guide", mode: "archive_ingest" });
+    expect(accepted.content[0].text).toContain("Explicit archive recovery");
   });
 });

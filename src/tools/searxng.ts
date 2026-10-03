@@ -98,11 +98,11 @@ export interface SearchResult {
 }
 
 /** Drop malformed entries and reject an invalid catalog instead of trusting the response shape. */
-export function parseSearxngResults(value: unknown, limit: number): { results: SearchResult[]; total: number } {
+export function parseSearxngResults(value: unknown, limit: number): { results: SearchResult[]; total: number; unresponsiveEngines: string[][] } {
   if (!value || typeof value !== "object" || !Array.isArray((value as { results?: unknown }).results)) {
     throw new Error("Invalid SearXNG response: results must be an array");
   }
-  const response = value as { results: unknown[]; number_of_results?: unknown };
+  const response = value as { results: unknown[]; number_of_results?: unknown; unresponsive_engines?: unknown };
   if (!Number.isFinite(limit)) {
     throw new Error("Invalid SearXNG result limit");
   }
@@ -141,5 +141,13 @@ export function parseSearxngResults(value: unknown, limit: number): { results: S
   if (typeof response.number_of_results === "number" && Number.isFinite(response.number_of_results)) {
     total = Math.max(0, response.number_of_results);
   }
-  return { results, total };
+  const unresponsiveEngines: string[][] = [];
+  if (Array.isArray(response.unresponsive_engines)) {
+    for (const entry of response.unresponsive_engines.slice(0, 50)) {
+      if (Array.isArray(entry) && entry.every((field) => typeof field === "string")) {
+        unresponsiveEngines.push(entry.slice(0, 2).map((field: string) => field.slice(0, 200)));
+      }
+    }
+  }
+  return { results, total, unresponsiveEngines };
 }

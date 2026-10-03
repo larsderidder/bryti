@@ -240,9 +240,14 @@ export function createWebSearchTool(searxngUrl: string, options: SearxngOptions 
           }
         }
         response = structuredClone(response);
+        let warning: string | undefined;
+        if (response.unresponsiveEngines.length > 0) {
+          warning = "SearXNG reports degraded engines; zero results are not a confirmed no-match result.";
+        }
         return {
-          content: [{ type: "text", text: JSON.stringify({ results: response.results }, null, 2) }],
+          content: [{ type: "text", text: JSON.stringify({ results: response.results, warning }, null, 2) }],
           details: { query, ...response, cached, untrusted: true },
+          isError: response.results.length === 0 && response.unresponsiveEngines.length > 0,
         };
       } catch (error) {
         signal?.throwIfAborted();

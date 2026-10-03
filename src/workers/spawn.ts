@@ -17,7 +17,7 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { Config, ThinkingLevel } from "../config.js";
 import type { MemoryStore } from "../memory/store.js";
 import { embed } from "../memory/embeddings.js";
-import { createBraveSearchTool, createWebSearchTool } from "../tools/web-search.js";
+import { createConfiguredSearchTool } from "../tools/search-router.js";
 import { createParallelTools } from "../tools/parallel-search.js";
 import { createFetchUrlTool } from "../tools/fetch-url.js";
 import { createWorkerScopedTools } from "./scoped-tools.js";
@@ -209,10 +209,8 @@ export async function spawnWorkerSession(opts: {
 
   if (toolNames.includes("web_search") && config.tools.web_search.enabled) {
     const ws = config.tools.web_search;
-    if (ws.brave_api_key) {
-      workerTools.push(createBraveSearchTool(ws.brave_api_key));
-    } else if (ws.searxng_url) {
-      workerTools.push(createWebSearchTool(ws.searxng_url));
+    if (ws.provider === "parallel" || ws.brave_api_key || ws.searxng_url) {
+      workerTools.push(createConfiguredSearchTool(ws));
     }
     if (ws.parallel_enabled) {
       workerTools.push(...createParallelTools());
@@ -227,6 +225,17 @@ export async function spawnWorkerSession(opts: {
     requireHttps: config.tools.fetch_url.require_https,
     argusBin: config.tools.fetch_url.argus_bin,
     searxngUrl: config.tools.web_search.searxng_url,
+    firecrawl: {
+      enabled: config.tools.fetch_url.firecrawl?.enabled === true,
+      apiKey: config.tools.fetch_url.firecrawl?.api_key,
+    },
+    parallel: {
+      enabled: config.tools.fetch_url.parallel?.enabled === true,
+      access: config.tools.web_search.parallel_access ?? "anonymous",
+      apiKey: config.tools.web_search.parallel_api_key,
+      apiKeyFile: config.tools.web_search.parallel_api_key_file,
+      maxRequestsPerHour: config.tools.web_search.parallel_max_requests_per_hour,
+    }
   }));
 
   // Scoped file tools are always present — they are the worker's only way to

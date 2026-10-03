@@ -34,9 +34,10 @@ describe("parseVerdict", () => {
     expect(result.verdict).toBe("ALLOW");
   });
 
-  it("handles verdict without colon", () => {
+  it("fails closed when a verdict has no required colon", () => {
     const result = parseVerdict("ALLOW listing files");
-    expect(result.verdict).toBe("ALLOW");
+    expect(result.verdict).toBe("ASK");
+    expect(result.evaluationFailed).toBe(true);
   });
 
   it("defaults to ASK on unparseable response", () => {
@@ -59,19 +60,27 @@ describe("parseVerdict", () => {
     expect(result.reason).toBe("user explicitly requested restart");
   });
 
-  it("falls back to word search when no VERDICT: pattern found", () => {
+  it("does not treat a verdict word inside explanatory prose as authorization", () => {
     const result = parseVerdict("This action should be ALLOWED because it is safe");
-    expect(result.verdict).toBe("ALLOW");
+    expect(result.verdict).toBe("ASK");
+    expect(result.evaluationFailed).toBe(true);
   });
 
-  it("word search prefers BLOCK over ALLOW", () => {
+  it("fails closed on explanatory prose without a valid verdict", () => {
     const result = parseVerdict("I would not allow this, it should be blocked");
-    expect(result.verdict).toBe("BLOCK");
+    expect(result.verdict).toBe("ASK");
+    expect(result.evaluationFailed).toBe(true);
   });
 
   it("handles empty response", () => {
     const result = parseVerdict("");
     expect(result.verdict).toBe("ASK");
+  });
+
+  it.each(["Do not allow this operation", "ALLOW: safe\nBLOCK: unsafe"])("requires a clear safety decision: %s", (response) => {
+    const result = parseVerdict(response);
+    expect(result.verdict).toBe("ASK");
+    expect(result.evaluationFailed).toBe(true);
   });
 });
 

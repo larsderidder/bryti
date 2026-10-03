@@ -7,45 +7,17 @@
 import dns from "node:dns";
 import { lookup } from "node:dns/promises";
 import net from "node:net";
+import ipaddr from "ipaddr.js";
 
 /**
  * Check if a resolved IP address is private or reserved.
  */
 export function isPrivateIp(ip: string): boolean {
-  const lowerIp = ip.toLowerCase();
-  // IPv4-mapped IPv6 (::ffff:x.x.x.x): extract the IPv4 part
-  const v4Mapped = lowerIp.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/i);
-  const addr = v4Mapped ? v4Mapped[1] : ip;
-
-  if (net.isIPv4(addr)) {
-    const parts = addr.split(".").map((part) => parseInt(part, 10));
-    const [first, second] = parts;
-
-    // Local, private, link-local, carrier-grade NAT, benchmarking, multicast,
-    // and reserved ranges are not valid public fetch targets.
-    if (first === 0) return true;
-    if (first === 10) return true;
-    if (first === 127) return true;
-    if (first === 169 && second === 254) return true;
-    if (first === 172 && second >= 16 && second <= 31) return true;
-    if (first === 192 && second === 168) return true;
-    if (first === 100 && second >= 64 && second <= 127) return true;
-    if (first === 192 && second === 0 && (parts[2] === 0 || parts[2] === 2)) return true;
-    if (first === 198 && (second === 18 || second === 19)) return true;
-    if (first === 198 && second === 51 && parts[2] === 100) return true;
-    if (first === 203 && second === 0 && parts[2] === 113) return true;
-    if (first >= 224) return true;
-    return false;
+  try {
+    return ipaddr.process(ip).range() !== "unicast";
+  } catch {
+    return true;
   }
-
-  // IPv6 local, private, link-local, multicast, and unspecified ranges.
-  if (lowerIp === "::" || lowerIp === "::1") return true;
-  if (lowerIp.startsWith("fc") || lowerIp.startsWith("fd")) return true;
-  if (lowerIp.startsWith("fe8") || lowerIp.startsWith("fe9") || lowerIp.startsWith("fea") || lowerIp.startsWith("feb")) return true;
-  if (lowerIp.startsWith("ff")) return true;
-  if (lowerIp.startsWith("2001:db8") || lowerIp.startsWith("2001:2") || lowerIp.startsWith("2001:10")) return true;
-
-  return false;
 }
 
 /**
@@ -88,7 +60,25 @@ export function isInternalHostname(hostname: string): boolean {
   );
 }
 
-export async function assertSafePublicUrl(rawUrl: string, requireHttps = true): Promise<SafePublicUrl> {
+/** Cancel waiting for DNS without allowing a late resolver completion to start a request. */
+export function lookupWithSignal(hostname: string, signal?: AbortSignal): Promise<dns.LookupAddress[]> {
+  if (!signal) {
+    return lookup(hostname, { all: true });
+  }
+  signal.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const abort = () => reject(signal.reason);
+    signal.addEventListener("abort", abort, { once: true });
+    lookup(hostname, { all: true }).then((addresses) => {
+      signal.removeEventListener("abort", abort);
+      resolve(addresses);
+    }, (error: unknown) => {
+      signal.removeEventListener("abort", abort);
+      reject(error);
+    });
+  });
+}
+export async function assertSafePublicUrl(rawUrl: string, requireHttps = true, signal?: AbortSignal): Promise<SafePublicUrl> {
   if (rawUrl.length > 2048) {
     throw new Error("URL is too long.");
   }
@@ -125,7 +115,7 @@ export async function assertSafePublicUrl(rawUrl: string, requireHttps = true): 
 
   const records = literalVersion
     ? [{ address: hostname }]
-    : await lookup(hostname, { all: true, verbatim: true });
+    : await lookupWithSignal(hostname, signal);
   const addresses = records.map((record) => record.address);
   if (addresses.length === 0) {
     throw new Error(`No DNS records found for ${hostname}`);

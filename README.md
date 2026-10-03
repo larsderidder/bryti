@@ -144,9 +144,15 @@ Background sessions for long-running tasks. The main agent dispatches a worker w
 
 Workers are the default path for web research, with scoped file access and no extensions or MCP. The main agent can still receive untrusted content through worker results or opted-in direct web tools. Worker isolation restricts capabilities, and the main agent's tool calls retain Bryti's approvals.
 
-Direct main-agent web access is available as an explicit opt-in tool group. Add `web` to `agent.yml` `tools.groups` to expose `web_search` and `fetch_url` directly. The same `fetch_url` tool is always available to background workers. It uses npm-native Readability by default, is HTTPS-only by default, and is protected against private-network fetches before extraction. Worker isolation is still the safer choice for broad or adversarial research.
+Direct main-agent web access is available as an explicit opt-in tool group. Add `web` to `agent.yml` `tools.groups` to expose `web_search` and `fetch_url` directly. The same `fetch_url` tool is always available to background workers. It fetches public HTTPS pages directly, prefers native Markdown, and extracts HTML with Readability while preserving code blocks. DNS and redirects are checked before connection, and failed pages are rejected. It executes no JavaScript and never substitutes archives automatically. Worker isolation is still the safer choice for broad or adversarial research.
 
-If you prefer Argus extraction, set `tools.fetch_url.backend: argus` and install Argus separately. You can point Bryti at it with `ARGUS_BIN` or `tools.fetch_url.argus_bin`.
+`web_search` uses anonymous Parallel as primary, with visible SearXNG fallback on provider failure, request limits or empty results. No account or key is needed; anonymous access has lower limits and provider-managed fast mode. Domain and date constraints are query hints, not guaranteed provider filters. Set `tools.web_search.provider` to `searxng` or `brave` to select another primary. Authenticated access requires explicit `tools.web_search.parallel_access: authenticated`. Only then are `parallel_api_key`, `PARALLEL_API_KEY` or a private key file consulted. The default key file is `~/.config/parallel/api-key`, operator-owned with no group/other permissions. Keys alone never enable authenticated access.
+
+Search and extraction share `tools.web_search.parallel_max_requests_per_hour` within one process. This ceiling resets on restart and does not coordinate instances. Authenticated account spending limits are separate. Calls have deadlines, response bounds, no redirects and no automatic retries. `tools.fetch_url.parallel.enabled` controls hosted extraction after unusable direct content, using the same access mode as search. Known 404s, unsafe URLs and cancellation never trigger it. Parallel content is labelled hosted; target status and final redirects remain unverified. Firecrawl is separately opt-in; disable Parallel extraction to use Firecrawl instead.
+
+Firecrawl is a separate opt-in hosted fallback. To use it instead of Parallel, set `tools.fetch_url.parallel.enabled: false`, enable `tools.fetch_url.firecrawl.enabled: true`, and configure `tools.fetch_url.firecrawl.api_key`. A Firecrawl key alone does not enable it. Requests require successful target-status metadata and never run after cancellation or for a 404.
+
+If you explicitly want legacy Argus extraction, set `tools.fetch_url.backend: argus` and install Argus separately. You can point Bryti at it with `ARGUS_BIN` or `tools.fetch_url.argus_bin`. Archived results require the explicit `archive_ingest` mode. CLI results without quality/completeness diagnostics are labelled unverified.
 
 Local Argus CLI extraction uses explicit development standalone mode and stores its state in `$XDG_DATA_HOME/argus-cli`, defaulting to `~/.local/share/argus-cli`. `ARGUS_DATA_ROOT` can override that directory, but it must not point at a long-lived Argus service's state because standalone calls persist provider registrations. Explicit `ARGUS_MCP_STANDALONE` settings are preserved; `ARGUS_AUTHORITY_URL` and `ARGUS_ENV=production` prevent automatic standalone configuration.
 
@@ -177,20 +183,13 @@ You can steer a running worker mid-task to narrow its focus or redirect its rese
 
 Elevated tools use a guardrail to evaluate the call's arguments against the last user message and approved operational guidelines. Provider or authentication failures try `agent.guardrail_model`, the primary model, then fallback models within a shared timeout; a safety verdict ends evaluation. If every model is unavailable, the call requires explicit approval.
 
-First use also requires tool approval, except for read-only extension tools reviewed and pinned by the operator through `trust.read_only_extensions`. These bindings include the source path, SHA-256 and specific tool names; source changes remove the read-only classification and invalidate exact-call grants for the old implementation. Server-provided read-only hints do not grant permissions, and a source pin does not sandbox an extension or verify its dependencies.
+The guardrail is the permission decision for elevated tools, including integrations and MCP tools. ALLOW executes without a separate first-use approval; ASK needs confirmation unless the user already granted that exact call within the same scope and approved guidelines; BLOCK always prevents execution. Every elevated call is evaluated, including calls with saved confirmations. Failed evaluation cannot reuse a saved confirmation. Legacy tool-level grants do not bypass the guardrail or satisfy ASK, and no read-only source pins are needed.
 
-Pre-approve tools in config to skip the first-use prompt:
-
-```yaml
-trust:
-  approved_tools:
-    - shell_exec
-    - http_request
-```
+Extension descriptions and server-provided read-only hints are untrusted metadata, not permission grants. Source changes invalidate exact-call confirmations for the previous implementation. Extensions run with the application's operating-system permissions; the guardrail is not a filesystem sandbox.
 
 Approval requests wait 30 minutes by default, configurable through `trust.approval_timeout_ms` with a 45-minute maximum. Waiting for a human pauses model and tool inactivity deadlines, while the overall turn limit remains one hour. Expiry means no decision arrived and no action ran; Bryti may consider asking later without immediately retrying or bypassing approval. An explicit denial stops the action. Pending requests are cancelled on abort or shutdown and are not restored after a restart.
 
-The "Same call for 30 days" button stores exact arguments and conversation scope, including an automation occurrence when present. Operational guidelines are per-user: `operational_guidelines_read` returns their current content and revision, and `operational_guidelines_update` proposes a replacement. Each update gets a fresh guardrail check against the existing policy and explicit approval; saved grants cannot approve subsequent policy changes. Guidelines enter the main session's prompt and guardrail checks. The stored revision must match its latest approval receipt, so editing, deleting or replaying the guideline file cannot silently replace approved policy. This uses Bryti's existing trusted state boundary; unrestricted shell access is not a filesystem sandbox.
+The "Same call for 30 days" button stores exact arguments and conversation scope, including an automation occurrence when present, the extension implementation, and the approved guideline content. Changing guidelines invalidates those confirmations for future ASK verdicts. Operational guidelines are per-user: `operational_guidelines_read` returns their current content and revision, and `operational_guidelines_update` proposes a replacement. Each update gets a fresh guardrail check against the existing policy and explicit approval; saved grants cannot approve subsequent policy changes. Guidelines enter the main session's prompt and guardrail input. Approval receipts and revision checks reject raw edits, deletion, stale concurrent proposals, and replay of an older policy. These records share Bryti's existing trusted state boundary; they do not protect against an actor with unrestricted shell access to application state.
 
 ### Self-extending
 

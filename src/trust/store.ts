@@ -12,8 +12,6 @@ export interface ToolCapabilities {
   level: CapabilityLevel;
   capabilities?: Capability[];
   reason?: string;
-  /** Operator-vetted read-only implementations may skip the first-use prompt after ALLOW. */
-  approvalRequired?: boolean;
   /** Policy changes must be evaluated and explicitly approved on every invocation. */
   requiresFreshApproval?: boolean;
   /** Bind exact-call grants to an application-identified extension implementation. */
@@ -29,6 +27,8 @@ export interface ApprovalProvenance {
   channelThreadId?: string;
   source?: string;
   toolSource?: string;
+  /** Approved guideline content used when this confirmation was granted. */
+  guidelinesHash?: string;
 }
 
 export interface ApprovalRecord {
@@ -257,6 +257,7 @@ const PROVENANCE_KEYS = [
   "automationId",
   "source",
   "toolSource",
+  "guidelinesHash",
 ] as const;
 
 function normalizeProvenance(provenance?: ApprovalProvenance): ApprovalProvenance | undefined {
@@ -280,6 +281,9 @@ function matchesProvenance(record: ApprovalRecord, provenance?: ApprovalProvenan
   const stored = record.provenance;
   const current = normalizeProvenance(provenance);
   if (current?.toolSource && current.toolSource !== stored?.toolSource) {
+    return false;
+  }
+  if (current?.guidelinesHash && current.guidelinesHash !== stored?.guidelinesHash) {
     return false;
   }
   if (!stored) {
@@ -341,6 +345,7 @@ function invocationKey(toolName: string, args: unknown, provenance?: ApprovalPro
     scope?.automationId ?? "",
     scope?.source ?? "",
     scope?.toolSource ?? "",
+    scope?.guidelinesHash ?? "",
   ].join("\u0000");
 }
 

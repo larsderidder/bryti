@@ -1,7 +1,6 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import crypto from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Type } from "typebox";
 import type { ExtensionToolContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
@@ -67,42 +66,49 @@ describe("extension tool policy", () => {
   });
 
 
-  it.each(["reviewed", "changed", "other-source", "unverified-hint"])("only skips first-use approval for an unchanged operator-reviewed implementation: %s", async (mode) => {
+  it.each(["gmail_get_message", "google_calendar_today", "loki_query_sbl-prod", "mcp__test__read"])("executes allowed integration reads without pins or first-use approval: %s", async (name) => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "bryti-read-policy-"));
     directories.push(directory);
-    const file = path.join(directory, "read-integration.ts");
-    fs.writeFileSync(file, "reviewed read implementation");
     const tool = definition();
-    tool.name = "read_integration";
+    tool.name = name;
+    tool.description = "Read a configured integration";
     const approve = vi.fn().mockResolvedValue("deny");
     const evaluate = vi.fn(async () => ({ verdict: "ALLOW" as const, reason: "routine integration read" }));
     const policy = createExtensionToolPolicy({
       userId: "user", trustStore: createTrustStore(directory),
-      context: { config: { trust: { read_only_extensions: [{ path: file,
-        sha256: crypto.createHash("sha256").update("reviewed read implementation").digest("hex"),
-        tools: [tool.name] }] } } as never, getLastUserMessage: () => "read integration",
-      evaluateToolCall: evaluate, onApprovalNeeded: approve },
+      context: { config: {} as never, getLastUserMessage: () => "continue",
+        getOperationalGuidelines: () => "Routine reads support the agent's standing tasks.",
+        evaluateToolCall: evaluate, onApprovalNeeded: approve },
     });
-    let source = file;
-    if (mode === "other-source") {
-      source = path.join(directory, "other.ts");
-      fs.writeFileSync(source, "reviewed read implementation");
-    } else if (mode === "unverified-hint") {
-      source = "<inline:untrusted-server>";
-    }
-    const protectedTool = policy.protect(tool, source);
-    if (mode === "changed") {
-      fs.writeFileSync(file, "changed implementation");
-    }
-    const result = await protectedTool.execute("call", { value: "x" }, undefined, undefined,
+    const protectedTool = policy.protect(tool);
+    const context = { cwd: "sandbox" } as ExtensionToolContext;
+    await protectedTool.execute("first", { value: "first" }, undefined, undefined, context);
+    const result = await protectedTool.execute("second", { value: "second" }, undefined, undefined, context);
+
+    expect(evaluate).toHaveBeenCalledTimes(2);
+    expect(approve).not.toHaveBeenCalled();
+    expect(result.structuredContent).toEqual({ saved: true });
+  });
+
+  it.each(["ASK", "BLOCK"] as const)("does not let read-only hints override guardrail %s", async (verdict) => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "bryti-verdict-policy-"));
+    directories.push(directory);
+    const approve = vi.fn().mockResolvedValue("deny");
+    const tool = definition();
+    const execute = vi.fn(tool.execute);
+    tool.execute = execute;
+    const policy = createExtensionToolPolicy({
+      userId: "user", trustStore: createTrustStore(directory),
+      context: { config: {} as never, getLastUserMessage: () => "continue",
+        evaluateToolCall: async () => ({ verdict, reason: "outside routine scope" }), onApprovalNeeded: approve },
+    });
+    await policy.protect(tool).execute("call", { value: "x" }, undefined, undefined,
       { cwd: "sandbox" } as ExtensionToolContext);
-    expect(evaluate).toHaveBeenCalledOnce();
-    if (mode === "reviewed") {
-      expect(approve).not.toHaveBeenCalled();
-      expect(result.structuredContent).toEqual({ saved: true });
-    } else {
+    expect(execute).not.toHaveBeenCalled();
+    if (verdict === "ASK") {
       expect(approve).toHaveBeenCalledOnce();
-      expect(result.content[0]).toMatchObject({ text: expect.stringContaining("denied") });
+    } else {
+      expect(approve).not.toHaveBeenCalled();
     }
   });
 
