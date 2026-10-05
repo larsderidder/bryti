@@ -231,9 +231,9 @@ models:
 
 tools:
   # Web search for workers and the optional main-agent `web` tool group.
-  # Anonymous Parallel is primary. SearXNG is the independent fallback.
+  # Parallel and the configured SearXNG instance are queried concurrently.
   web_search:
-    provider: parallel  # parallel | searxng | brave
+    provider: parallel  # combined search; searxng | brave select one provider
     parallel_access: anonymous  # no key or signup; authenticated is explicit opt-in
     # These credentials are consulted only with parallel_access: authenticated.
     # parallel_api_key: "${PARALLEL_API_KEY}"

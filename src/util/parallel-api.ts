@@ -204,14 +204,23 @@ export function parallelSearch(input: {
   }, options).then((response) => ({ ...response, results: response.results.slice(0, Math.min(Math.max(input.count ?? 10, 1), 20)) }));
 }
 
-/** Request live full content for a URL already checked by the caller's public-URL guard. */
+/** Require full content for an exact URL already checked by the caller's public-URL guard. */
 export async function parallelExtract(url: string, options: ParallelApiOptions = {}): Promise<ParallelPage> {
   const response = await callParallel("extract", {
     urls: [url], full_content: true, fetch_policy: { max_age_seconds: 0 },
   }, options);
   const page = response.results.find((result) => result.url === new URL(url).href);
-  if (!page?.fullContent?.trim()) {
-    throw new Error("Parallel returned no full content for the requested URL");
+  if (response.results.length === 0) {
+    throw new Error("Parallel extraction returned no results");
+  }
+  if (!page) {
+    throw new Error("Parallel extraction URL mismatch; no result matched the requested URL");
+  }
+  if (!page.fullContent?.trim()) {
+    if (page.excerpts.length > 0) {
+      throw new Error("Parallel returned excerpts but no full content for the matching URL");
+    }
+    throw new Error("Parallel returned no full content for the matching URL");
   }
   const heading = /^#\s+([^\n]+)/m.exec(page.fullContent.slice(0, 1000))?.[1]?.trim() ?? "";
   if (/^(?:404|page not found|not found|access denied)$/i.test(page.title.trim())

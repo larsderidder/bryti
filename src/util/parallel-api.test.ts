@@ -94,4 +94,13 @@ describe("authenticated Parallel API", () => {
     await expect(fetchPage("https://127.0.0.1/", { parallel: { enabled: true, ...options() } })).rejects.toThrow("private");
     expect(post).not.toHaveBeenCalled();
   });
+
+  it.each([
+    { name: "empty result", results: [], error: "returned no results" },
+    { name: "different URL", results: [{ ...page, url: "https://example.com/other", full_content: "Evidence" }], error: "URL mismatch" },
+    { name: "missing content", results: [page], error: "no full content for the matching URL" },
+  ])("distinguishes an extraction $name", async ({ results, error }) => {
+    post.mockResolvedValue(response({ results, errors: [] }));
+    await expect(parallelExtract(page.url, options())).rejects.toThrow(error);
+  });
 });

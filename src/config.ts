@@ -334,7 +334,7 @@ export interface Config {
   tools: {
     web_search: {
       enabled: boolean;
-      /** Anonymous Parallel is primary; SearXNG is its visible fallback. */
+      /** Parallel selection queries anonymous Parallel and configured SearXNG concurrently. */
       provider?: "parallel" | "searxng" | "brave";
       parallel_access?: "anonymous" | "authenticated";
       parallel_api_key?: string;
