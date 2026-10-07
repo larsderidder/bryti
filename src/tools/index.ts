@@ -217,20 +217,14 @@ export function createTools(
       });
     }
     const workerRegistry = createWorkerRegistry();
-    const createWorkerToolsWithTarget = createWorkerTools as (
-      config: Config,
-      memoryStore: MemoryStore,
-      registry: ReturnType<typeof createWorkerRegistry>,
-      isWorkerSession: boolean,
-      projectionStore: ProjectionStore,
-      onTrigger: WorkerTriggerCallback | undefined,
-      getTarget: (() => ProjectionTarget | undefined | null) | undefined,
-      lifecycle: WorkerLifecycle | undefined,
-    ) => BrytiTool[];
-    tools.push(...createWorkerToolsWithTarget(
+    tools.push(...createWorkerTools(
       config, archivalStore, workerRegistry, false, resolvedProjectionStore, onWorkerTrigger,
-      getProjectionTarget, workerLifecycle,
+      getProjectionTarget, workerLifecycle, getWorkTarget,
     ));
+    registerToolCapabilities("worker_resume", {
+      level: "elevated", capabilities: ["network", "filesystem"],
+      reason: "Continues an interrupted worker conversation. Requires an explicit new user request, current ownership and the original remaining budget.",
+    });
   }
 
   // extensions_management (cont.) — system_restart

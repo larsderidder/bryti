@@ -8,6 +8,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
 import {
   createAgentSession,
   DefaultResourceLoader,
@@ -24,9 +25,11 @@ import { createWorkerScopedTools } from "./scoped-tools.js";
 import type { WorkerRegistry } from "./registry.js";
 import type { ProjectionStore, ProjectionTarget } from "../projection/store.js";
 import { createBrytiSettingsManager, createModelInfra, resolveModel, resolveFirstModel } from "../model-infra.js";
-import { attachWorkerRunTracker, type WorkerProgress, type WorkerRuntimePaths } from "./tracker.js";
+import { attachWorkerRunTracker, recoverWorkerProgress, type WorkerProgress } from "./tracker.js";
 import { writeWorkerStatus } from "./recovery.js";
-import { stopWorker } from "./lifecycle.js";
+import { commitWorkerOutcome, stopWorker } from "./lifecycle.js";
+import { withWorkerStore } from "./store.js";
+import { createTranscriptRepairExtension } from "../compaction/session-repair.js";
 import { createDiagnosticWriter, createSessionDiagnostics } from "../session-diagnostics.js";
 import { collectSessionUsage } from "../session-usage.js";
 import { createUsageTracker } from "../usage.js";
@@ -83,7 +86,8 @@ function buildWorkerSystemPrompt(task: string, workerDir: string): string {
 
 export interface WorkerStatusFile {
   worker_id: string;
-  status: "queued" | "running" | "complete" | "failed" | "timeout" | "cancelled" | "interrupted";
+  status: "queued" | "running" | "stopping" | "complete" | "failed" | "timeout" | "cancelled" | "interrupted";
+  stop_status?: "cancelled" | "timeout" | "interrupted";
   task: string;
   started_at: string;
   completed_at: string | null;
@@ -101,17 +105,15 @@ export interface WorkerStatusFile {
  * Write (or overwrite) the status.json file in the worker directory.
  *
  * This is the primary way the main agent reads worker status via worker_check.
- * worker_check first consults the in-memory registry; if the worker is no
- * longer there (e.g. after a restart or 24-hour cleanup) it falls back to
- * reading this file from disk. Writing is best-effort: failures are swallowed
- * so they never abort a completion or timeout handler.
+ * Durable receipts are authoritative; this file remains a compatibility view
+ * for older workers. Writing is best-effort after terminal receipt commitment.
  */
 export function writeStatusFile(workerDir: string, data: WorkerStatusFile): boolean {
   try {
     writeWorkerStatus(workerDir, data);
     return true;
   } catch {
-    console.warn("[workers] Status persistence failed; previous recovery record was retained");
+    console.warn("[workers] Derived status file could not be updated");
     return false;
   }
 }
@@ -142,6 +144,7 @@ export async function spawnWorkerSession(opts: {
   task: string;
   modelOverride: string | undefined;
   thinkingLevel?: ThinkingLevel;
+  modelCandidates?: string[];
   toolNames: AllowedTool[];
   memoryStore: MemoryStore;
   projectionStore?: ProjectionStore;
@@ -149,6 +152,8 @@ export async function spawnWorkerSession(opts: {
   timeoutMs: number;
   maxTurns?: number;
   onTrigger?: WorkerTriggerCallback;
+  sessionId?: string;
+  initialProgress?: WorkerProgress;
 }): Promise<void> {
   const {
     config,
@@ -184,7 +189,7 @@ export async function spawnWorkerSession(opts: {
   // Build the model candidate list for the fallback chain.
   // Priority: explicit override > worker default > agent fallback chain > primary.
   // Duplicates and nulls are removed so we don't retry the same model twice.
-  const rawCandidates = [
+  const rawCandidates = opts.modelCandidates ?? [
     modelOverride,
     config.tools.workers.model,
     ...(config.agent.fallback_models ?? []),
@@ -249,6 +254,7 @@ export async function spawnWorkerSession(opts: {
     agentDir,
     noExtensions: true,
     extensionsOverride: (base) => ({ ...base, extensions: [] }),
+    extensionFactories: [createTranscriptRepairExtension()],
     settingsManager: createBrytiSettingsManager(config, config.data_dir, agentDir),
     systemPromptOverride: () => systemPrompt,
   });
@@ -259,7 +265,22 @@ export async function spawnWorkerSession(opts: {
 
   const settingsManager = createBrytiSettingsManager(config, config.data_dir, agentDir);
 
-  // Spawn the session (no persistence — in-memory only)
+  // Full conversations live outside the worker-writable artifact directory.
+  const sessionDir = path.join(config.data_dir, "work", "worker-sessions", opts.sessionId ?? workerId);
+  fs.mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
+  fs.chmodSync(sessionDir, 0o700);
+  const sessionManager = SessionManager.continueRecent(workerDir, sessionDir);
+  const usageOffset = sessionManager.getEntries().length;
+  const initialProgress = recoverWorkerProgress(sessionManager.getBranch(), opts.initialProgress);
+  if (maxTurns && initialProgress.turns_completed >= maxTurns) {
+    throw new Error("The original worker turn budget is exhausted. No model call was made.");
+  }
+  for (const entry of sessionManager.getBranch()) {
+    if (entry.type === "message" && entry.message.role === "user" && typeof entry.message.content === "string") {
+      const { content, timestamp } = entry.message;
+      withWorkerStore(config.data_dir, (store) => store.confirmSteering(workerId, content, timestamp));
+    }
+  }
   const { session } = await createAgentSession({
     cwd: workerDir,
     agentDir,
@@ -273,7 +294,7 @@ export async function spawnWorkerSession(opts: {
     tools: workerTools.map((tool) => tool.name),
     customTools: workerTools,
     resourceLoader: loader,
-    sessionManager: SessionManager.inMemory(workerDir),
+    sessionManager,
     settingsManager,
   });
   if (!isRunning()) {
@@ -298,6 +319,8 @@ export async function spawnWorkerSession(opts: {
     workerDir,
     maxTurns,
     diagnostics,
+    initialProgress,
+    onUserEntry: (text, timestamp) => withWorkerStore(config.data_dir, (store) => store.confirmSteering(workerId, text, timestamp)),
     writeStatus(progress, paths) {
       const entry = registry.get(workerId);
       writeStatusFile(workerDir, {
@@ -350,7 +373,11 @@ export async function spawnWorkerSession(opts: {
   // Fallback chain: if the chosen model throws or returns stopReason="error",
   // switch to the next candidate in order and retry with a fresh prompt. This
   // mirrors the main agent's promptWithFallback() behaviour.
-  const taskPrompt =
+  let continuationHint = "";
+  if (opts.sessionId && opts.sessionId !== workerId) {
+    continuationHint = "Continue the retained conversation and existing artifacts. Do not repeat completed tool calls. Missing tool outcomes are unknown; inspect rather than replay them. ";
+  }
+  const taskPrompt = continuationHint +
     `Please complete the task described in the system prompt. ` +
     `Write your findings to result.md when done.`;
 
@@ -441,30 +468,10 @@ export async function spawnWorkerSession(opts: {
       throw promptError;
     }
 
-    // Success path
-    clearTimeout(timeoutHandle);
-    registry.update(workerId, {
-      status: "complete",
-      completedAt: new Date(),
-      error: null,
-      timeoutHandle: null,
-    });
-    const entry = registry.get(workerId);
-    // Step 1: Write status.json so worker_check can read the result from disk
-    // even after the registry entry has been cleaned up.
-    writeStatusFile(workerDir, {
-      worker_id: workerId,
-      status: "complete",
-      task,
-      started_at: entry?.startedAt.toISOString() ?? new Date().toISOString(),
-      completed_at: new Date().toISOString(),
-      model: modelString,
-      error: null,
-      result_path: resultPath,
-      transcript_path: tracker.paths.transcript_path,
-      output_path: tracker.paths.output_path,
-      progress: tracker.progress,
-    });
+    // The receipt and reporting event commit before the registry reports success.
+    const entry = registry.get(workerId)!;
+    const resultHash = crypto.createHash("sha256").update(fs.readFileSync(resultPath)).digest("hex");
+    commitWorkerOutcome(registry, entry, "complete", null, tracker.progress, resultHash);
     tracker.writeOutput("complete", { result_path: resultPath });
     console.log(`[worker] ${workerId} complete`);
 
@@ -504,27 +511,8 @@ export async function spawnWorkerSession(opts: {
       return;
     }
 
-    clearTimeout(timeoutHandle);
-    registry.update(workerId, {
-      status: "failed",
-      completedAt: new Date(),
-      error: errMsg,
-      timeoutHandle: null,
-    });
-    const entry = registry.get(workerId);
-    writeStatusFile(workerDir, {
-      worker_id: workerId,
-      status: "failed",
-      task,
-      started_at: entry?.startedAt.toISOString() ?? new Date().toISOString(),
-      completed_at: new Date().toISOString(),
-      model: modelString,
-      error: errMsg,
-      result_path: resultPath,
-      transcript_path: tracker.paths.transcript_path,
-      output_path: tracker.paths.output_path,
-      progress: tracker.progress,
-    });
+    const entry = registry.get(workerId)!;
+    commitWorkerOutcome(registry, entry, "failed", errMsg, tracker.progress);
     tracker.writeOutput("failed", { error: errMsg, result_path: resultPath });
     console.error(`[worker] ${workerId} failed:`, errMsg);
 
@@ -547,7 +535,7 @@ export async function spawnWorkerSession(opts: {
         cost_usd: tracker.progress.cost_usd, model_calls: tracker.progress.turns_completed, usage_operations: tracker.progress.turns_completed,
         models: [] as ReturnType<typeof collectSessionUsage>["models"] };
       if (session.sessionManager) {
-        usage = collectSessionUsage(config, session.sessionManager.getEntries());
+        usage = collectSessionUsage(config, session.sessionManager.getEntries().slice(usageOffset));
       }
       await createUsageTracker(config.data_dir).append({ user_id: opts.owner?.userId ?? "operator", kind: "worker",
         model: modelString, latency_ms: Date.now() - (registry.get(workerId)?.startedAt.getTime() ?? Date.now()), ...usage });
@@ -556,6 +544,10 @@ export async function spawnWorkerSession(opts: {
     }
     tracker.unsubscribe();
     session.dispose();
+    const settlingEntry = registry.get(workerId);
+    if (settlingEntry?.status === "stopping") {
+      commitWorkerOutcome(registry, settlingEntry, settlingEntry.stopStatus ?? "interrupted", settlingEntry.error, tracker.progress);
+    }
     if (timeoutTask && registry.get(workerId)?.status === "timeout") {
       const error = `Timed out after ${timeoutMs / 1000}s`;
       tracker.writeOutput("timeout", { error, result_path: resultPath });

@@ -23,6 +23,8 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 type ToolCallLike = {
   id: string;
   name?: string;
+  arguments?: unknown;
+  assistantTimestamp?: number;
 };
 
 /**
@@ -47,7 +49,7 @@ function extractToolCallsFromAssistant(
     if (!block || typeof block !== "object") {
       continue;
     }
-    const rec = block as { type?: unknown; id?: unknown; name?: unknown };
+    const rec = block as { type?: unknown; id?: unknown; name?: unknown; arguments?: unknown };
     if (typeof rec.id !== "string" || !rec.id) {
       continue;
     }
@@ -55,6 +57,8 @@ function extractToolCallsFromAssistant(
       toolCalls.push({
         id: rec.id,
         name: typeof rec.name === "string" ? rec.name : undefined,
+        arguments: rec.arguments,
+        assistantTimestamp: msg.timestamp,
       });
     }
   }
@@ -131,7 +135,10 @@ export type ToolUseRepairReport = {
  * repaired list and a report. If nothing needed fixing, returns the
  * original array unchanged (same reference).
  */
-export function repairToolUseResultPairing(messages: AgentMessage[]): ToolUseRepairReport {
+export function repairToolUseResultPairing(
+  messages: AgentMessage[],
+  resolveMissing?: (call: ToolCallLike) => Extract<AgentMessage, { role: "toolResult" }> | undefined,
+): ToolUseRepairReport {
   const out: AgentMessage[] = [];
   const added: Array<Extract<AgentMessage, { role: "toolResult" }>> = [];
   const seenToolResultIds = new Set<string>();
@@ -242,7 +249,7 @@ export function repairToolUseResultPairing(messages: AgentMessage[]): ToolUseRep
       if (existing) {
         pushToolResult(existing);
       } else {
-        const missing = makeMissingToolResult({ toolCallId: call.id, toolName: call.name });
+        const missing = resolveMissing?.(call) ?? makeMissingToolResult({ toolCallId: call.id, toolName: call.name });
         added.push(missing);
         pushToolResult(missing);
       }

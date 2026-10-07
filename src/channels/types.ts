@@ -79,6 +79,8 @@ export interface SendOpts {
   channelThreadId?: string;
   /** Accepted work whose final response this delivery carries. */
   workIds?: string[];
+  /** Stable completed-response identity, used only by the durable delivery adapter. */
+  responseId?: string;
   /** Requesting platform user. Used only to bind approval callbacks. */
   approverUserId?: string;
 }

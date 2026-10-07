@@ -1,7 +1,40 @@
-import type { WorkerEntry, WorkerRegistry } from "./registry.js";
+import type { WorkerEntry, WorkerRegistry, WorkerStatus } from "./registry.js";
 import { writeWorkerStatus } from "./recovery.js";
+import { withWorkerStore } from "./store.js";
+import type { WorkerProgress } from "./tracker.js";
 
-/** Persist a terminal decision before aborting so late callbacks cannot revive work. */
+/** Commit the authoritative outcome before exposing it through the registry. */
+export function commitWorkerOutcome(
+  registry: WorkerRegistry, entry: WorkerEntry, status: WorkerStatus, error: string | null,
+  progress?: WorkerProgress, resultHash?: string,
+): void {
+  let authoritative = false;
+  if (entry.dataDir) {
+    withWorkerStore(entry.dataDir, (store) => {
+      authoritative = Boolean(store.get(entry.workerId));
+      store.finish(entry.workerId, status, error, resultHash, progress);
+    });
+  }
+  const completedAt = new Date();
+  try {
+    writeWorkerStatus(entry.workerDir, {
+      worker_id: entry.workerId, status, task: entry.task,
+      started_at: entry.startedAt.toISOString(), completed_at: completedAt.toISOString(),
+      model: entry.model, error, result_path: entry.resultPath, progress,
+    });
+  } catch (failure) {
+    if (!authoritative) {
+      throw failure;
+    }
+    console.warn("[workers] Derived status could not be written; committed receipt retained");
+  }
+  if (entry.timeoutHandle) {
+    clearTimeout(entry.timeoutHandle);
+  }
+  registry.update(entry.workerId, { status, completedAt, error, timeoutHandle: null });
+}
+
+/** Record stop intent without releasing the slot of an execution still draining. */
 export async function stopWorker(
   registry: WorkerRegistry,
   entry: WorkerEntry,
@@ -12,21 +45,27 @@ export async function stopWorker(
     return;
   }
   const wasRunning = entry.status === "running";
-  const completedAt = new Date();
-  writeWorkerStatus(entry.workerDir, {
-    worker_id: entry.workerId,
-    status,
-    task: entry.task,
-    started_at: entry.startedAt.toISOString(),
-    completed_at: completedAt.toISOString(),
-    model: entry.model,
-    error,
-    result_path: entry.resultPath,
-  });
+  if (entry.dataDir) {
+    withWorkerStore(entry.dataDir, (store) => store.requestStop(entry.workerId, status, error));
+  }
+  if (entry.runActive) {
+    registry.update(entry.workerId, { status: "stopping", stopStatus: status, error });
+    try {
+      writeWorkerStatus(entry.workerDir, {
+        worker_id: entry.workerId, status: "stopping", stop_status: status,
+        task: entry.task, started_at: entry.startedAt.toISOString(), completed_at: null,
+        model: entry.model, error, result_path: entry.resultPath,
+      });
+    } catch {
+      console.warn("[workers] Stop intent retained in the worker receipt");
+    }
+  } else {
+    commitWorkerOutcome(registry, entry, status, error);
+  }
   if (entry.timeoutHandle) {
     clearTimeout(entry.timeoutHandle);
+    registry.update(entry.workerId, { timeoutHandle: null });
   }
-  registry.update(entry.workerId, { status, completedAt, error, timeoutHandle: null });
   if (wasRunning && entry.abort) {
     try {
       await entry.abort();
@@ -42,6 +81,65 @@ export class WorkerLifecycle {
   private readonly runs = new Set<Promise<void>>();
   private stopPromise?: Promise<void>;
   stopping = false;
+  private readonly cleanups = new Set<() => void>();
+  private readonly queueDrains = new Map<WorkerRegistry, (workerId: string) => void>();
+  queuePaused = false;
+
+  addDrain(registry: WorkerRegistry, drain: (workerId: string) => void): void {
+    this.queueDrains.set(registry, drain);
+  }
+
+  private queuedWorkers(): Array<{ registry: WorkerRegistry; entry: WorkerEntry }> {
+    const queued = [...this.queueDrains.keys()].flatMap((registry) =>
+      registry.list().filter((entry) => entry.status === "queued").map((entry) => ({ registry, entry })));
+    return queued.sort((left, right) => (left.entry.queueOrder ?? left.entry.startedAt.getTime())
+      - (right.entry.queueOrder ?? right.entry.startedAt.getTime()));
+  }
+
+  queuePosition(workerId: string): number | undefined {
+    const index = this.queuedWorkers().findIndex(({ entry }) => entry.workerId === workerId);
+    if (index >= 0) {
+      return index + 1;
+    }
+    return undefined;
+  }
+
+  /** Select globally by durable acceptance order, not by chat-session registration. */
+  drainQueues(): void {
+    while (!this.stopping && !this.queuePaused) {
+      const next = this.queuedWorkers()[0];
+      if (!next) {
+        return;
+      }
+      this.queueDrains.get(next.registry)!(next.entry.workerId);
+      if (next.registry.get(next.entry.workerId)?.status === "queued") {
+        return;
+      }
+    }
+  }
+
+  /** Keep resources for recovered workers until their application-owned runs settle. */
+  retain(cleanup: () => void): void {
+    this.cleanups.add(cleanup);
+  }
+
+  findWorker(workerId: string): { registry: WorkerRegistry; entry: WorkerEntry } | undefined {
+    for (const registry of this.registries) {
+      const entry = registry.get(workerId);
+      if (entry) {
+        return { registry, entry };
+      }
+    }
+    return undefined;
+  }
+
+  hasWorker(workerId: string): boolean {
+    return Boolean(this.findWorker(workerId));
+  }
+
+  runningCount(): number {
+    return [...this.registries].reduce((count, registry) => count + registry.runningCount(), 0);
+  }
 
   register(registry: WorkerRegistry): void {
     this.registries.add(registry);
@@ -77,10 +175,11 @@ export class WorkerLifecycle {
   }
 
   private async drain(graceMs: number, abortMs: number): Promise<void> {
+    // Accepted but unstarted work remains queued for the next process.
     for (const registry of this.registries) {
       for (const entry of registry.list()) {
-        if (entry.status === "queued") {
-          await stopWorker(registry, entry, "interrupted", "Bryti shut down before this worker started. It was not replayed.");
+        if (entry.status === "queued" && !entry.dataDir) {
+          await stopWorker(registry, entry, "interrupted", "Legacy queued work had no durable launch specification.");
         }
       }
     }
@@ -98,5 +197,10 @@ export class WorkerLifecycle {
       }
     }
     this.registries.clear();
+    this.queueDrains.clear();
+    for (const cleanup of this.cleanups) {
+      cleanup();
+    }
+    this.cleanups.clear();
   }
 }

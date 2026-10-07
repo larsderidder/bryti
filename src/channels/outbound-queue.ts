@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
-import { ensureDeliveryError, safeDeliveryErrorMessage } from "./delivery.js";
+import { ensureDeliveryError, safeDeliveryErrorMessage, deliveryNotSent, deliveryUnknown } from "./delivery.js";
 import type { DeliveryError } from "./delivery.js";
 import type { ApprovalOpts, ApprovalResult, ChannelBridge, IncomingMessage, Platform, SendOpts } from "./types.js";
 import { writeJsonAtomic } from "../durable-file.js";
@@ -23,6 +23,7 @@ export interface DurableOutboundOptions {
   baseBackoffMs?: number;
   maxBackoffMs?: number;
   onOutcome?: (event: OutboundOutcomeEvent) => void | Promise<void>;
+  canDeliver?: (destination: { platform: Platform; channelId: string; channelThreadId?: string; workIds: string[] }) => boolean;
 }
 
 interface StoredSendOpts {
@@ -48,6 +49,7 @@ interface OutboundRecord {
   lastError?: string;
   outcomeNotifiedAt?: string;
   voiceFileName?: string;
+  responseOwned?: boolean;
 }
 
 const RECORD_ID_PATTERN = /^[0-9a-f-]{36}$/i;
@@ -92,7 +94,7 @@ function workIdsFromOpts(opts?: DurableSendOpts): string[] {
   return opts.workIds.filter((workId) => typeof workId === "string" && workId.length > 0);
 }
 
-function normalizeOptions(optionsOrMaxAttempts: number | DurableOutboundOptions): Required<Omit<DurableOutboundOptions, "onOutcome">> & Pick<DurableOutboundOptions, "onOutcome"> {
+function normalizeOptions(optionsOrMaxAttempts: number | DurableOutboundOptions): Required<Omit<DurableOutboundOptions, "onOutcome" | "canDeliver">> & Pick<DurableOutboundOptions, "onOutcome" | "canDeliver"> {
   let options: DurableOutboundOptions = {};
   if (typeof optionsOrMaxAttempts === "number") {
     options = { maxAttempts: optionsOrMaxAttempts };
@@ -126,6 +128,7 @@ function normalizeOptions(optionsOrMaxAttempts: number | DurableOutboundOptions)
     baseBackoffMs,
     maxBackoffMs,
     onOutcome: options.onOutcome,
+    canDeliver: options.canDeliver,
   };
 }
 
@@ -223,7 +226,7 @@ export class DurableOutboundBridge implements ChannelBridge {
   sendVoice?: ChannelBridge["sendVoice"];
 
   private readonly queueDir: string;
-  private readonly options: Required<Omit<DurableOutboundOptions, "onOutcome">> & Pick<DurableOutboundOptions, "onOutcome">;
+  private readonly options: Required<Omit<DurableOutboundOptions, "onOutcome" | "canDeliver">> & Pick<DurableOutboundOptions, "onOutcome" | "canDeliver">;
   private drainTimer: NodeJS.Timeout | null = null;
   private activeDrain: Promise<void> | null = null;
   private draining = false;
@@ -244,6 +247,9 @@ export class DurableOutboundBridge implements ChannelBridge {
       this.sendVoice = async (channelId, audioPath, opts) => {
         const durableOpts = opts as DurableSendOpts | undefined;
         const record = this.createVoiceRecord(channelId, audioPath, durableOpts);
+        if (durableOpts?.responseId && this.readRecord(durableOpts.responseId)) {
+          throw deliveryUnknown("This completed response already has an outbound record; inspect it rather than sending again.");
+        }
         this.save(record);
         this.emitOutcome(record, "pending");
         return await this.trackSend(this.sendVoiceRecord(record, audioPath, durableOpts));
@@ -279,6 +285,31 @@ export class DurableOutboundBridge implements ChannelBridge {
 
   async sendMessage(channelId: string, text: string, opts?: SendOpts): Promise<string> {
     const record = this.createMessageRecord(channelId, text, opts as DurableSendOpts | undefined);
+    if (opts?.responseId) {
+      const existing = this.readRecord(opts.responseId);
+      if (existing) {
+        if (existing.channelId !== channelId || existing.opts?.channelThreadId !== opts.channelThreadId
+          || JSON.stringify([...existing.workIds].sort()) !== JSON.stringify(workIdsFromOpts(opts).sort())) {
+          throw deliveryNotSent("Response identity belongs to a different destination or work", { retryable: false });
+        }
+        if (existing.kind === "message" && (existing.text !== text
+          || JSON.stringify(existing.opts) !== JSON.stringify(sanitizeSendOpts(opts)))) {
+          throw deliveryNotSent("Response identity belongs to different content", { retryable: false });
+        }
+        if (existing.kind !== "voice" || existing.state !== "failed") {
+          const outcome = terminalOutcomeFor(existing) ?? "pending";
+          this.emitOutcome(existing, outcome, existing.lastError);
+          if (existing.state === "delivered") {
+            return existing.messageId ?? existing.id;
+          }
+          if (existing.state === "sending" || existing.state === "unknown") {
+            throw deliveryUnknown("This response may already have been sent. It will not be repeated.");
+          }
+          throw deliveryNotSent("This response is already owned by the outbound queue", { retryable: existing.state === "pending" });
+        }
+        // A definitely-unsent voice can fall back to the committed text under the same identity.
+      }
+    }
     this.save(record);
     this.emitOutcome(record, "pending");
     return await this.trackSend(this.sendMessageRecord(record));
@@ -304,8 +335,11 @@ export class DurableOutboundBridge implements ChannelBridge {
 
   private createMessageRecord(channelId: string, text: string, opts?: DurableSendOpts): OutboundRecord {
     const now = new Date().toISOString();
+    if (opts?.responseId && !RECORD_ID_PATTERN.test(opts.responseId)) {
+      throw deliveryNotSent("Invalid completed response identity", { retryable: false });
+    }
     return {
-      id: crypto.randomUUID(),
+      id: opts?.responseId ?? crypto.randomUUID(),
       kind: "message",
       platform: this.platform,
       channelId,
@@ -321,8 +355,12 @@ export class DurableOutboundBridge implements ChannelBridge {
 
   private createVoiceRecord(channelId: string, audioPath: string, opts?: DurableSendOpts): OutboundRecord {
     const now = new Date().toISOString();
+    if (opts?.responseId && !RECORD_ID_PATTERN.test(opts.responseId)) {
+      throw deliveryNotSent("Invalid completed response identity", { retryable: false });
+    }
     return {
-      id: crypto.randomUUID(),
+      id: opts?.responseId ?? crypto.randomUUID(),
+      responseOwned: Boolean(opts?.responseId),
       kind: "voice",
       platform: this.platform,
       channelId,
@@ -378,7 +416,28 @@ export class DurableOutboundBridge implements ChannelBridge {
     return records.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   }
 
+  private checkDestination(record: OutboundRecord): void {
+    if (!this.options.canDeliver) {
+      return;
+    }
+    let allowed = false;
+    try {
+      allowed = this.options.canDeliver({ platform: record.platform, channelId: record.channelId,
+        channelThreadId: record.opts?.channelThreadId, workIds: record.workIds });
+    } catch {
+      allowed = false;
+    }
+    if (!allowed) {
+      record.state = "failed";
+      record.lastError = "destination_not_authorized";
+      this.save(record);
+      this.emitOutcome(record, "failed", record.lastError);
+      throw deliveryNotSent("Outbound destination is no longer authorized", { retryable: false });
+    }
+  }
+
   private async sendMessageRecord(record: OutboundRecord): Promise<string> {
+    this.checkDestination(record);
     record.attempts += 1;
     record.state = "sending";
     record.updatedAt = new Date().toISOString();
@@ -397,6 +456,7 @@ export class DurableOutboundBridge implements ChannelBridge {
   }
 
   private async sendVoiceRecord(record: OutboundRecord, audioPath: string, opts?: DurableSendOpts): Promise<string> {
+    this.checkDestination(record);
     record.attempts += 1;
     record.state = "sending";
     record.updatedAt = new Date().toISOString();
@@ -561,6 +621,10 @@ export class DurableOutboundBridge implements ChannelBridge {
       workIds: [...record.workIds],
       state,
     };
+    if (record.kind === "voice" && record.responseOwned && state === "failed" && error !== "destination_not_authorized") {
+      // The voice is definitely unsent. The committed text still needs delivery.
+      event.state = "pending";
+    }
     if (error) {
       event.error = error;
     }

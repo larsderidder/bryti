@@ -12,6 +12,7 @@ import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { Static } from "typebox";
 import { Type } from "typebox";
 import { toolError, toolSuccess } from "../tools/result.js";
+import { writeTextAtomic } from "../durable-file.js";
 
 const MAX_FILE_SIZE = 100 * 1024; // 100KB — workers may write longer research docs
 
@@ -86,7 +87,7 @@ export function createWorkerScopedTools(workerDir: string): AgentTool<any>[] {
 
       try {
         const filePath = path.join(workerDir, filename);
-        fs.writeFileSync(filePath, content, "utf-8");
+        writeTextAtomic(filePath, content);
         return toolSuccess({
           success: true,
           filename,

@@ -1,8 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
-import type { AgentSession, AgentSessionEvent } from "@earendil-works/pi-coding-agent";
+import type { AgentSession, AgentSessionEvent, SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { Usage } from "@earendil-works/pi-ai";
 import type { createSessionDiagnostics } from "../session-diagnostics.js";
+import { writeJsonAtomic } from "../durable-file.js";
 
 export interface WorkerProgress {
   turns_started: number;
@@ -157,15 +158,49 @@ function maybeSteerWrapUp(params: {
   });
 }
 
+/** Recover cumulative budgets and evidence from the SDK's authoritative conversation. */
+export function recoverWorkerProgress(entries: SessionEntry[], previous?: WorkerProgress): WorkerProgress {
+  const progress = emptyProgress();
+  for (const entry of entries) {
+    if (entry.type === "message") {
+      const message = entry.message;
+      if (message.role === "assistant") {
+        progress.turns_started++;
+        progress.turns_completed++;
+        addUsage(progress, message.usage);
+      } else if (message.role === "toolResult") {
+        progress.tool_calls_total++;
+        progress.tool_calls_by_name[message.toolName] = (progress.tool_calls_by_name[message.toolName] ?? 0) + 1;
+        addUsage(progress, message.usage);
+      }
+    } else if (entry.type === "usage" || entry.type === "compaction" || entry.type === "branch_summary") {
+      addUsage(progress, entry.usage);
+    }
+  }
+  if (previous) {
+    progress.turns_started = Math.max(progress.turns_started, previous.turns_started);
+    progress.turns_completed = Math.max(progress.turns_completed, previous.turns_completed);
+    progress.tool_calls_total = Math.max(progress.tool_calls_total, previous.tool_calls_total);
+    progress.wrap_up_sent = previous.wrap_up_sent;
+    for (const [name, count] of Object.entries(previous.tool_calls_by_name)) {
+      progress.tool_calls_by_name[name] = Math.max(progress.tool_calls_by_name[name] ?? 0, count);
+    }
+  }
+  return progress;
+}
+
 export function attachWorkerRunTracker(params: {
   session: AgentSession;
   workerDir: string;
   maxTurns?: number;
   writeStatus: StatusWriter;
   diagnostics?: ReturnType<typeof createSessionDiagnostics>;
+  initialProgress?: WorkerProgress;
+  onUserEntry?: (text: string, timestamp: number) => void;
 }): WorkerRunTracker {
   const { session, workerDir, maxTurns, writeStatus } = params;
-  const progress = emptyProgress();
+  const progress = { ...emptyProgress(), ...params.initialProgress,
+    tool_calls_by_name: { ...params.initialProgress?.tool_calls_by_name }, active_tools: 0 };
   const paths: WorkerRuntimePaths = {
     transcript_path: path.join(workerDir, "transcript.jsonl"),
     output_path: path.join(workerDir, "output.json"),
@@ -200,6 +235,9 @@ export function attachWorkerRunTracker(params: {
       }
     } else if (event.type === "entry_appended") {
       const entry = event.entry;
+      if (entry.type === "message" && entry.message.role === "user" && typeof entry.message.content === "string") {
+        params.onUserEntry?.(entry.message.content, entry.message.timestamp);
+      }
       if (entry.type === "usage" || entry.type === "compaction" || entry.type === "branch_summary") {
         addUsage(progress, entry.usage);
       }
@@ -231,16 +269,9 @@ export function attachWorkerRunTracker(params: {
     recordSteering,
     writeOutput(status, details = {}) {
       try {
-        fs.writeFileSync(
-          paths.output_path,
-          JSON.stringify({
-            status,
-            completed_at: new Date().toISOString(),
-            progress,
-            ...details,
-          }, null, 2),
-          "utf-8",
-        );
+        writeJsonAtomic(paths.output_path, {
+          status, completed_at: new Date().toISOString(), progress, ...details,
+        });
       } catch {
         // Best effort only.
       }

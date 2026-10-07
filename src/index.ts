@@ -39,6 +39,7 @@ import { runWithSupervisor, type RunningApp } from "./supervisor.js";
 import {
   processMessage,
   getBridge,
+  recoverCompletedResponses,
   type AppState,
 } from "./process-message.js";
 import { createCoreMemory } from "./memory/core-memory.js";
@@ -53,7 +54,9 @@ import { createScheduler, isTargetAllowed } from "./scheduler.js";
 import { createWorkStore } from "./work/store.js";
 import { collectWorkerEvents, acknowledgeWorkerEvent } from "./workers/recovery.js";
 import { WorkerLifecycle } from "./workers/lifecycle.js";
+import { restoreQueuedWorkers } from "./workers/restart.js";
 import { recoverCommandEvents } from "./work/commands.js";
+import { withEffectStore } from "./work/effects.js";
 import { MessageQueue } from "./message-queue.js";
 import { getActiveThread } from "./threads.js";
 import type { IncomingMessage, ChannelBridge } from "./channels/types.js";
@@ -126,9 +129,17 @@ async function startApp(onRequestRestart?: () => void): Promise<RunningApp> {
   const trustStore = createTrustStore(config.data_dir, config.trust.approved_tools);
   const workStore = createWorkStore(config.data_dir);
   const recoveredWork = workStore.recover();
+  withEffectStore(config.data_dir, (store) => store.recover());
   const outboundOptions = {
     onOutcome: (event: import("./channels/outbound-queue.js").OutboundOutcomeEvent) => {
       workStore.recordResponse(event.workIds, event.state, event.error);
+    },
+    canDeliver: (destination: { platform: IncomingMessage["platform"]; channelId: string; channelThreadId?: string; workIds: string[] }) => {
+      return destination.workIds.every((id) => {
+        const message = workStore.get(id)?.message;
+        return Boolean(message && message.platform === destination.platform && message.channelId === destination.channelId
+          && message.channelThreadId === destination.channelThreadId && isTargetAllowed(config, message));
+      });
     },
   };
   const voiceService = createVoiceService(config);
@@ -234,6 +245,7 @@ async function startApp(onRequestRestart?: () => void): Promise<RunningApp> {
   // Start all bridges concurrently
   await Promise.all(bridges.map((b) => b.start()));
   console.log(`Channels: ${bridges.map((b) => b.name).join(", ")}`);
+  await recoverCompletedResponses(state, (message) => isTargetAllowed(config, message));
 
   // Execution was paused until all transports could deliver recovery notices.
   for (const record of recoveredWork.queued) {
@@ -271,6 +283,7 @@ async function startApp(onRequestRestart?: () => void): Promise<RunningApp> {
     }
   };
   recoverWorkers(true);
+  restoreQueuedWorkers(config, state.workerLifecycle!);
   queue.start();
   const workerRecoveryTimer = setInterval(() => recoverWorkers(), 30_000);
   workerRecoveryTimer.unref();

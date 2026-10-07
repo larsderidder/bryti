@@ -3,7 +3,7 @@
  * Each entry records status, timing, file paths, and the timeout handle.
  */
 
-export type WorkerStatus = "queued" | "running" | "complete" | "failed" | "timeout" | "cancelled" | "interrupted";
+export type WorkerStatus = "queued" | "running" | "stopping" | "complete" | "failed" | "timeout" | "cancelled" | "interrupted";
 
 export interface WorkerEntry {
   workerId: string;
@@ -40,6 +40,11 @@ export interface WorkerEntry {
    * yet started. Stored here so worker_interrupt can cancel it.
    */
   timeoutHandle: ReturnType<typeof setTimeout> | null;
+  /** A full run still owns its concurrency slot, including completion bookkeeping. */
+  runActive?: boolean;
+  stopStatus?: "cancelled" | "timeout" | "interrupted";
+  dataDir?: string;
+  queueOrder?: number;
 }
 
 export interface WorkerRegistry {
@@ -50,7 +55,7 @@ export interface WorkerRegistry {
   get(workerId: string): WorkerEntry | null;
 
   /** Update mutable fields of a worker entry. */
-  update(workerId: string, updates: Partial<Pick<WorkerEntry, "status" | "completedAt" | "error" | "abort" | "steer" | "pendingSteering" | "timeoutHandle">>): void;
+  update(workerId: string, updates: Partial<Pick<WorkerEntry, "status" | "completedAt" | "error" | "abort" | "steer" | "pendingSteering" | "timeoutHandle" | "runActive" | "stopStatus">>): void;
 
   /** Count workers with status "running". */
   runningCount(): number;
@@ -93,7 +98,7 @@ export function createWorkerRegistry(): WorkerRegistry {
     update(workerId, updates) {
       const entry = entries.get(workerId);
       if (!entry) return;
-      if (updates.status && entry.status !== "running" && entry.status !== "queued" && updates.status !== entry.status) {
+      if (updates.status && entry.status !== "running" && entry.status !== "queued" && entry.status !== "stopping" && updates.status !== entry.status) {
         return;
       }
       Object.assign(entry, updates);
@@ -102,7 +107,9 @@ export function createWorkerRegistry(): WorkerRegistry {
     runningCount() {
       let count = 0;
       for (const entry of entries.values()) {
-        if (entry.status === "running") count++;
+        if (entry.status === "running" || entry.status === "stopping" || entry.runActive) {
+          count++;
+        }
       }
       return count;
     },

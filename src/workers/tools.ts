@@ -25,7 +25,11 @@ import { toolError, toolSuccess } from "../tools/result.js";
 import type { WorkerEntry, WorkerRegistry } from "./registry.js";
 import type { ProjectionStore, ProjectionTarget } from "../projection/store.js";
 import { registerWorkerOwner } from "./recovery.js";
-import { WorkerLifecycle, stopWorker } from "./lifecycle.js";
+import { WorkerLifecycle, stopWorker, commitWorkerOutcome } from "./lifecycle.js";
+import { hashToolArgs } from "../trust/store.js";
+import { sameWorkerOwner, workerIdentity, withWorkerStore, type WorkerLaunchSpec, type WorkerReceipt } from "./store.js";
+import { writeTextAtomic } from "../durable-file.js";
+import { isInternalMessage, type IncomingMessage } from "../channels/types.js";
 import {
   spawnWorkerSession,
   writeStatusFile,
@@ -42,15 +46,6 @@ type AllowedTool = (typeof ALLOWED_TOOLS)[number];
 
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 
-interface WorkerLaunchSpec {
-  task: string;
-  modelOverride?: string;
-  thinkingLevel?: Config["tools"]["workers"]["thinking_level"];
-  toolNames: AllowedTool[];
-  timeoutMs: number;
-  maxTurns?: number;
-  owner?: ProjectionTarget;
-}
 
 // Re-export for use in other modules
 export type { WorkerTriggerCallback } from "./spawn.js";
@@ -132,14 +127,15 @@ export function createWorkerTools(
   isWorkerSession = false,
   projectionStore?: ProjectionStore,
   onTrigger?: WorkerTriggerCallback,
-  getTarget?: () => ProjectionTarget,
+  getTarget?: () => ProjectionTarget | null | undefined,
   lifecycle = new WorkerLifecycle(),
+  getWorkTarget?: () => IncomingMessage | null | undefined,
 ): AgentTool<any>[] {
   // Build description dynamically to include configured worker types
   const types = config.tools.workers.types ?? {};
   const typeNames = Object.keys(types);
   let typesSuffix = "";
-  const pendingLaunches = new Map<string, WorkerLaunchSpec>();
+  const fallbackScope = crypto.randomUUID();
   lifecycle.register(registry);
 
   function filesBase(): string {
@@ -150,20 +146,101 @@ export function createWorkerTools(
     return path.relative(filesBase(), resultPath);
   }
 
+  function currentOwner(): IncomingMessage | undefined {
+    const target = getWorkTarget?.() ?? getTarget?.();
+    if (!target) {
+      return undefined;
+    }
+    const work = target as IncomingMessage;
+    return { userId: target.userId, platform: target.platform as IncomingMessage["platform"], channelId: target.channelId,
+      threadId: target.threadId, channelThreadId: target.channelThreadId,
+      workId: work.workId, workIds: work.workIds, text: "", raw: null };
+  }
+
+  function workerDirectory(workerId: string): string {
+    if (!/^w-[a-f0-9]{8}$/.test(workerId)) {
+      throw new Error("Invalid worker identity");
+    }
+    return path.join(config.data_dir, "files", "workers", workerId);
+  }
+
+  function validWorkerAccess(workerId: string): boolean {
+    if (!/^w-[a-zA-Z0-9-]+$/.test(workerId)) {
+      return false;
+    }
+    const receipt = withWorkerStore(config.data_dir, (store) => store.get(workerId));
+    const owner = currentOwner();
+    if (receipt?.spec.owner) {
+      return sameWorkerOwner(receipt.spec.owner, owner);
+    }
+    if (!owner) {
+      return true;
+    }
+    try {
+      const legacy = JSON.parse(fs.readFileSync(path.join(config.data_dir, "work", "worker-owners", `${workerId}.json`), "utf8"));
+      return sameWorkerOwner(legacy, owner);
+    } catch {
+      return false;
+    }
+  }
+
+  function registerReceipt(receipt: WorkerReceipt): WorkerEntry {
+    const workerDir = workerDirectory(receipt.sessionId);
+    try {
+      fs.mkdirSync(workerDir, { recursive: true, mode: 0o700 });
+      writeTextAtomic(path.join(workerDir, "task.md"), receipt.spec.task);
+      if (receipt.spec.owner) {
+        registerWorkerOwner(config.data_dir, receipt.workerId, receipt.spec.owner);
+      }
+    } catch (error) {
+      withWorkerStore(config.data_dir, (store) => store.finish(receipt.workerId, "failed", "Worker artifacts could not be initialized. No worker was started."));
+      throw error;
+    }
+    return registry.register({
+      workerId: receipt.workerId, status: receipt.status, task: receipt.spec.task,
+      workerDir, resultPath: path.join(workerDir, "result.md"), model: receipt.model,
+      startedAt: new Date(receipt.startedAt ?? receipt.createdAt), error: receipt.error,
+      abort: null, timeoutHandle: null, dataDir: config.data_dir,
+      pendingSteering: receipt.pendingSteering,
+      queueOrder: receipt.queueOrder,
+    });
+  }
+
+  function acceptWorker(receipt: WorkerReceipt): AgentToolResult<unknown> {
+    let entry = registry.get(receipt.workerId);
+    if (!entry && receipt.status === "queued" && !lifecycle.hasWorker(receipt.workerId)) {
+      entry = registerReceipt(receipt);
+    }
+    lifecycle.drainQueues();
+    const current = withWorkerStore(config.data_dir, (store) => store.get(receipt.workerId))!;
+    return toolSuccess({ worker_id: receipt.workerId, status: current.status,
+      queue_position: lifecycle.queuePosition(receipt.workerId),
+      result_path: relativeResultPath(path.join(workerDirectory(receipt.sessionId), "result.md")),
+      trigger_hint: `worker ${receipt.workerId} complete`,
+      note: "Worker accepted durably. Completion notifications are automatic. Read results with read path: "
+        + relativeResultPath(path.join(workerDirectory(receipt.sessionId), "result.md")),
+    });
+  }
+
   function startWorker(entry: WorkerEntry, spec: WorkerLaunchSpec): void {
     if (lifecycle.stopping || (entry.status !== "running" && entry.status !== "queued")) {
       return;
     }
-    registry.update(entry.workerId, { status: "running", error: null });
+    const claimed = withWorkerStore(config.data_dir, (store) => store.claim(entry.workerId));
+    if (!claimed) {
+      registry.remove(entry.workerId);
+      return;
+    }
+    if (claimed.deadlineAt && Date.parse(claimed.deadlineAt) <= Date.now()) {
+      commitWorkerOutcome(registry, entry, "timeout", "The original worker deadline expired; no continuation was started.");
+      return;
+    }
+    registry.update(entry.workerId, { status: "running", error: null, runActive: true });
+    entry.pendingSteering = claimed.pendingSteering;
     writeStatusFile(entry.workerDir, {
-      worker_id: entry.workerId,
-      status: "running",
-      task: entry.task,
-      started_at: entry.startedAt.toISOString(),
-      completed_at: null,
-      model: entry.model,
-      error: null,
-      result_path: entry.resultPath,
+      worker_id: entry.workerId, status: "running", task: entry.task,
+      started_at: entry.startedAt.toISOString(), completed_at: null,
+      model: entry.model, error: null, result_path: entry.resultPath,
     });
 
     console.log(
@@ -171,6 +248,11 @@ export function createWorkerTools(
       `(model: ${entry.model}, thinking: ${spec.thinkingLevel}, tools: ${spec.toolNames.join(", ")})`,
     );
 
+    const deadlineTimer = setTimeout(() => {
+      void stopWorker(registry, entry, "timeout", "The original worker deadline expired").catch((error) => {
+        console.warn(`[worker] ${entry.workerId} deadline settlement failed:`, error);
+      });
+    }, Math.max(1, Date.parse(claimed.deadlineAt!) - Date.now()));
     const run = spawnWorkerSession({
       config,
       workerId: entry.workerId,
@@ -183,55 +265,43 @@ export function createWorkerTools(
       memoryStore,
       projectionStore,
       registry,
-      timeoutMs: spec.timeoutMs,
+      timeoutMs: Math.max(1, Date.parse(claimed.deadlineAt!) - Date.now()),
       maxTurns: spec.maxTurns,
+      modelCandidates: spec.modelCandidates,
+      sessionId: claimed.sessionId,
+      initialProgress: claimed.progress,
       onTrigger,
     }).catch((err: Error) => {
       if (entry.status !== "running") {
         return;
       }
       console.error(`[worker] ${entry.workerId} spawn failed:`, err.message);
-      registry.update(entry.workerId, {
-        status: "failed",
-        completedAt: new Date(),
-        error: `Spawn failed: ${err.message}`,
-      });
-      writeStatusFile(entry.workerDir, {
-        worker_id: entry.workerId,
-        status: "failed",
-        task: entry.task,
-        started_at: entry.startedAt.toISOString(),
-        completed_at: new Date().toISOString(),
-        model: entry.model,
-        error: `Spawn failed: ${err.message}`,
-        result_path: entry.resultPath,
-      });
+      commitWorkerOutcome(registry, entry, "failed", `Spawn failed: ${err.message}`);
     }).finally(() => {
-      drainQueue();
+      clearTimeout(deadlineTimer);
+      if (entry.status === "stopping") {
+        commitWorkerOutcome(registry, entry, entry.stopStatus ?? "interrupted", entry.error);
+      }
+      registry.update(entry.workerId, { runActive: false });
+      lifecycle.drainQueues();
     });
     lifecycle.track(run);
   }
 
-  function drainQueue(): void {
-    if (lifecycle.stopping) {
+  function drainQueue(workerId: string): void {
+    if (lifecycle.stopping || lifecycle.runningCount() >= config.tools.workers.max_concurrent) {
       return;
     }
-    const maxConcurrent = config.tools.workers.max_concurrent;
-    while (registry.runningCount() < maxConcurrent) {
-      const next = registry.nextQueued();
-      if (!next) return;
-      const spec = pendingLaunches.get(next.workerId);
-      if (!spec) {
-        registry.update(next.workerId, {
-          status: "failed",
-          completedAt: new Date(),
-          error: "Queued worker lost its launch specification",
-        });
-        continue;
-      }
-      pendingLaunches.delete(next.workerId);
-      startWorker(next, spec);
+    const next = registry.get(workerId);
+    if (!next || next.status !== "queued") {
+      return;
     }
+    const receipt = withWorkerStore(config.data_dir, (store) => store.get(next.workerId));
+    if (!receipt) {
+      commitWorkerOutcome(registry, next, "failed", "Queued worker lost its launch specification");
+      return;
+    }
+    startWorker(next, receipt.spec);
   }
 
   if (typeNames.length > 0) {
@@ -262,8 +332,9 @@ export function createWorkerTools(
       typesSuffix,
     parameters: dispatchWorkerSchema,
     async execute(
-      _toolCallId: string,
+      toolCallId: string,
       { task, type: typeName, tools: requestedTools, model: modelOverride, timeout_seconds, max_turns }: DispatchWorkerInput,
+      signal?: AbortSignal,
     ): Promise<AgentToolResult<unknown>> {
       // Hard block: no nesting
       if (isWorkerSession) {
@@ -271,6 +342,9 @@ export function createWorkerTools(
       }
       if (lifecycle.stopping) {
         return toolError("Bryti is shutting down. No worker was started.");
+      }
+      if (signal?.aborted) {
+        return toolError("Worker dispatch was cancelled before acceptance.");
       }
 
       // Resolve worker type defaults (explicit params override type defaults)
@@ -302,92 +376,40 @@ export function createWorkerTools(
         toolNames.push(t as AllowedTool);
       }
 
-      // Create worker directory
-      const workerId = `w-${crypto.randomUUID().slice(0, 8)}`;
-      const workerDir = path.join(config.data_dir, "files", "workers", workerId);
-      fs.mkdirSync(workerDir, { recursive: true });
-
-      // Write task brief
-      fs.writeFileSync(path.join(workerDir, "task.md"), task, "utf-8");
-
-      const timeoutMs = effectiveTimeout ? effectiveTimeout * 1000 : DEFAULT_TIMEOUT_MS;
-      // Resolve display model for registry/logs. The actual model resolution
-      // (with fallback chain) happens inside spawnWorkerSession.
-      const displayModel = effectiveModel
-        ?? config.tools.workers.model
-        ?? config.agent.fallback_models?.[0]
-        ?? config.agent.model;
-      const resultPath = path.join(workerDir, "result.md");
+      let timeoutMs = DEFAULT_TIMEOUT_MS;
+      if (effectiveTimeout !== undefined) {
+        timeoutMs = effectiveTimeout * 1000;
+      }
+      if (!task.trim() || task.length > 100_000 || !Number.isFinite(timeoutMs) || timeoutMs < 1000 || timeoutMs > 3_600_000) {
+        return toolError("A non-empty bounded task and timeout between 1 and 3600 seconds are required.");
+      }
+      const modelCandidates = [...new Set([effectiveModel, config.tools.workers.model,
+        ...(config.agent.fallback_models ?? []), config.agent.model].filter((model): model is string => Boolean(model)))];
+      const displayModel = modelCandidates[0];
 
       const launchSpec: WorkerLaunchSpec = {
         task,
         modelOverride: effectiveModel,
+        modelCandidates,
         thinkingLevel: effectiveThinkingLevel,
         toolNames,
         timeoutMs,
         maxTurns: max_turns ?? workerType?.max_turns ?? config.tools.workers.max_turns,
       };
-
-      const shouldStartNow = registry.runningCount() < config.tools.workers.max_concurrent;
-      const status = shouldStartNow ? "running" : "queued";
-      const entry = registry.register({
-        workerId,
-        status,
-        task,
-        resultPath,
-        workerDir,
-        startedAt: new Date(),
-        error: null,
-        model: displayModel,
-        abort: null,
-        timeoutHandle: null,
-      });
-
-      if (!shouldStartNow) {
-        pendingLaunches.set(workerId, launchSpec);
+      if (launchSpec.maxTurns !== undefined && (!Number.isSafeInteger(launchSpec.maxTurns) || launchSpec.maxTurns <= 0)) {
+        return toolError("The worker turn budget must be a positive integer");
       }
+      launchSpec.owner = currentOwner();
 
-      const queuePosition = registry.queuePosition(workerId);
-      const saved = writeStatusFile(workerDir, {
-        worker_id: workerId,
-        status,
-        task,
-        started_at: entry.startedAt.toISOString(),
-        completed_at: null,
-        model: displayModel,
-        error: null,
-        result_path: resultPath,
-        queue_position: queuePosition,
-      });
-      if (!saved) {
-        registry.remove(workerId);
-        pendingLaunches.delete(workerId);
-        return toolError("Worker status could not be persisted. No worker was started.");
-      }
       try {
-        if (getTarget) {
-          launchSpec.owner = { ...getTarget() };
-          registerWorkerOwner(config.data_dir, workerId, launchSpec.owner);
-        }
-      } catch {
-        registry.remove(workerId);
-        pendingLaunches.delete(workerId);
-        return toolError("Worker owner could not be persisted. No worker was started.");
+        const receipt = withWorkerStore(config.data_dir, (store) => store.accept(
+          workerIdentity(launchSpec.owner, toolCallId, fallbackScope), launchSpec, displayModel, undefined,
+          hashToolArgs({ task, type: typeName, tools: requestedTools, model: modelOverride, timeout_seconds, max_turns }),
+        ));
+        return acceptWorker(receipt);
+      } catch (error) {
+        return toolError(error, "Worker acceptance failed. No unrecorded worker was started");
       }
-
-      if (shouldStartNow) {
-        startWorker(entry, launchSpec);
-      }
-
-      const relativeResult = relativeResultPath(resultPath);
-      return toolSuccess({
-        worker_id: workerId,
-        status,
-        ...(queuePosition ? { queue_position: queuePosition } : {}),
-        result_path: relativeResult,
-        trigger_hint: `worker ${workerId} complete`,
-        note: `Worker accepted. Completion notifications are automatic. Read results with read path: ${relativeResult}`,
-      });
     },
   };
 
@@ -402,6 +424,15 @@ export function createWorkerTools(
       _toolCallId: string,
       { worker_id }: CheckWorkerInput,
     ): Promise<AgentToolResult<unknown>> {
+      if (!validWorkerAccess(worker_id)) {
+        return toolError("Worker not found for this owner and topic");
+      }
+      const receipt = withWorkerStore(config.data_dir, (store) => store.get(worker_id));
+      if (receipt) {
+        return toolSuccess({ worker_id, status: receipt.status, error: receipt.error,
+          progress: receipt.progress, stop_status: receipt.stopStatus,
+          result_hash: receipt.resultHash, result_path: relativeResultPath(workerDirectory(receipt.sessionId) + "/result.md") });
+      }
       const entry = registry.get(worker_id);
       if (!entry) {
         // Try reading from status.json on disk as a fallback (survives restarts)
@@ -471,7 +502,11 @@ export function createWorkerTools(
       _toolCallId: string,
       { worker_id }: InterruptWorkerInput,
     ): Promise<AgentToolResult<unknown>> {
-      const entry = registry.get(worker_id);
+      if (!validWorkerAccess(worker_id)) {
+        return toolError("Worker not found for this owner and topic");
+      }
+      const workerRegistry = lifecycle.findWorker(worker_id)?.registry ?? registry;
+      const entry = workerRegistry.get(worker_id);
 
       if (!entry) {
         // Check disk as a fallback (worker may have been cleaned up from registry)
@@ -493,8 +528,7 @@ export function createWorkerTools(
       }
 
       if (entry.status === "queued") {
-        await stopWorker(registry, entry, "cancelled", null);
-        pendingLaunches.delete(worker_id);
+        await stopWorker(workerRegistry, entry, "cancelled", null);
         return toolSuccess({
           worker_id,
           status: "cancelled",
@@ -512,11 +546,11 @@ export function createWorkerTools(
       }
 
       // stopWorker persists cancellation before aborting and refuses terminal transitions.
-      await stopWorker(registry, entry, "cancelled", null);
+      await stopWorker(workerRegistry, entry, "cancelled", null);
 
       // Archive a cancellation fact so any projections watching this worker can clean up
       const modelsDir = path.join(config.data_dir, ".models");
-      const factContent = `Worker ${worker_id} cancelled`;
+      const factContent = `Worker ${worker_id} ${entry.status}`;
       try {
         const embedding = await embed(factContent, modelsDir);
         memoryStore.addFact(factContent, "worker", embedding);
@@ -529,8 +563,8 @@ export function createWorkerTools(
 
       return toolSuccess({
         worker_id,
-        status: "cancelled",
-        note: "Worker has been cancelled. Any partial results may still exist in the worker directory.",
+        status: entry.status,
+        note: "Cancellation requested. A draining worker retains its slot until execution settles. Partial results may remain.",
       });
     },
   };
@@ -549,14 +583,19 @@ export function createWorkerTools(
       _toolCallId: string,
       { worker_id, guidance }: SteerWorkerInput,
     ): Promise<AgentToolResult<unknown>> {
-      const entry = registry.get(worker_id);
+      if (!validWorkerAccess(worker_id) || guidance.length > 16_000) {
+        return toolError("Worker not found for this owner and topic, or guidance exceeds the limit");
+      }
+      withWorkerStore(config.data_dir, (store) => store.steer(worker_id, guidance));
+      const workerRegistry = lifecycle.findWorker(worker_id)?.registry ?? registry;
+      const entry = workerRegistry.get(worker_id);
 
       if (!entry) {
         return toolError(`Worker not found: ${worker_id}`);
       }
 
       if (entry.status === "queued") {
-        registry.update(worker_id, { pendingSteering: guidance });
+        workerRegistry.update(worker_id, { pendingSteering: guidance });
         return toolSuccess({
           worker_id,
           status: "queued",
@@ -573,7 +612,7 @@ export function createWorkerTools(
       }
 
       if (!entry.steer) {
-        registry.update(worker_id, { pendingSteering: guidance });
+        workerRegistry.update(worker_id, { pendingSteering: guidance });
         console.log(`[worker] ${worker_id} steering queued (${Buffer.byteLength(guidance, "utf-8")} bytes)`);
         return toolSuccess({
           worker_id,
@@ -598,5 +637,45 @@ export function createWorkerTools(
     },
   };
 
-  return [dispatchTool, checkTool, interruptTool, steerTool];
+  const resumeTool: AgentTool<typeof checkWorkerSchema> = {
+    name: "worker_resume", label: "worker_resume", parameters: checkWorkerSchema,
+    description: "Continue an interrupted or failed worker conversation only after an explicit user request. Creates a new receipt with the same conversation, original deadline and turn budget. Cancelled or completed workers cannot resume. No tool calls are automatically replayed.",
+    async execute(callId, { worker_id }, signal) {
+      const target = getWorkTarget?.();
+      if (isWorkerSession || (target && isInternalMessage(target))) {
+        return toolError("Worker continuation requires a new user request, not an automation event");
+      }
+      if (lifecycle.stopping || signal?.aborted || !validWorkerAccess(worker_id)) {
+        return toolError("Worker continuation is unavailable for this owner");
+      }
+      const prior = withWorkerStore(config.data_dir, (store) => store.get(worker_id));
+      if (!prior || !["interrupted", "failed"].includes(prior.status) || lifecycle.findWorker(worker_id)?.entry.runActive) {
+        return toolError("Only a settled interrupted or failed worker can continue");
+      }
+      if (!prior.deadlineAt || Date.parse(prior.deadlineAt) <= Date.now()
+        || (prior.spec.maxTurns && (prior.progress?.turns_completed ?? 0) >= prior.spec.maxTurns)) {
+        return toolError("The original worker budget is exhausted. Dispatch a new task with fresh authorization instead.");
+      }
+      try {
+        const receipt = withWorkerStore(config.data_dir, (store) => store.accept(
+          workerIdentity(currentOwner(), callId, fallbackScope), prior.spec, prior.model, prior, hashToolArgs({ worker_id }),
+        ));
+        return acceptWorker(receipt);
+      } catch (error) {
+        return toolError(error, "Worker continuation was not accepted");
+      }
+    },
+  };
+
+  lifecycle.addDrain(registry, drainQueue);
+  const owner = currentOwner();
+  if (owner) {
+    for (const receipt of withWorkerStore(config.data_dir, (store) => store.list())) {
+      if (receipt.status === "queued" && sameWorkerOwner(receipt.spec.owner, owner) && !lifecycle.hasWorker(receipt.workerId)) {
+        registerReceipt(receipt);
+      }
+    }
+    lifecycle.drainQueues();
+  }
+  return [dispatchTool, checkTool, interruptTool, steerTool, resumeTool];
 }

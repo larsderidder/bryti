@@ -2,7 +2,8 @@ import Database from "better-sqlite3";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { isInternalMessage, type IncomingMessage } from "../channels/types.js";
+import { isInternalMessage, type IncomingMessage, type SendOpts } from "../channels/types.js";
+import { DEFAULT_THREAD_ID } from "../threads.js";
 
 export type WorkExecution = "queued" | "running" | "completed" | "failed" | "interrupted";
 export type WorkDelivery = "none" | "pending" | "delivered" | "failed" | "unknown";
@@ -17,6 +18,15 @@ export interface WorkRecord {
   updatedAt: string;
 }
 
+export interface CompletedResponse {
+  id: string;
+  message: IncomingMessage;
+  text: string;
+  opts: SendOpts;
+  source?: { sessionFile?: string; entryIds: string[] };
+  state: WorkDelivery;
+}
+
 export interface WorkStore {
   accept(message: IncomingMessage): { record: WorkRecord; created: boolean };
   get(id: string): WorkRecord | null;
@@ -26,6 +36,8 @@ export interface WorkStore {
   recordDelivery(ids: string[], delivery: WorkDelivery, error?: string): void;
   /** A durable outbound record proves the final response was produced. */
   recordResponse(ids: string[], delivery: WorkDelivery, error?: string): void;
+  stageResponse(message: IncomingMessage, text: string, opts?: SendOpts, source?: CompletedResponse["source"]): CompletedResponse;
+  pendingResponses(): CompletedResponse[];
   recover(): { queued: WorkRecord[]; interrupted: WorkRecord[] };
   listUnresolved(userId?: string): WorkRecord[];
   close(): void;
@@ -113,6 +125,9 @@ export function createWorkStore(dataDir: string): WorkStore {
       updated_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS work_execution ON work(execution, created_at);
+    CREATE TABLE IF NOT EXISTS completed_responses (
+      id TEXT PRIMARY KEY, identity TEXT NOT NULL UNIQUE, record TEXT NOT NULL
+    );
   `);
   const select = db.prepare("SELECT * FROM work WHERE id = ?");
   const selectQueued = db.prepare("SELECT * FROM work WHERE execution = 'queued' ORDER BY created_at, rowid");
@@ -162,6 +177,47 @@ export function createWorkStore(dataDir: string): WorkStore {
         update.run(execution, error ?? null, new Date().toISOString(), id);
       }
     }),
+    stageResponse: db.transaction((message: IncomingMessage, text: string, opts: SendOpts = {}, source?: CompletedResponse["source"]) => {
+      const ids = [...new Set(message.workIds ?? [])].sort();
+      if (ids.length === 0 || ids.some((id) => {
+        const parent = get(id);
+        return !parent || parent.message.userId !== message.userId
+          || parent.message.platform !== message.platform || parent.message.channelId !== message.channelId
+          || parent.message.channelThreadId !== message.channelThreadId
+          || (parent.message.threadId ?? DEFAULT_THREAD_ID) !== (message.threadId ?? DEFAULT_THREAD_ID);
+      })) {
+        throw new Error("An owning work receipt is required to stage a response");
+      }
+      const key = crypto.createHash("sha256").update(JSON.stringify(ids)).digest("hex");
+      const existing = db.prepare("SELECT record FROM completed_responses WHERE identity = ?").get(key) as { record: string } | undefined;
+      if (existing) {
+        const response = JSON.parse(existing.record) as CompletedResponse;
+        if (response.text !== text || response.opts.parseMode !== opts.parseMode) {
+          throw new Error("Completed response identity was reused with different content");
+        }
+        return response;
+      }
+      if (ids.some((id) => get(id)?.execution !== "running")) {
+        throw new Error("Only running work can stage a new response");
+      }
+      const response: CompletedResponse = { id: crypto.randomUUID(),
+        message: { userId: message.userId, platform: message.platform, channelId: message.channelId,
+          threadId: message.threadId, channelThreadId: message.channelThreadId, text: "", raw: null,
+          workId: ids[0], workIds: ids, replyMode: "text" },
+        text, opts: { channelThreadId: message.channelThreadId, parseMode: opts.parseMode, workIds: ids },
+        source, state: "pending" };
+      db.prepare("INSERT INTO completed_responses(id, identity, record) VALUES (?, ?, ?)")
+        .run(response.id, key, JSON.stringify(response));
+      const update = db.prepare("UPDATE work SET execution = 'completed', delivery = 'pending', updated_at = ? WHERE id = ?");
+      for (const id of ids) {
+        update.run(new Date().toISOString(), id);
+      }
+      return response;
+    }),
+    pendingResponses() {
+      const rows = db.prepare("SELECT record FROM completed_responses WHERE json_extract(record, '$.state') = 'pending' ORDER BY rowid").all() as Array<{ record: string }>;
+      return rows.map((row) => JSON.parse(row.record) as CompletedResponse);
+    },
     recordResponse: db.transaction((ids: string[], delivery: WorkDelivery, error?: string) => {
       const update = db.prepare(`UPDATE work SET
         execution = CASE WHEN execution IN ('running', 'interrupted') THEN 'completed' ELSE execution END,
@@ -169,6 +225,7 @@ export function createWorkStore(dataDir: string): WorkStore {
         error = CASE WHEN execution = 'failed' OR delivery = 'delivered' THEN error ELSE ? END, updated_at = ? WHERE id = ?`);
       for (const id of ids) {
         update.run(delivery, error ?? null, new Date().toISOString(), id);
+        db.prepare("UPDATE completed_responses SET record = json_set(record, '$.state', ?) WHERE EXISTS (SELECT 1 FROM json_each(json_extract(record, '$.message.workIds')) WHERE value = ?) AND json_extract(record, '$.state') != 'delivered'").run(delivery, id);
       }
     }),
     recordDelivery: db.transaction((ids: string[], delivery: WorkDelivery, error?: string) => {

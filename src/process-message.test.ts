@@ -953,6 +953,32 @@ describe("processMessage pipeline", () => {
     }
   });
 
+  it("retains the generated answer before optional assistant history bookkeeping", async () => {
+    const session = makeUserSession("12345", []);
+    vi.spyOn(session.session, "prompt").mockImplementation(async () => {
+      (session.session.messages as unknown[]).push(assistantMsg("Retained answer"));
+    });
+    const state = makeState(config, session, tmpDir);
+    const workStore = createWorkStore(tmpDir);
+    state.workStore = workStore;
+    const { record } = workStore.accept(incomingMsg("hello"));
+    workStore.claim([record.id]);
+    vi.spyOn(state.historyManager, "append").mockImplementation(async (entry) => {
+      if (entry.role === "assistant") {
+        expect(workStore.get(record.id)?.execution).toBe("completed");
+        expect(workStore.pendingResponses()[0].text).toBe("Retained answer");
+        throw new Error("history storage unavailable");
+      }
+    });
+    try {
+      await processMessage(state, record.message);
+      expect(workStore.get(record.id)?.delivery).toBe("delivered");
+      expect((state.bridges[0] as ReturnType<typeof makeBridge>).sent).toEqual([{ channelId: record.message.channelId, text: "Retained answer" }]);
+    } finally {
+      workStore.close();
+    }
+  });
+
   it("delivers recovery notices directly without asking the model to resume work", async () => {
     const session = makeUserSession("12345", []);
     const prompt = vi.spyOn(session.session, "prompt");

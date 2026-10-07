@@ -68,12 +68,13 @@ import {
   type PromptActivity,
 } from "./prompt-lifecycle.js";
 import { acquireSessionTurn } from "./compaction/proactive.js";
-import type { WorkStore } from "./work/store.js";
+import type { WorkStore, CompletedResponse } from "./work/store.js";
 import { isDeliveryError } from "./channels/delivery.js";
 import { isCurrentProjectionWork, OBSOLETE_PROJECTION_WORK } from "./projection/occurrence.js";
 import { commandRecoveryNotice, isCommandContinuationCurrent } from "./work/commands.js";
 import { createOperationalGuidelines } from "./trust/guidelines.js";
 import { extractPdfAttachment } from "./documents/pdf.js";
+import { wrapEffectTool } from "./work/effects.js";
 
 /** Recheck after session loading too: cancellation can happen in another thread. */
 function skipObsoleteProjectionWork(state: AppState, msg: IncomingMessage): boolean {
@@ -312,12 +313,17 @@ function sendOptsFor(msg: IncomingMessage): import("./channels/types.js").SendOp
   return { channelThreadId: msg.channelThreadId, workIds: msg.workIds };
 }
 
-async function sendAssistantResponse(state: AppState, msg: IncomingMessage, text: string, parseMode?: import("./channels/types.js").SendOpts["parseMode"]): Promise<void> {
+async function sendAssistantResponse(state: AppState, msg: IncomingMessage, text: string,
+  parseMode?: import("./channels/types.js").SendOpts["parseMode"], staged?: CompletedResponse): Promise<void> {
   const bridge = getBridge(state, msg.platform);
   const ids = msg.workIds ?? [];
   const opts = sendOptsFor(msg);
   if (parseMode) {
     opts.parseMode = parseMode;
+  }
+  if (state.workStore && ids.length > 0) {
+    staged ??= state.workStore.stageResponse(msg, text, opts);
+    opts.responseId = staged.id;
   }
   if (msg.replyMode === "voice" && state.config.voice?.enabled && state.config.voice.reply_with_voice
     && state.voiceService && bridge.sendVoice) {
@@ -326,7 +332,7 @@ async function sendAssistantResponse(state: AppState, msg: IncomingMessage, text
     try {
       audioPath = await state.voiceService.synthesize(text);
       sending = true;
-      await bridge.sendVoice(msg.channelId, audioPath, sendOptsFor(msg));
+      await bridge.sendVoice(msg.channelId, audioPath, opts);
       state.workStore?.recordResponse(ids, "delivered");
       return;
     } catch (error) {
@@ -356,6 +362,39 @@ async function sendAssistantResponse(state: AppState, msg: IncomingMessage, text
       state.workStore?.recordResponse(ids, "failed", "Response delivery was rejected");
     }
     throw error;
+  }
+}
+
+/** Final output is durable before optional audit writes or voice synthesis. */
+async function deliverGeneratedResponse(state: AppState, msg: IncomingMessage, text: string, session: AgentSession, entryOffset?: number): Promise<void> {
+  let staged: CompletedResponse | undefined;
+  if (state.workStore && msg.workIds?.length) {
+    const entries = (session.sessionManager?.getEntries() ?? []).slice(entryOffset ?? 0);
+    staged = state.workStore.stageResponse(msg, text, sendOptsFor(msg), {
+      sessionFile: session.sessionFile,
+      entryIds: entries.filter((entry) => entry.type === "message" && entry.message.role === "assistant").map((entry) => entry.id),
+    });
+  }
+  try {
+    await state.historyManager.append({ role: "assistant", content: text });
+  } catch {
+    console.warn("[history] Assistant audit append failed; completed response retained");
+  }
+  await sendAssistantResponse(state, msg, text, undefined, staged);
+}
+
+/** Recovery consumes committed answers, never another model turn or caller-owned media. */
+export async function recoverCompletedResponses(state: AppState, allowed: (message: IncomingMessage) => boolean): Promise<void> {
+  for (const response of state.workStore?.pendingResponses() ?? []) {
+    if (!allowed(response.message)) {
+      state.workStore?.recordResponse(response.message.workIds ?? [], "failed", "Response destination is no longer authorized");
+      continue;
+    }
+    try {
+      await sendAssistantResponse(state, response.message, response.text, response.opts.parseMode, response);
+    } catch {
+      // Delivery owns definitely-unsent retries and preserves ambiguous sends.
+    }
   }
 }
 
@@ -525,7 +564,22 @@ export async function getOrLoadSession(
     },
   };
   const wrappedTools = wrapToolsWithTrustChecks(
-    tools,
+    tools.map((tool) => {
+      if (!state.workStore) {
+        return tool;
+      }
+      return wrapEffectTool(tool, state.config.data_dir,
+        () => state.deliveryTargets?.get(sessionKey) ?? msg, () => operationalGuidelines.read().content,
+        () => {
+          const session = state.sessions.get(sessionKey)?.session;
+          const last = session?.sessionManager.getBranch().filter((entry) => entry.type === "message" && entry.message.role === "assistant").pop();
+          let assistantTimestamp: number | undefined;
+          if (last?.type === "message") {
+            assistantTimestamp = last.message.timestamp;
+          }
+          return { sessionId: session?.sessionId, assistantTimestamp };
+        });
+    }),
     state.trustStore,
     userId,
     trustContext,
@@ -951,11 +1005,7 @@ export async function processMessage(
       console.log(`[agent] Silent reply from ${msg.userId}, suppressing message`);
     } else if (visibleTexts.length > 0) {
       const combinedText = visibleTexts.join("\n\n");
-      await state.historyManager.append({
-        role: "assistant",
-        content: combinedText,
-      });
-      await sendAssistantResponse(state, msg, combinedText);
+      await deliverGeneratedResponse(state, msg, combinedText, session, usageWindow.entryOffset);
     } else if (!isSchedulerMessage) {
       console.log(
         `[agent] No text response from ${msg.userId} after user message, re-prompting`,
@@ -1004,8 +1054,7 @@ export async function processMessage(
       }
       const followUpText = extractResponseText(followUpMsg, { showThinking: state.config.response?.show_thinking === true });
       if (followUpText.trim() && followUpText.trim() !== SILENT_REPLY_TOKEN) {
-        await state.historyManager.append({ role: "assistant", content: followUpText });
-        await sendAssistantResponse(state, msg, followUpText);
+        await deliverGeneratedResponse(state, msg, followUpText, session, usageWindow.entryOffset);
       }
     } else {
       state.workStore?.finish(msg.workIds ?? [], "failed", "Scheduled work produced neither a response nor an explicit silent acknowledgement");

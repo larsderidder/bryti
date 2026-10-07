@@ -43,6 +43,7 @@ import { createDiagnosticWriter, createSessionDiagnostics, createProviderDiagnos
 import { isSessionTurnReserved } from "./compaction/proactive.js";
 import { collectSessionUsage } from "./session-usage.js";
 import { createUsageTracker } from "./usage.js";
+import { resolveEffectResult } from "./work/effects.js";
 
 // Re-export for backward compatibility with index.ts
 export { SILENT_REPLY_TOKEN };
@@ -256,7 +257,9 @@ export async function loadUserSession(
         },
       }) },
       { name: "bryti-mcp", factory: toolPolicy.wrapFactory(createBrytiMcpExtension(config.data_dir, userId)) },
-      { name: "bryti-transcript-repair", factory: createTranscriptRepairExtension() },
+      { name: "bryti-transcript-repair", factory: createTranscriptRepairExtension(
+        (call) => resolveEffectResult(config.data_dir, userId, extensionTrust?.context?.source?.threadId, call, sessionManager.getSessionId()),
+      ) },
       { name: "bryti-tool-search", factory: createToolDiscoveryExtension((activeTools) => {
         promptTools.splice(0, promptTools.length, ...activeTools.map((tool) => ({
           name: tool.name, description: tool.description,

@@ -9,6 +9,7 @@ import { createWorkerRegistry } from "./registry.js";
 import { WorkerLifecycle } from "./lifecycle.js";
 import { spawnWorkerSession } from "./spawn.js";
 import { acknowledgeWorkerEvent, collectWorkerEvents, writeWorkerStatus } from "./recovery.js";
+import { commitWorkerOutcome } from "./lifecycle.js";
 
 vi.mock("./spawn.js", async (importActual) => ({
   ...await importActual<typeof import("./spawn.js")>(),
@@ -38,8 +39,7 @@ describe("worker tools during shutdown", () => {
     vi.mocked(spawnWorkerSession).mockImplementation(async ({ workerDir, workerId }) => {
       await new Promise<void>((resolve) => { finish = resolve; });
       fs.writeFileSync(path.join(workerDir, "result.md"), "Finished research");
-      registry.update(workerId, { status: "complete", completedAt: new Date() });
-      writeWorkerStatus(workerDir, { worker_id: workerId, status: "complete" });
+      commitWorkerOutcome(registry, registry.get(workerId)!, "complete", null);
     });
   });
 
@@ -50,7 +50,7 @@ describe("worker tools during shutdown", () => {
   });
 
   async function dispatch(task: string) {
-    return tools.find((tool) => tool.name === "worker_dispatch")!.execute("test", { task, tools: [] });
+    return tools.find((tool) => tool.name === "worker_dispatch")!.execute(task, { task, tools: [] });
   }
 
   it("freezes dispatch and queue draining while a running worker finishes", async () => {
@@ -62,9 +62,9 @@ describe("worker tools during shutdown", () => {
     finish();
     await stop;
     expect(spawnWorkerSession).toHaveBeenCalledOnce();
-    expect(registry.list().map((entry) => entry.status)).toEqual(["complete", "interrupted"]);
+    expect(registry.list().map((entry) => entry.status)).toEqual(["complete", "queued"]);
     const events = collectWorkerEvents(dir, true);
-    expect(events).toHaveLength(2);
+    expect(events).toHaveLength(1);
     for (const event of events) {
       acknowledgeWorkerEvent(dir, event.workId!);
     }

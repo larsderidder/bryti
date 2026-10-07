@@ -15,6 +15,7 @@ import { getUserTimezone } from "./time.js";
 import { createThread, getActiveThread, listThreads, switchThread } from "./threads.js";
 import type { ListedApproval, TrustStore } from "./trust/index.js";
 import type { WorkStore } from "./work/store.js";
+import { withEffectStore } from "./work/effects.js";
 
 /**
  * Human-readable labels for the /log output. Tool names never leak to the user.
@@ -211,6 +212,16 @@ export async function handleSlashCommand(
     const lines = records.slice(0, 20).map((record) => {
       return `${record.id}: execution=${record.execution}, delivery=${record.delivery}\n${record.message.text.slice(0, 120)}`;
     });
+    const effects = withEffectStore(context.config.data_dir, (store) => store.list(msg.userId))
+      .filter((effect) => {
+        if (parsed.args) {
+          return effect.workIds.includes(parsed.args) || effect.id === parsed.args;
+        }
+        return effect.state !== "completed";
+      });
+    for (const effect of effects.slice(0, 20)) {
+      lines.push(`Effect ${effect.id}: ${effect.toolName}, outcome=${effect.state}\nOwning work: ${effect.workIds.join(", ")}. Unknown effects must be inspected, not repeated.`);
+    }
     let text = "No matching unresolved work receipts.";
     if (lines.length > 0) {
       text = `Work receipts, uncertain actions are not automatically repeated:\n\n${lines.join("\n\n")}`;

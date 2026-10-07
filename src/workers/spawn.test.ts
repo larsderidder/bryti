@@ -27,7 +27,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
+import { SessionManager, type AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 
 // ---------------------------------------------------------------------------
 // Mock the SDK session factory so tests never open a real network connection
@@ -42,6 +42,7 @@ let mockMessages: unknown[] = [];
 let mockCustomToolNames: string[] = [];
 let mockAllowedToolNames: string[] | undefined;
 let mockEventListener: ((event: AgentSessionEvent) => void) | undefined;
+let mockSessionManager: SessionManager | undefined;
 
 let mockSetupImpl: () => Promise<void> = async () => {};
 const mockPrompt = vi.fn(async () => mockPromptImpl());
@@ -73,9 +74,11 @@ vi.mock("@earendil-works/pi-coding-agent", async (importActual) => {
     createAgentSession: vi.fn().mockImplementation(async (options: {
       customTools?: Array<{ name: string }>;
       tools?: string[];
+      sessionManager?: SessionManager;
     }) => {
       mockCustomToolNames = (options.customTools ?? []).map((tool) => tool.name);
       mockAllowedToolNames = options.tools;
+      mockSessionManager = options.sessionManager;
       return {
       session: {
         get messages() { return mockMessages; },
@@ -98,9 +101,7 @@ vi.mock("@earendil-works/pi-coding-agent", async (importActual) => {
       constructor() {}
       async reload() {}
     },
-    SessionManager: {
-      inMemory: (_dir: string) => ({}),
-    },
+    SessionManager: actual.SessionManager,
     SettingsManager: {
       create: (_dataDir: string, _agentDir: string) => ({
         load: async () => ({}),
@@ -245,6 +246,7 @@ describe("spawnWorkerSession completion lifecycle", () => {
     mockCustomToolNames = [];
     mockAllowedToolNames = undefined;
     mockEventListener = undefined;
+    mockSessionManager = undefined;
     mockPromptImpl = async () => {
       fs.writeFileSync(path.join(workerDir, "result.md"), "# Result\n\nDone.\n", "utf-8");
     };
@@ -272,6 +274,53 @@ describe("spawnWorkerSession completion lifecycle", () => {
       timeoutHandle: null,
     });
   }
+
+  function retainedResearch() {
+    const manager = SessionManager.create(workerDir, path.join(tmpDir, "work", "worker-sessions", "original"));
+    manager.appendMessage({ role: "user", content: "research", timestamp: Date.now() });
+    manager.appendMessage({ role: "assistant", content: [{ type: "toolCall", id: "fetch", name: "fetch_url", arguments: { url: "https://example.com" } }],
+      api: "anthropic-messages", provider: "test", model: "model", stopReason: "toolUse", timestamp: Date.now(),
+      usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } });
+    manager.appendMessage({ role: "toolResult", toolCallId: "fetch", toolName: "fetch_url", isError: false,
+      content: [{ type: "text", text: "Retained source evidence" }], timestamp: Date.now() });
+  }
+
+  it("loads completed research into continuation without requiring a repeated fetch", async () => {
+    retainedResearch();
+    const registry = createWorkerRegistry();
+    registerWorker(registry, "w-test01", "research");
+    const memory = createMemoryStore("user-resume", tmpDir);
+    mockPromptImpl = async () => {
+      expect(mockSessionManager?.buildSessionContext().messages).toContainEqual(expect.objectContaining({
+        role: "toolResult", toolCallId: "fetch", content: [{ type: "text", text: "Retained source evidence" }],
+      }));
+      fs.writeFileSync(path.join(workerDir, "result.md"), "Answer from retained evidence");
+    };
+    try {
+      await spawnWorkerSession({ config, workerId: "w-test01", workerDir, task: "research", sessionId: "original",
+        modelOverride: undefined, toolNames: ["web_search"], memoryStore: memory, registry, timeoutMs: 30_000, maxTurns: 5 });
+      expect(mockPrompt).toHaveBeenCalledOnce();
+      expect(registry.get("w-test01")?.status).toBe("complete");
+      expect(readStatusFile(workerDir).progress?.tool_calls_by_name.fetch_url).toBe(1);
+    } finally {
+      memory.close();
+    }
+  });
+
+  it("rejects exhausted conversation budgets before starting another model turn", async () => {
+    retainedResearch();
+    const registry = createWorkerRegistry();
+    registerWorker(registry, "w-test01", "research");
+    const memory = createMemoryStore("user-budget", tmpDir);
+    try {
+      await expect(spawnWorkerSession({ config, workerId: "w-test01", workerDir, task: "research", sessionId: "original",
+        modelOverride: undefined, toolNames: [], memoryStore: memory, registry, timeoutMs: 30_000, maxTurns: 1 }))
+        .rejects.toThrow("original worker turn budget");
+      expect(mockPrompt).not.toHaveBeenCalled();
+    } finally {
+      memory.close();
+    }
+  });
 
   it.each([
     { label: "explicit empty override", typeTools: ["web_search", "fetch_url"], tools: [], expected: "complete" },
