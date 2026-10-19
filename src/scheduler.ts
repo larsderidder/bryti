@@ -379,12 +379,18 @@ function settleProjection(store: ProjectionStore, projection: Projection, timezo
 }
 
 function projectionReminderText(projection: Projection): string {
-  const formatted = formatProjectionsForPrompt([projection], 1);
+  let formatted = formatProjectionsForPrompt([projection], 1);
+  // Keep the full record authoritative. Never execute a truncated set of constraints.
+  if (formatted.length > 6500) {
+    formatted = `Reminder: ${projection.summary.slice(0, 500)} (id: ${projection.id})\n` +
+      `The full instructions are too large to inline. Call projection_read with this ID before taking any action. ` +
+      `Read all context pages, including constraints and approvals. Do not infer omitted instructions from the summary.`;
+  }
   return `[Scheduled reminder]\n\nThe following reminder is due now:\n\n` +
     `${formatted}\n\n` +
     `For this item:\n` +
     `1. Search your memory for related context with memory_archival_search.\n` +
-    `2. Execute any actions described in the reminder, such as checking email or calendar.\n` +
+    `2. Execute only authorized actions described in the full reminder, such as checking email or calendar.\n` +
     `3. Send the user a helpful, natural message with your findings.\n\n` +
     `Only reply NOOP if the reminder is purely informational and requires no action or message.`;
 }
@@ -462,31 +468,50 @@ export function createScheduler(
   }
 
   async function reconcileAcceptedOccurrences(store: ProjectionStore, userId: string, timezone: string): Promise<void> {
-    const awaiting = store.getAwaitingDelivery();
-    for (const projection of awaiting) {
-      const workId = projection.delivery_work_id;
-      if (!workId) {
-        continue;
-      }
-      const receipt = workStore.get(workId);
-      if (receipt?.execution === "failed" && receipt.error === OBSOLETE_PROJECTION_WORK) {
-        store.clearDeliveryWork(projection.id, workId);
-        continue;
-      }
-      const managedCommands = commands.forWork(workId);
-      const reconciled = commands.isReconciled(workId, workStore);
-      if (managedCommands.length > 0 && !reconciled) {
-        // Dispatch is not completion. The durable command event owns the review.
-        continue;
-      }
-      if (!reconciled && !shouldSettleReceipt(receipt)) {
-        if (receipt && (receipt.execution === "failed" || receipt.execution === "interrupted"
-          || (receipt.execution === "completed" && ["failed", "unknown"].includes(receipt.delivery)))) {
-          const noticeId = `blocked:${workId}`;
+    for (const projection of store.getAwaitingDelivery()) {
+      try {
+        const workId = projection.delivery_work_id;
+        if (!workId) {
+          continue;
+        }
+        const receipt = workStore.get(workId);
+        if (receipt?.execution === "failed" && receipt.error === OBSOLETE_PROJECTION_WORK) {
+          store.clearDeliveryWork(projection.id, workId);
+          continue;
+        }
+        const reconciled = commands.isReconciled(workId, workStore);
+        const recovery = commands.recoveryState(workId, workStore);
+        const waitingForCommands = recovery.commands.some((command) => ["queued", "running"].includes(command.status));
+        const waitingForReview = recovery.commands.some((command) => {
+          const review = workStore.get(`command:${command.id}:completion`);
+          return review && ["queued", "running"].includes(review.execution);
+        });
+        const needsReview = recovery.commands.length > 0 && !reconciled;
+        if (!reconciled && (needsReview || recovery.blockers.length > 0 || !shouldSettleReceipt(receipt))) {
+          if (!receipt || waitingForCommands || waitingForReview || !["completed", "failed", "interrupted"].includes(receipt.execution)) {
+            continue;
+          }
+          const firstNoticeId = `blocked:${workId}`;
+          const firstNotice = workStore.get(firstNoticeId);
+          const today = new Date().toISOString().slice(0, 10);
+          let noticeId = firstNoticeId;
+          if (firstNotice) {
+            if (firstNotice.createdAt.slice(0, 10) === today) {
+              continue;
+            }
+            noticeId = `${firstNoticeId}:${today}`;
+          }
           if (!workStore.get(noticeId) && isTargetAllowed(config, receipt.message)) {
             let description = "This reminder is blocked pending review.";
             if (projection.recurrence) {
               description = "This recurring schedule is paused pending review.";
+            }
+            let reason = "The previous occurrence failed or its delivery is unresolved.";
+            if (needsReview) {
+              reason = "Managed commands settled, but task reconciliation is missing or its review did not complete successfully.";
+            }
+            if (recovery.blockers.length > 0) {
+              reason += ` ${recovery.blockers.join("; ")}.`;
             }
             const notice: IncomingMessage = {
               ...receipt.message,
@@ -494,23 +519,30 @@ export function createScheduler(
               workIds: [noticeId],
               images: undefined,
               audio: undefined,
+              documents: undefined,
               replyMode: "text",
-              text: `Reminder: ${projection.summary}\n${description}\nExecution: ${receipt.execution}. Delivery: ${receipt.delivery}.\nNo actions were automatically repeated. Use /work ${workId} to inspect the receipt. After checking the outcome, explicitly cancel this reminder or ask for a new occurrence.`,
+              text: `Reminder: ${projection.summary.slice(0, 500)}\n${description}\n${reason}\n` +
+                `Execution: ${receipt.execution}. Delivery: ${receipt.delivery}.\n` +
+                `No actions were automatically repeated. Use /work ${workId} to inspect the receipt. ` +
+                `Ask for an outcome review with work_inspect and work_reconcile to resume future occurrences without replaying this run. ` +
+                `Unknown effects must be resolved first. This notice repeats at most once per UTC day while unresolved.`,
               raw: { type: "recovery_notice" },
             };
             if (await onMessage(notice) !== false) {
               workStore.accept(notice);
             }
           }
+          continue;
         }
-        continue;
+        if (projection.status === "pending") {
+          settleProjection(store, projection, timezone, reconciled);
+        } else {
+          store.clearDeliveryWork(projection.id, workId);
+        }
+        console.log(`[projections] user=${userId} settled delivered projection occurrence ${projection.id} (${workId})`);
+      } catch (error) {
+        console.error("[projections] Occurrence reconciliation failed", { userId, projectionId: projection.id, error: (error as Error).message });
       }
-      if (projection.status === "pending") {
-        settleProjection(store, projection, timezone, reconciled);
-      } else {
-        store.clearDeliveryWork(projection.id, workId);
-      }
-      console.log(`[projections] user=${userId} settled delivered projection occurrence ${projection.id} (${workId})`);
     }
   }
 

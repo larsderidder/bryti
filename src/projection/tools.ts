@@ -72,6 +72,11 @@ const getProjectionsSchema = Type.Object({
   })),
 });
 
+const readProjectionSchema = Type.Object({
+  id: Type.String({ description: "Projection ID to read in full, including resolved reminders" }),
+  context_offset: Type.Optional(Type.Integer({ minimum: 0, description: "Character offset into context. Read all pages before acting on a bounded reminder." })),
+});
+
 const resolveProjectionSchema = Type.Object({
   id: Type.String({ description: "Projection ID to resolve" }),
   outcome: Type.Union(
@@ -158,6 +163,7 @@ export function createProjectionTools(
   store: ProjectionStore,
   timezone?: string,
   getTarget?: ProjectionTargetGetter,
+  getRuntimeState?: (workId: string) => unknown,
 ): AgentTool<any>[] {
   const projectTool: AgentTool<typeof projectSchema> = {
     name: "projection_create",
@@ -232,7 +238,7 @@ export function createProjectionTools(
     description:
       "Retrieve your active (pending) projections. Default horizon is 7 days. " +
       "Always includes someday items. Use to review what's coming up or to find " +
-      "IDs for projection_resolve.",
+      "IDs for projection_resolve. Runtime state distinguishes paused schedules from running work; pending does not mean healthy.",
     parameters: getProjectionsSchema,
     async execute(
       _toolCallId: string,
@@ -240,7 +246,13 @@ export function createProjectionTools(
     ): Promise<AgentToolResult<unknown>> {
       try {
         const days = horizon_days ?? 7;
-        const projections = store.getUpcoming(days);
+        const projections = store.getUpcoming(days).map((projection) => {
+          let runtime: unknown;
+          if (projection.delivery_work_id) {
+            runtime = getRuntimeState?.(projection.delivery_work_id);
+          }
+          return { ...projection, runtime };
+        });
         const text = JSON.stringify({ projections }, null, 2);
         return { content: [{ type: "text", text }], details: { projections } };
       } catch (error) {
@@ -248,6 +260,32 @@ export function createProjectionTools(
         const text = JSON.stringify({ error: err.message });
         return { content: [{ type: "text", text }], details: { error: err.message } };
       }
+    },
+  };
+
+  const readProjectionTool: AgentTool<typeof readProjectionSchema> = {
+    name: "projection_read", label: "projection_read", parameters: readProjectionSchema,
+    description: "Read one reminder's authoritative instructions and runtime state by ID. Context is paged without modifying the stored record. Read every page before acting; summary text alone may omit constraints and approvals. Pending is a lifecycle status, not proof a schedule is running.",
+    async execute(_callId, { id, context_offset }) {
+      const projection = store.getById(id);
+      if (!projection) {
+        return { content: [{ type: "text", text: "Projection not found" }], details: { error: "not found" }, isError: true };
+      }
+      const context = projection.context ?? "";
+      const offset = context_offset ?? 0;
+      const page = context.slice(offset, offset + 8000);
+      let nextOffset: number | null = null;
+      if (offset + page.length < context.length) {
+        nextOffset = offset + page.length;
+      }
+      let runtime: unknown;
+      if (projection.delivery_work_id) {
+        runtime = getRuntimeState?.(projection.delivery_work_id);
+      }
+      const details = { projection: { ...projection, context: page },
+        context_page: { offset, total_chars: context.length, next_offset: nextOffset },
+        runtime };
+      return { content: [{ type: "text", text: JSON.stringify(details) }], details };
     },
   };
 
@@ -355,5 +393,5 @@ export function createProjectionTools(
     },
   };
 
-  return [projectTool, getProjectionsTool, resolveProjectionTool, updateProjectionTool, linkProjectionTool];
+  return [projectTool, getProjectionsTool, readProjectionTool, resolveProjectionTool, updateProjectionTool, linkProjectionTool];
 }

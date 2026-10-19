@@ -6,6 +6,15 @@ import type { IncomingMessage } from "../channels/types.js";
 import type { WorkStore } from "./store.js";
 import { createProjectionStore } from "../projection/store.js";
 import { isCurrentProjectionWork } from "../projection/occurrence.js";
+import { isInternalMessage } from "../channels/types.js";
+
+export interface WorkRecoveryState {
+  commands: Array<{ id: string; status: CommandStatus; exitCode: number | null; logPath: string }>;
+  effects: Array<{ id: string; tool: string; state: string }>;
+  workers: Array<{ id: string; status: string }>;
+  review: { id: string; execution: string | null; delivery: string | null } | null;
+  blockers: string[];
+}
 
 export type CommandStatus = "queued" | "running" | "complete" | "failed" | "timeout" | "interrupted";
 export interface CommandSpec {
@@ -35,6 +44,7 @@ export interface CommandStore {
   acknowledge(id: string): void;
   reconcile(workId: string, reviewer: IncomingMessage, evidence: string, work: WorkStore): void;
   isReconciled(workId: string, work: WorkStore): boolean;
+  recoveryState(workId: string, work: WorkStore): WorkRecoveryState;
   close(): void;
 }
 
@@ -109,9 +119,74 @@ export function createCommandStore(dataDir: string): CommandStore {
       .run(status, exitCode, error ?? null, id);
   };
 
+  /** Include completion reviews so their unfinished effects cannot release the owning schedule. */
+  function recoveryState(workId: string, work: WorkStore, currentReviewId?: string): WorkRecoveryState {
+    const tables = new Set((db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map((row) => row.name));
+    const row = db.prepare("SELECT review_id FROM command_reviews WHERE work_id = ?").get(workId) as { review_id: string } | undefined;
+    const relatedIds = new Set([workId]);
+    if (row) {
+      relatedIds.add(row.review_id);
+    }
+    if (currentReviewId) {
+      relatedIds.add(currentReviewId);
+    }
+    const relatedCommands: CommandRecord[] = [];
+    for (const relatedId of relatedIds) {
+      for (const command of forWork(relatedId)) {
+        if (!relatedCommands.some((existing) => existing.id === command.id)) {
+          relatedCommands.push(command);
+        }
+      }
+    }
+    for (const command of relatedCommands) {
+      relatedIds.add(`command:${command.id}:completion`);
+    }
+    const scope = JSON.stringify([...relatedIds]);
+    let effects: WorkRecoveryState["effects"] = [];
+    let workers: WorkRecoveryState["workers"] = [];
+    if (tables.has("effects")) {
+      effects = db.prepare(`SELECT id, json_extract(record, '$.toolName') AS tool, json_extract(record, '$.state') AS state
+        FROM effects WHERE EXISTS (SELECT 1 FROM json_each(record, '$.workIds')
+          WHERE value IN (SELECT value FROM json_each(?)))`).all(scope) as WorkRecoveryState["effects"];
+    }
+    if (tables.has("workers")) {
+      workers = db.prepare(`SELECT id, json_extract(record, '$.status') AS status FROM workers
+        WHERE json_extract(record, '$.spec.owner.workId') IN (SELECT value FROM json_each(?)) OR EXISTS (
+          SELECT 1 FROM json_each(record, '$.spec.owner.workIds') WHERE value IN (SELECT value FROM json_each(?))
+        )`).all(scope, scope) as WorkRecoveryState["workers"];
+    }
+    const commands = relatedCommands.map((command) => ({
+      id: command.id, status: command.status, exitCode: command.exitCode, logPath: command.logPath,
+    }));
+    let review: WorkRecoveryState["review"] = null;
+    if (row) {
+      const receipt = work.get(row.review_id);
+      review = { id: row.review_id, execution: receipt?.execution ?? null, delivery: receipt?.delivery ?? null };
+    }
+    const blockers: string[] = [];
+    const parent = work.get(workId);
+    if (!parent || ["queued", "running"].includes(parent.execution)) {
+      blockers.push("Owning work is missing or still active/queued");
+    }
+    if (parent && !["none", "delivered"].includes(parent.delivery)) {
+      blockers.push("Original delivery is unresolved");
+    }
+    if (commands.some((command) => ["queued", "running"].includes(command.status))) {
+      blockers.push("A managed command is still active");
+    }
+    if (effects.some((effect) => effect.state !== "completed")) {
+      blockers.push("Tool effects are running or unknown; inspect them without repeating actions");
+    }
+    if (workers.some((worker) => ["queued", "running", "stopping"].includes(worker.status))) {
+      blockers.push("A worker is still active");
+    }
+    return { commands, effects, workers, review, blockers };
+  }
+
   return {
     get,
     forWork,
+    recoveryState,
     accept: db.transaction((owner: IncomingMessage, callId: string, spec: CommandSpec, maxConcurrent: number) => {
       if (!owner.workId || !owner.platform || !callId) {
         throw new Error("Managed commands require a durable owning work receipt");
@@ -201,15 +276,19 @@ export function createCommandStore(dataDir: string): CommandStore {
         || !sameCommandOwner(parent.message, reviewer) || !sameCommandOwner(review.message, reviewer)) {
         throw new Error("Reconciliation requires an active review from the same owner and topic");
       }
+      if (isInternalMessage(review.message)) {
+        const match = /^command:(c-[a-f0-9]{24}):completion$/.exec(review.id);
+        if (!match || !forWork(workId).some((command) => command.id === match[1])) {
+          throw new Error("Reconciliation requires a user-requested review or the owning command completion, not a notification");
+        }
+      }
       const commands = forWork(workId);
-      if (!commands.length || commands.some((command) => !sameCommandOwner(command.owner, reviewer))) {
-        throw new Error("No managed commands for this owner and work receipt");
+      if (commands.some((command) => !sameCommandOwner(command.owner, reviewer))) {
+        throw new Error("Managed commands belong to another owner or topic");
       }
-      if (commands.some((command) => command.status === "queued" || command.status === "running") || parent.execution === "running") {
-        throw new Error("The owning task or a command is still active");
-      }
-      if (["pending", "unknown", "failed"].includes(parent.delivery)) {
-        throw new Error("Original delivery is unresolved; reconciliation cannot hide a delivery failure");
+      const recovery = recoveryState(workId, work, review.id);
+      if (recovery.blockers.length > 0) {
+        throw new Error(recovery.blockers.join("; "));
       }
       if (!evidence.trim() || evidence.length > 4000) {
         throw new Error("Provide concise evidence of the reviewed task outcome");
@@ -218,15 +297,9 @@ export function createCommandStore(dataDir: string): CommandStore {
         .run(workId, review.id, evidence);
     }),
     isReconciled(workId, work) {
-      const row = db.prepare("SELECT review_id FROM command_reviews WHERE work_id = ?").get(workId) as { review_id: string } | undefined;
-      if (!row || forWork(workId).some((command) => command.status === "queued" || command.status === "running")) {
-        return false;
-      }
-      const review = work.get(row.review_id);
-      const parent = work.get(workId);
-      return parent !== null && parent.execution !== "running"
-        && ["none", "delivered"].includes(parent.delivery)
-        && review?.execution === "completed" && ["none", "delivered"].includes(review.delivery);
+      const recovery = recoveryState(workId, work);
+      return recovery.blockers.length === 0 && recovery.review?.execution === "completed"
+        && ["none", "delivered"].includes(recovery.review.delivery ?? "");
     },
     close() {
       db.close();

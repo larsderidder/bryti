@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { runPromptWithActivityWatchdog } from "./prompt-lifecycle.js";
+import { runPromptWithActivityWatchdog, describePromptTimeout, type PromptActivity } from "./prompt-lifecycle.js";
 
 describe("runPromptWithActivityWatchdog", () => {
   afterEach(() => {
@@ -247,5 +247,46 @@ describe("runPromptWithActivityWatchdog", () => {
     activity({ type: "approval_wait_end", toolCallId: "a" });
     await vi.advanceTimersByTimeAsync(1000);
     await expect(result).resolves.toMatchObject({ reason: "tool_deadline", elapsedMs: 6000 });
+  });
+
+  it("stops an automated turn on expired approval instead of starting another wait", async () => {
+    vi.useFakeTimers();
+    let activity: (event?: PromptActivity) => void = () => {};
+    const abort = vi.fn().mockResolvedValue(undefined);
+    let shouldContinue: (() => boolean) | undefined;
+    const result = runPromptWithActivityWatchdog({
+      sessionKey: "u", timeoutMs: 1000, maxDurationMs: 10_000, abort,
+      stopOnApprovalExpiry: true,
+      subscribe(listener) { activity = listener; return () => {}; },
+      operation(controls) { shouldContinue = controls.shouldContinue; return new Promise(() => {}); },
+    });
+    activity({ type: "approval_wait_start", toolCallId: "approval-1" });
+    await vi.advanceTimersByTimeAsync(2000);
+    activity({ type: "approval_expired", toolCallId: "approval-1", toolName: "google_calendar_events" });
+    const outcome = await result;
+    expect(outcome).toMatchObject({ status: "timeout", reason: "approval_expired", toolName: "google_calendar_events" });
+    expect(shouldContinue?.()).toBe(false);
+    expect(abort).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+    if (outcome.status === "timeout") {
+      expect(describePromptTimeout(outcome)).toContain("approval");
+      expect(describePromptTimeout(outcome)).not.toContain("overall execution time limit");
+    }
+  });
+
+  it("lets an interactive turn report an expired approval normally", async () => {
+    vi.useFakeTimers();
+    let activity: (event?: PromptActivity) => void = () => {};
+    let complete!: () => void;
+    const abort = vi.fn().mockResolvedValue(undefined);
+    const result = runPromptWithActivityWatchdog({
+      sessionKey: "u", abort,
+      subscribe(listener) { activity = listener; return () => {}; },
+      operation: () => new Promise<void>((resolve) => { complete = resolve; }),
+    });
+    activity({ type: "approval_expired", toolCallId: "a", toolName: "tool" });
+    complete();
+    await expect(result).resolves.toMatchObject({ status: "completed" });
+    expect(abort).not.toHaveBeenCalled();
   });
 });

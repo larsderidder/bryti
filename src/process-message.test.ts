@@ -766,6 +766,50 @@ describe("processMessage pipeline", () => {
     expect(bridge.sent[0].text).toContain("too long");
   });
 
+  it("ends an automated turn when approval expires and preserves its interruption", async () => {
+    const session = makeUserSession("12345");
+    vi.spyOn(session.session, "prompt").mockImplementation(async () => {
+      session.emitEvent({ type: "approval_expired", toolCallId: "approval", toolName: "google_calendar_events" });
+      await new Promise(() => {});
+    });
+    const abort = vi.spyOn(session.session, "abort");
+    const state = makeState(config, session, tmpDir);
+    const work = createWorkStore(tmpDir);
+    state.workStore = work;
+    const record = work.accept({ ...incomingMsg("Check the calendar"), raw: { type: "cron" } }).record;
+    work.claim([record.id]);
+    try {
+      await processMessage(state, record.message);
+      expect(abort).toHaveBeenCalledOnce();
+      expect(session.dispose).toHaveBeenCalledOnce();
+      expect(state.sessions.has("12345")).toBe(false);
+      expect(work.get(record.id)).toMatchObject({ execution: "interrupted", error: expect.stringContaining("approval") });
+      expect((state.bridges[0] as ReturnType<typeof makeBridge>).sent[0].text).toContain("That action was not run");
+      expect(state.approvalListeners?.size).toBe(0);
+    } finally {
+      work.close();
+    }
+  });
+  it("reports oversized internal input as an automation failure in its own topic", async () => {
+    const session = makeUserSession("12345");
+    const prompt = vi.spyOn(session.session, "prompt");
+    const state = makeState(config, session, tmpDir);
+    const work = createWorkStore(tmpDir);
+    state.workStore = work;
+    const send = vi.spyOn(state.bridges[0], "sendMessage");
+    const record = work.accept({ ...incomingMsg("x".repeat(10_001)), channelThreadId: "17",
+      workId: "internal-oversize", raw: { type: "cron" } }).record;
+    work.claim([record.id]);
+    try {
+      await processMessage(state, record.message);
+      expect(prompt).not.toHaveBeenCalled();
+      expect(work.get(record.id)).toMatchObject({ execution: "failed", error: expect.stringContaining("Internal event") });
+      expect(send).toHaveBeenCalledWith("12345", expect.stringContaining("No actions were run"), expect.objectContaining({ channelThreadId: "17" }));
+      expect(send.mock.calls[0][1]).not.toContain("break it into smaller pieces");
+    } finally {
+      work.close();
+    }
+  });
   it("sends an error message when the model returns stopReason=error", async () => {
     const session = makeUserSession("12345", [
       assistantMsg("", { stopReason: "error", ...{ errorMessage: "rate limited" } }),

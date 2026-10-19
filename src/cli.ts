@@ -36,6 +36,9 @@ import { runReflection } from "./projection/index.js";
 import { createInviteStore } from "./web-e2ee/invite-store.js";
 import { createGoogleAccountStore, startGoogleLogin } from "./integrations/google-auth.js";
 import { googleClient } from "./integrations/google-tools.js";
+import { createProjectionStore } from "./projection/store.js";
+import { createWorkStore } from "./work/store.js";
+import { inspectWorkRecovery, reconcileWorkAsOperator } from "./work/recovery.js";
 
 // ---------------------------------------------------------------------------
 // Version
@@ -410,6 +413,41 @@ export async function cmdGoogle(dataDir: string, userId: string, action: string,
   }
 }
 
+/** Inspect scheduling holds or explicitly reconcile one reviewed occurrence without a model call. */
+export function cmdWork(dataDir: string, userId: string, action: string, workId?: string, evidence?: string): void {
+  if (action === "list") {
+    const projections = createProjectionStore(userId, dataDir);
+    try {
+      const schedules = projections.getUpcoming(365).filter((projection) => projection.delivery_work_id)
+        .map((projection) => ({ id: projection.id, summary: projection.summary,
+          scheduled_when: projection.resolved_when, recurrence: projection.recurrence,
+          runtime: inspectWorkRecovery(dataDir, projection.delivery_work_id!) }));
+      console.log(JSON.stringify({ schedules }, null, 2));
+    } finally {
+      projections.close();
+    }
+    return;
+  }
+  if (!workId || !["inspect", "reconcile"].includes(action)) {
+    throw new Error("Use work list, work inspect --work-id <id>, or work reconcile --work-id <id> --evidence <review>");
+  }
+  const work = createWorkStore(dataDir);
+  try {
+    if (work.get(workId)?.message.userId !== userId) {
+      throw new Error("Work not found for the specified user");
+    }
+  } finally {
+    work.close();
+  }
+  if (action === "reconcile") {
+    const reviewId = reconcileWorkAsOperator(dataDir, userId, workId, evidence ?? "");
+    console.log(JSON.stringify({ work_id: workId, review_id: reviewId,
+      message: "Review recorded. The scheduler may resume future occurrences on its next check. No old actions were replayed." }, null, 2));
+    return;
+  }
+  console.log(JSON.stringify(inspectWorkRecovery(dataDir, workId), null, 2));
+}
+
 
 function showHelp(): void {
   const dataDir = resolveDataDir();
@@ -444,6 +482,15 @@ Commands:
   memory archival [--query <text>] [--limit <n>]
     Show recent archival facts, or search by keyword. Default limit: 20.
 
+  work list --user-id <id>
+    List accepted projection occurrences and their actual execution/recovery state as JSON.
+
+  work inspect --user-id <id> --work-id <id>
+    Inspect command, worker, effect, delivery and review blockers without running models.
+
+  work reconcile --user-id <id> --work-id <id> --evidence "<verified outcome>"
+    Explicit operator recovery after inspecting the whole task. Resumes future scheduling,
+    never replays the old run. Rejects active work, unknown effects and unresolved delivery.
   reflect [--window <minutes>]
     Run the reflection pass on demand. Default window: 30 minutes.
 
@@ -549,6 +596,14 @@ async function main(): Promise<void> {
   const userId = resolveUserId(dataDir);
 
   switch (command) {
+    case "work": {
+      const owner = opt("--user-id");
+      if (!owner) {
+        throw new Error("work commands require an explicit --user-id");
+      }
+      cmdWork(dataDir, owner, positional(1) ?? "list", opt("--work-id"), opt("--evidence"));
+      break;
+    }
     case "google": {
       await cmdGoogle(dataDir, userId, positional(1) ?? "accounts", opt("--account", "personal")!, {
         port: Number(opt("--port", "19847")), email: opt("--email"),

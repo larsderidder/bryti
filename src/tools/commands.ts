@@ -34,8 +34,12 @@ const startSchema = Type.Object({
 });
 const checkSchema = Type.Object({ command_id: Type.String({ pattern: "^c-[a-f0-9]{24}$" }) });
 const reconcileSchema = Type.Object({
-  work_id: Type.String({ description: "Owning work receipt identified by the command completion event." }),
+  work_id: Type.String({ description: "Exact failed, interrupted, or managed work receipt to review. Use work_inspect first." }),
   evidence: Type.String({ minLength: 1, maxLength: 4000, description: "What was verified across the entire task: actual changes, tests, external effects, and any remaining limitations. Do not resolve unknown outcomes." }),
+});
+const inspectSchema = Type.Object({
+  work_id: Type.String({ minLength: 1, maxLength: 512 }),
+  request_offset: Type.Optional(Type.Integer({ minimum: 0, description: "Character offset into the original request; pages contain up to 8000 characters." })),
 });
 
 /** Managed shell commands retain the elevated shell permission; research workers do not receive them. */
@@ -117,9 +121,17 @@ export function createCommandTools(
       }
     },
   };
+  return [start, check, ...createWorkRecoveryTools(dataDir, getTarget)];
+}
+
+/** Recovery remains available even when the agent has no managed-command capability. */
+export function createWorkRecoveryTools(
+  dataDir: string,
+  getTarget: () => IncomingMessage | null | undefined,
+): AgentTool<any>[] {
   const reconcile: AgentTool<typeof reconcileSchema> = {
     name: "work_reconcile", label: "work_reconcile", parameters: reconcileSchema,
-    description: "Record an evidence-backed resolution of an entire task with managed commands after inspecting its real outcome. This allows its recurring schedule to resume after your review response succeeds. Never use merely because a command exited zero, while effects are unknown, or before authorized release checks finish. Does not replay commands or approve deployment.",
+    description: "Record an evidence-backed outcome review of failed, interrupted, or managed work, including tasks without commands. Inspect the entire outcome with work_inspect first. A successful review response permits future recurring occurrences, never a replay or catch-up of the failed run. Old execution receipts are unchanged. Cannot clear active work, unknown effects, or unresolved delivery. Does not approve deployment. Explain incomplete work and any missed report in the review response.",
     async execute(_callId, params, signal) {
       const target = getTarget();
       if (!target || signal?.aborted) {
@@ -138,5 +150,33 @@ export function createCommandTools(
       }
     },
   };
-  return [start, check, reconcile];
+  const inspect: AgentTool<typeof inspectSchema> = {
+    name: "work_inspect", label: "work_inspect", parameters: inspectSchema,
+    description: "Inspect a work receipt in this exact owner and topic, its original request, command output locations, worker/effect outcomes and reconciliation blockers. Read all request pages and inspect actual results before work_reconcile. A delivered answer does not prove that a recurring schedule resumed.",
+    async execute(_callId, params) {
+      const target = getTarget();
+      const work = createWorkStore(dataDir);
+      const commands = createCommandStore(dataDir);
+      try {
+        const parent = work.get(params.work_id);
+        if (!parent || !target || !sameCommandOwner(parent.message, target)) {
+          return toolError("Work not found for this owner and topic");
+        }
+        const offset = params.request_offset ?? 0;
+        const text = parent.message.text.slice(offset, offset + 8000);
+        let nextOffset: number | null = null;
+        if (offset + text.length < parent.message.text.length) {
+          nextOffset = offset + text.length;
+        }
+        return toolSuccess({ work_id: parent.id, execution: parent.execution, delivery: parent.delivery,
+          error: parent.error, created_at: parent.createdAt, updated_at: parent.updatedAt,
+          request: { text, offset, total_chars: parent.message.text.length, next_offset: nextOffset },
+          recovery: commands.recoveryState(parent.id, work) });
+      } finally {
+        commands.close();
+        work.close();
+      }
+    },
+  };
+  return [reconcile, inspect];
 }

@@ -408,6 +408,146 @@ describe("Scheduler", () => {
     scheduler.stop();
     workStore.close();
   });
+
+  it("bounds oversized reminders without discarding the stored instructions", async () => {
+    const config = { ...makeConfig(), data_dir: tempDir };
+    const onMessage = vi.fn().mockResolvedValue(true);
+    const context = "Historical instructions and constraints. ".repeat(500);
+    const id = addDueProjection(config, { summary: "Morning check", context, resolved_when: dueWhen(), resolution: "exact" });
+    const scheduler = createScheduler(config, onMessage);
+    scheduler.start();
+    await runExactCallback();
+    const message = onMessage.mock.calls[0][0] as IncomingMessage;
+    expect(message.text.length).toBeLessThanOrEqual(8000);
+    expect(message.text).toContain("projection_read");
+    expect(message.text).toContain(id);
+    expect(message.text).toMatch(/before.*act/i);
+    const store = createProjectionStore("12345", tempDir);
+    expect(store.getById(id)?.context).toBe(context);
+    store.close();
+    scheduler.stop();
+  });
+
+  it("reports missing command reconciliation even after a successful delivered answer", async () => {
+    const config = { ...makeConfig(), data_dir: tempDir };
+    const workStore = createWorkStore(tempDir);
+    const commands = createCommandStore(tempDir);
+    const onMessage = vi.fn().mockResolvedValue(true);
+    const id = addDueProjection(config, { summary: "Health check", resolved_when: dueWhen(), resolution: "exact", recurrence: "0 8 * * *" });
+    const scheduler = createScheduler(config, onMessage, workStore);
+    scheduler.start();
+    await runExactCallback();
+    const store = createProjectionStore("12345", tempDir);
+    const workId = store.getById(id)!.delivery_work_id!;
+    workStore.claim([workId]);
+    const command = commands.accept(workStore.get(workId)!.message, "call", { command: "true", cwd: tempDir, timeoutSeconds: 60 }, 1);
+    commands.finish(command.id, "complete", 0);
+    workStore.recordResponse([workId], "delivered");
+    await runExactCallback();
+    const notice = onMessage.mock.calls.find(([msg]) => msg.workId === `blocked:${workId}`)?.[0];
+    expect(notice?.raw).toEqual({ type: "recovery_notice" });
+    expect(notice?.text).toContain("reconciliation");
+    expect(notice?.text).toContain("work_reconcile");
+    expect(store.getById(id)?.delivery_work_id).toBe(workId);
+    store.close();
+    commands.close();
+    scheduler.stop();
+    workStore.close();
+  });
+
+  it("recovers failed no-command occurrences after a successful review, skipping missed slots", async () => {
+    const config = { ...makeConfig(), data_dir: tempDir };
+    const workStore = createWorkStore(tempDir);
+    const commands = createCommandStore(tempDir);
+    const onMessage = vi.fn().mockResolvedValue(true);
+    const id = addDueProjection(config, { summary: "Calendar", resolved_when: dueWhen(), resolution: "exact", recurrence: "0 8 * * *" });
+    const scheduler = createScheduler(config, onMessage, workStore);
+    scheduler.start();
+    await runExactCallback();
+    const store = createProjectionStore("12345", tempDir);
+    const workId = store.getById(id)!.delivery_work_id!;
+    workStore.claim([workId]);
+    workStore.finish([workId], "failed", "Input exceeds the message limit");
+    const review = workStore.accept({ ...workStore.get(workId)!.message, workId: "owner-review", text: "Resume future checks", raw: null }).record;
+    workStore.claim([review.id]);
+    commands.reconcile(workId, review.message, "Rejected before execution; no actions performed", workStore);
+    workStore.recordResponse([review.id], "delivered");
+    await runExactCallback();
+    expect(store.getById(id)?.delivery_work_id).not.toBe(workId);
+    expect(store.getById(id)!.resolved_when! > dueWhen()).toBe(true);
+    expect(workStore.get(workId)?.execution).toBe("failed");
+    expect(onMessage.mock.calls.filter(([msg]) => msg.workId === workId)).toHaveLength(1);
+    store.close();
+    commands.close();
+    scheduler.stop();
+    workStore.close();
+  });
+
+  it("repeats an unresolved hold once per day across scheduler restarts", async () => {
+    const config = { ...makeConfig(), data_dir: tempDir };
+    const workStore = createWorkStore(tempDir);
+    const onMessage = vi.fn().mockResolvedValue(true);
+    const id = addDueProjection(config, { summary: "Paused", resolved_when: dueWhen(), resolution: "exact", recurrence: "0 8 * * *" });
+    let scheduler = createScheduler(config, onMessage, workStore);
+    scheduler.start();
+    await runExactCallback();
+    const store = createProjectionStore("12345", tempDir);
+    const workId = store.getById(id)!.delivery_work_id!;
+    workStore.claim([workId]);
+    workStore.finish([workId], "interrupted");
+    const baseTime = Date.now();
+    try {
+      await runExactCallback();
+      vi.useFakeTimers();
+      vi.setSystemTime(baseTime + 24 * 60 * 60 * 1000);
+      await runExactCallback();
+      await runExactCallback();
+      const today = new Date().toISOString().slice(0, 10);
+      const notices = () => onMessage.mock.calls.filter(([msg]) => msg.workId === `blocked:${workId}:${today}`);
+      expect(notices()).toHaveLength(1);
+      scheduler.stop();
+      cronMockState.callbacks.clear();
+      scheduler = createScheduler(config, onMessage, workStore);
+      scheduler.start();
+      await runExactCallback();
+      expect(notices()).toHaveLength(1);
+      expect(store.getById(id)?.delivery_work_id).toBe(workId);
+    } finally {
+      vi.useRealTimers();
+      store.close();
+      scheduler.stop();
+      workStore.close();
+    }
+  });
+
+  it("does not let a failed notice delivery prevent healthy occurrences from settling", async () => {
+    const config = { ...makeConfig(), data_dir: tempDir };
+    const workStore = createWorkStore(tempDir);
+    const onMessage = vi.fn(async (msg: IncomingMessage) => {
+      if ((msg.raw as { type: string }).type === "recovery_notice") {
+        throw new Error("notice transport unavailable");
+      }
+      return true;
+    });
+    const first = addDueProjection(config, { summary: "Failed", resolved_when: dueWhen(), resolution: "exact" });
+    const second = addDueProjection(config, { summary: "Healthy", resolved_when: dueWhen(), resolution: "exact" });
+    const scheduler = createScheduler(config, onMessage, workStore);
+    scheduler.start();
+    await runExactCallback();
+    const store = createProjectionStore("12345", tempDir);
+    const failed = store.getById(first)!.delivery_work_id!;
+    const healthy = store.getById(second)!.delivery_work_id!;
+    workStore.claim([failed]);
+    workStore.finish([failed], "failed");
+    workStore.claim([healthy]);
+    workStore.recordResponse([healthy], "delivered");
+    await runExactCallback();
+    expect(store.getById(first)?.delivery_work_id).toBe(failed);
+    expect(store.getById(second)?.status).toBe("passed");
+    store.close();
+    scheduler.stop();
+    workStore.close();
+  });
   it("notifies once when a recurring occurrence is blocked, without replaying uncertain actions", async () => {
     const config = { ...makeConfig(), data_dir: tempDir };
     const workStore = createWorkStore(tempDir);

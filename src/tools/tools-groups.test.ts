@@ -110,6 +110,20 @@ describe("tool group filtering", () => {
     expect(names).not.toContain("memory_conversation_search");
   });
 
+  it("provides guarded inspection and elevated recovery without granting shell commands", () => {
+    const dataDir = makeTmpDir();
+    const config = makeConfig(dataDir, ["projections"]);
+    const target = { userId: "test-user", channelId: "chat", platform: "telegram" as const, text: "Review", raw: null };
+    const tools = createTools(config, stubMemory, "test-user", undefined, undefined, undefined, undefined, () => target);
+    const names = tools.map((tool) => tool.name);
+    expect(names).toContain("projection_read");
+    expect(names).toContain("work_inspect");
+    expect(names).toContain("work_reconcile");
+    expect(names).not.toContain("command_start");
+    expect(getToolCapabilities("work_inspect").level).toBe("guarded");
+    expect(getToolCapabilities("work_reconcile").level).toBe("elevated");
+  });
+
   it("empty group list registers no domain tools (only trust capabilities)", () => {
     const dataDir = makeTmpDir();
     const config = makeConfig(dataDir, []);

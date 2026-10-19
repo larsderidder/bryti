@@ -85,6 +85,39 @@ describe("ProjectionTools dependencies", () => {
     });
   });
 
+  it("reads every context page without losing constraints and exposes receipt state", async () => {
+    const context = "Check only authorized accounts. ".repeat(400) + "Never send email.";
+    const id = store.add({ summary: "Morning", context });
+    store.markDeliveryWork(id, "failed-work");
+    tools = createProjectionTools(store, "UTC", undefined, (workId) => ({ work_id: workId, state: "paused" }));
+    const read = tools.find((tool) => tool.name === "projection_read")!;
+    let offset: number | null = 0;
+    let recovered = "";
+    do {
+      const result = await read.execute("read", { id, context_offset: offset });
+      const details = result.details as { projection: { context: string }; context_page: { next_offset: number | null }; runtime: unknown };
+      expect(details.projection.context.length).toBeLessThanOrEqual(8000);
+      expect(details.runtime).toEqual({ work_id: "failed-work", state: "paused" });
+      recovered += details.projection.context;
+      offset = details.context_page.next_offset;
+    } while (offset !== null);
+    expect(recovered).toBe(context);
+    const list = await tools.find((tool) => tool.name === "projection_list")!.execute("list", {});
+    expect(list.details).toMatchObject({ projections: [{ runtime: { state: "paused" } }] });
+    expect(store.getById(id)?.context).toBe(context);
+  });
+
+  it("does not read reminders from another user's store", async () => {
+    const other = createProjectionStore("other", tempDir);
+    try {
+      const id = other.add({ summary: "Private" });
+      const result = await tools.find((tool) => tool.name === "projection_read")!.execute("read", { id });
+      expect(result.isError).toBe(true);
+      expect(result.details).toHaveProperty("error");
+    } finally {
+      other.close();
+    }
+  });
   it("projection_link links existing projections", async () => {
     const subjectId = store.add({ summary: "Call" });
     const observerId = store.add({ summary: "Follow-up email" });

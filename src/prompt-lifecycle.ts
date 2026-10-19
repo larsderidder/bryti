@@ -14,7 +14,7 @@ export interface PromptActivity {
 
 export interface PromptTimeout {
   status: "timeout";
-  reason: "inactivity" | "tool_deadline" | "prompt_deadline";
+  reason: "inactivity" | "tool_deadline" | "prompt_deadline" | "approval_expired";
   toolName?: string;
   elapsedMs: number;
 }
@@ -28,6 +28,7 @@ type PromptWatchdogParams<T> = {
   timeoutMs?: number;
   maxDurationMs?: number;
   toolGraceMs?: number;
+  stopOnApprovalExpiry?: boolean;
   subscribe: (listener: (event?: PromptActivity) => void) => () => void;
   abort: () => Promise<void>;
   operation: (controls: PromptWatchdogControls) => Promise<T>;
@@ -71,6 +72,23 @@ export async function runPromptWithActivityWatchdog<T>(
     shouldContinue: () => !timedOut,
   };
 
+  const stop = (reason: PromptTimeout["reason"], toolName?: string) => {
+    if (settled || timedOut) {
+      return;
+    }
+    timedOut = true;
+    clearTimer();
+    const result: PromptTimeout = { status: "timeout", reason, toolName, elapsedMs: Date.now() - startedAt };
+    if (reason === "inactivity") {
+      params.onInactive?.(params.sessionKey, timeoutMs);
+    }
+    params.onTimeout?.(params.sessionKey, result);
+    void Promise.resolve().then(() => params.abort()).catch((err) => {
+      params.onAbortError?.(params.sessionKey, err);
+    });
+    resolveTimeout(result);
+  };
+
   const armTimer = () => {
     if (settled || timedOut) {
       return;
@@ -93,25 +111,15 @@ export async function runPromptWithActivityWatchdog<T>(
       deadline = lastActivityAt + timeoutMs;
       reason = "inactivity";
     }
-    timer = setTimeout(() => {
-      if (settled || timedOut) {
-        return;
-      }
-      timedOut = true;
-      const result: PromptTimeout = { status: "timeout", reason, toolName, elapsedMs: Date.now() - startedAt };
-      if (reason === "inactivity") {
-        params.onInactive?.(params.sessionKey, timeoutMs);
-      }
-      params.onTimeout?.(params.sessionKey, result);
-      void Promise.resolve().then(() => params.abort()).catch((err) => {
-        params.onAbortError?.(params.sessionKey, err);
-      });
-      resolveTimeout(result);
-    }, Math.max(0, deadline - Date.now()));
+    timer = setTimeout(() => stop(reason, toolName), Math.max(0, deadline - Date.now()));
   };
 
   const unsubscribe = params.subscribe((event) => {
     if (settled || timedOut) {
+      return;
+    }
+    if (event?.type === "approval_expired" && params.stopOnApprovalExpiry) {
+      stop("approval_expired", event.toolName);
       return;
     }
     lastActivityAt = Date.now();
@@ -165,6 +173,9 @@ export async function runPromptWithActivityWatchdog<T>(
 
 /** Report the timeout without exposing command arguments or claiming child processes stopped. */
 export function describePromptTimeout(timeout: PromptTimeout): string {
+  if (timeout.reason === "approval_expired") {
+    return `Required approval for ${timeout.toolName ?? "an action"} expired. That action was not run; the automation stopped rather than starting another approval wait.`;
+  }
   if (timeout.reason === "tool_deadline") {
     return `The ${timeout.toolName ?? "active"} tool exceeded its execution deadline.`;
   }

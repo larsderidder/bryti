@@ -132,6 +132,30 @@ describe("managed commands", () => {
     }
   });
 
+  it("reconciles interrupted work without managed commands and preserves the failed receipt", () => {
+    work.finish(parent.workIds!, "interrupted", "Overall execution deadline");
+    const review = work.accept({ ...target, text: "Inspect the interrupted run and resume future checks" }).record;
+    work.claim([review.id]);
+    commands.reconcile(parent.workId!, review.message, "Read-only checks stopped; no unfinished external actions", work);
+    expect(commands.isReconciled(parent.workId!, work)).toBe(false);
+    work.recordResponse([review.id], "delivered");
+    expect(commands.isReconciled(parent.workId!, work)).toBe(true);
+    expect(work.get(parent.workId!)).toMatchObject({ execution: "interrupted", error: "Overall execution deadline" });
+    commands.close();
+    commands = createCommandStore(dir);
+    expect(commands.isReconciled(parent.workId!, work)).toBe(true);
+  });
+
+  it("does not let queued work be reconciled or let plain notices count as reviews", () => {
+    const queued = work.accept({ ...target, text: "not started" }).record;
+    const review = work.accept({ ...target, text: "review" }).record;
+    work.claim([review.id]);
+    expect(() => commands.reconcile(queued.id, review.message, "Checked", work)).toThrow(/active|queued/i);
+    work.finish(parent.workIds!, "interrupted");
+    const notice = work.accept({ ...target, text: "paused", raw: { type: "recovery_notice" } }).record;
+    work.claim([notice.id]);
+    expect(() => commands.reconcile(parent.workId!, notice.message, "Checked", work)).toThrow(/review/i);
+  });
   it("keeps unknown original delivery blocked even after review", () => {
     const command = start();
     finish(command.id);

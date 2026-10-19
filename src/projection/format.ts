@@ -24,7 +24,11 @@ export function formatProjectionsForPrompt(projections: Projection[], maxItems =
           : `[someday]`;
     const recur = p.recurrence ? ` [recurring: ${p.recurrence}]` : "";
     const ctx = p.context ? ` — ${p.context}` : "";
-    return `- ${when}${recur} ${p.summary}${ctx} (id: ${p.id})`;
+    let execution = "";
+    if (p.delivery_work_id) {
+      execution = " [occurrence awaiting settlement or review; do not assume schedule is running, use projection_read]";
+    }
+    return `- ${when}${recur}${execution} ${p.summary}${ctx} (id: ${p.id})`;
   });
 
   const overflow = projections.length > maxItems

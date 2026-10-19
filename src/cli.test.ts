@@ -1,8 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cmdWebE2EEInvite } from "./cli.js";
+import { cmdWebE2EEInvite, cmdWork } from "./cli.js";
 import { invitesPath } from "./web-e2ee/invite-store.js";
+import { createWorkStore } from "./work/store.js";
+import { createProjectionStore } from "./projection/store.js";
+import { scheduledWorkId } from "./projection/occurrence.js";
 
 describe("CLI web-e2ee invite", () => {
   let tempDir: string;
@@ -56,5 +59,36 @@ describe("CLI web-e2ee invite", () => {
     expect(fs.existsSync(invitesPath(tempDir))).toBe(true);
     expect(rawInvites).not.toContain(created.code);
     expect(rawInvites).toContain("sha256:");
+  });
+});
+
+describe("CLI work recovery", () => {
+  it("lists a paused occurrence and records a scoped operator review without replay", () => {
+    const dir = fs.mkdtempSync("/tmp/bryti-cli-work-");
+    const work = createWorkStore(dir);
+    const projections = createProjectionStore("u", dir);
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const id = projections.add({ summary: "Calendar", resolution: "exact", resolved_when: "2026-10-13 06:45", recurrence: "45 8 * * *" });
+      const workId = scheduledWorkId("u", projections.getById(id)!);
+      work.accept({ userId: "u", channelId: "chat", platform: "telegram", text: "Check calendar", workId, raw: { type: "projection_exact_check" } });
+      work.claim([workId]);
+      work.finish([workId], "interrupted");
+      projections.markDeliveryWork(id, workId);
+      cmdWork(dir, "u", "list");
+      expect(JSON.parse(log.mock.calls.at(-1)![0])).toMatchObject({ schedules: [{ runtime: { state: "paused", execution: "interrupted" } }] });
+      expect(() => cmdWork(dir, "other", "reconcile", workId, "Inspected")).toThrow(/user/i);
+      expect(() => cmdWork(dir, "u", "reconcile", workId)).toThrow(/evidence/i);
+      cmdWork(dir, "u", "reconcile", workId, "Read-only checks stopped; no unfinished external actions");
+      cmdWork(dir, "u", "inspect", workId);
+      expect(JSON.parse(log.mock.calls.at(-1)![0])).toMatchObject({ reconciled: true, execution: "interrupted" });
+      expect(projections.getById(id)?.delivery_work_id).toBe(workId);
+      expect(work.queued()).toEqual([]);
+    } finally {
+      log.mockRestore();
+      work.close();
+      projections.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

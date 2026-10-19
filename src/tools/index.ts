@@ -11,7 +11,7 @@ import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Type } from "typebox";
 import { createFileTools } from "./files.js";
 import { createSystemLogTool } from "./system-log.js";
-import { createCommandTools } from "./commands.js";
+import { createCommandTools, createWorkRecoveryTools } from "./commands.js";
 import type { IncomingMessage } from "../channels/types.js";
 import { createPiSessionTools } from "./pi-sessions.js";
 import { createSkillInstallTool } from "./skill-install.js";
@@ -33,6 +33,7 @@ import type { CoreMemory } from "../memory/core-memory.js";
 import type { WorkerTriggerCallback } from "../workers/tools.js";
 import { registerToolCapabilities } from "../trust/index.js";
 import { createGoogleTools } from "../integrations/google-tools.js";
+import { inspectWorkRecovery } from "../work/recovery.js";
 
 /** Callback invoked when the agent requests a restart. */
 export type RestartCallback = (reason: string) => Promise<void>;
@@ -167,7 +168,19 @@ export function createTools(
   // Created before archival tools so the projection store is available when
   // archival inserts need to activate trigger-based projections.
   if (groups.has("projections")) {
-    tools.push(...createProjectionTools(resolvedProjectionStore, config.agent.timezone, getProjectionTarget));
+    tools.push(...createProjectionTools(resolvedProjectionStore, config.agent.timezone, getProjectionTarget,
+      (workId) => inspectWorkRecovery(config.data_dir, workId)));
+  }
+  if (getWorkTarget && (groups.has("projections") || groups.has("workers"))) {
+    if (!groups.has("workers")) {
+      tools.push(...createWorkRecoveryTools(config.data_dir, getWorkTarget));
+    }
+    registerToolCapabilities("work_inspect", { level: "guarded", capabilities: ["filesystem"],
+      reason: "Reads work outcomes for the owning user and exact conversation topic." });
+    registerToolCapabilities("work_reconcile", { level: "elevated", capabilities: ["filesystem"],
+      reason: "Records an evidence-backed review and releases future scheduling, not replay or deployment." });
+    registerToolCapabilities("projection_read", { level: "guarded", capabilities: ["filesystem"],
+      reason: "Reads a reminder owned by this user without changing it." });
   }
 
   // memory_archival — archival_insert, archival_search
@@ -210,10 +223,6 @@ export function createTools(
       registerToolCapabilities("command_start", {
         level: "elevated", capabilities: ["shell", "filesystem", "network"],
         reason: "Runs an authorized shell command outside the chat turn with durable outcome tracking.",
-      });
-      registerToolCapabilities("work_reconcile", {
-        level: "elevated", capabilities: ["filesystem"],
-        reason: "Records a reviewed task outcome and permits its recurring schedule to resume.",
       });
     }
     const workerRegistry = createWorkerRegistry();

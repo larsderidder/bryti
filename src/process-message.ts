@@ -72,6 +72,7 @@ import type { WorkStore, CompletedResponse } from "./work/store.js";
 import { isDeliveryError } from "./channels/delivery.js";
 import { isCurrentProjectionWork, OBSOLETE_PROJECTION_WORK } from "./projection/occurrence.js";
 import { commandRecoveryNotice, isCommandContinuationCurrent } from "./work/commands.js";
+import { commandReviewNotice } from "./work/recovery.js";
 import { createOperationalGuidelines } from "./trust/guidelines.js";
 import { extractPdfAttachment } from "./documents/pdf.js";
 import { wrapEffectTool } from "./work/effects.js";
@@ -367,6 +368,12 @@ async function sendAssistantResponse(state: AppState, msg: IncomingMessage, text
 
 /** Final output is durable before optional audit writes or voice synthesis. */
 async function deliverGeneratedResponse(state: AppState, msg: IncomingMessage, text: string, session: AgentSession, entryOffset?: number): Promise<void> {
+  if (state.workStore) {
+    const notice = commandReviewNotice(state.config.data_dir, msg);
+    if (notice) {
+      text += `\n\n${notice}`;
+    }
+  }
   let staged: CompletedResponse | undefined;
   if (state.workStore && msg.workIds?.length) {
     const entries = (session.sessionManager?.getEntries() ?? []).slice(entryOffset ?? 0);
@@ -555,9 +562,13 @@ export async function getOrLoadSession(
       const listener = state.approvalListeners?.get(sessionKey);
       listener?.({ type: "approval_wait_start", toolCallId: approvalKey });
       try {
-        return await bridge.sendApprovalRequest(target.channelId, prompt, approvalKey,
+        const result = await bridge.sendApprovalRequest(target.channelId, prompt, approvalKey,
           state.config.trust.approval_timeout_ms,
           { ...opts, channelThreadId: target.channelThreadId, approverUserId: target.userId });
+        if (result === "expired") {
+          listener?.({ type: "approval_expired", toolCallId: approvalKey, toolName: approvalKey.split(":")[2] });
+        }
+        return result;
       } finally {
         listener?.({ type: "approval_wait_end", toolCallId: approvalKey });
       }
@@ -736,12 +747,17 @@ export async function processMessage(
 
   const MAX_MESSAGE_LENGTH = 10_000;
   if (msg.text.length > MAX_MESSAGE_LENGTH) {
-    state.workStore?.finish(msg.workIds ?? [], "failed", "Input exceeds the message limit");
-    await getBridge(state, msg.platform).sendMessage(
-      msg.channelId,
-      `That message is too long (${msg.text.length.toLocaleString()} characters). ` +
-        `Could you break it into smaller pieces? I can handle up to ${MAX_MESSAGE_LENGTH.toLocaleString()} characters at a time.`,
-    );
+    let error = "Input exceeds the message limit";
+    let notice = `That message is too long (${msg.text.length.toLocaleString()} characters). ` +
+      `Could you break it into smaller pieces? I can handle up to ${MAX_MESSAGE_LENGTH.toLocaleString()} characters at a time.`;
+    if (isInternalMessage(msg)) {
+      error = "Internal event exceeds the message limit; no model turn started";
+      notice = "An internal automation could not start because its generated input exceeded the runtime limit. " +
+        "No actions were run. Its occurrence requires review, not a resend of your message. " +
+        `Inspect the receipt with /work ${msg.workId ?? ""}.`;
+    }
+    state.workStore?.finish(msg.workIds ?? [], "failed", error);
+    await getBridge(state, msg.platform).sendMessage(msg.channelId, notice, sendOptsFor(msg));
     return;
   }
 
@@ -877,6 +893,7 @@ export async function processMessage(
     usageWindow = { session, entryOffset: session.sessionManager?.getEntries().length, startedAt: promptStart };
     const promptResult = await runPromptWithActivityWatchdog({
       sessionKey,
+      stopOnApprovalExpiry: isInternalMessage(msg),
       subscribe: (listener) => {
         state.approvalListeners ??= new Map();
         state.approvalListeners.set(sessionKey, listener);
