@@ -140,7 +140,7 @@ describe("work recovery", () => {
     }
   });
 
-  function scheduledRecovery() {
+  function scheduledRecovery(legacy = false) {
     const projections = createProjectionStore("u", dir);
     try {
       const id = projections.add({ summary: "Calendar", resolution: "exact", resolved_when: "2026-10-20 08:00", recurrence: "0 10 * * *" });
@@ -149,7 +149,12 @@ describe("work recovery", () => {
       projections.markDeliveryWork(id, workId);
       work.claim([workId]);
       work.finish([workId], "interrupted");
-      const review = work.accept(createWorkRecoveryEvent(original, "Calendar")).record;
+      const event = createWorkRecoveryEvent(original, "Calendar");
+      if (legacy) {
+        event.workId = `recovery:${workId}`;
+        event.workIds = [event.workId];
+      }
+      const review = work.accept(event).record;
       work.claim([review.id]);
       return { id, original, review };
     } finally {
@@ -157,8 +162,8 @@ describe("work recovery", () => {
     }
   }
 
-  it("allows only the bound automatic review and waits for its successful settlement", () => {
-    const { original, review } = scheduledRecovery();
+  it.each([false, true])("allows only the bound automatic review and waits for settlement (legacy=%s)", (legacy) => {
+    const { original, review } = scheduledRecovery(legacy);
     const commands = createCommandStore(dir);
     try {
       expect(review.message.raw).toEqual({ type: "work_recovery" });
@@ -193,8 +198,8 @@ describe("work recovery", () => {
     }
   });
 
-  it("tracks unknown effects from an automatic review even if it failed before recording reconciliation", () => {
-    const { original, review } = scheduledRecovery();
+  it.each([false, true])("tracks unknown effects even when automatic review failed before reconciliation (legacy=%s)", (legacy) => {
+    const { original, review } = scheduledRecovery(legacy);
     const effects = new EffectStore(dir);
     try {
       const effect = effects.accept(review.message, "write", "file_write", { path: "output" }, "implementation").receipt;

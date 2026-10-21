@@ -1,15 +1,39 @@
 import type { IncomingMessage } from "../channels/types.js";
-import type { WorkRecord } from "./store.js";
+import type { WorkRecord, WorkStore } from "./store.js";
 
 /** One durable review attempt per occurrence, not a daily retry or a replay. */
 export function workRecoveryId(workId: string): string {
-  return `recovery:${workId}`;
+  return `work-recovery:${workId}`;
+}
+
+/** Read both review namespaces, but never mistake an older restart notice for a review. */
+export function workRecoveryParentId(message: IncomingMessage): string | undefined {
+  if ((message.raw as { type?: string } | null)?.type !== "work_recovery") {
+    return undefined;
+  }
+  for (const prefix of ["work-recovery:", "recovery:"]) {
+    if (message.workId?.startsWith(prefix)) {
+      return message.workId.slice(prefix.length);
+    }
+  }
+  return undefined;
 }
 
 /** Bind automated reconciliation to its exact originating occurrence. */
 export function isWorkRecoveryFor(message: IncomingMessage, workId: string): boolean {
-  return (message.raw as { type?: string } | null)?.type === "work_recovery"
-    && message.workId === workRecoveryId(workId);
+  return workRecoveryParentId(message) === workId;
+}
+
+/** Retain accepted reviews from the first release without consuming restart notices. */
+export function getWorkRecoveryReviews(work: WorkStore, workId: string): WorkRecord[] {
+  const reviews: WorkRecord[] = [];
+  for (const id of [workRecoveryId(workId), `recovery:${workId}`]) {
+    const receipt = work.get(id);
+    if (receipt && isWorkRecoveryFor(receipt.message, workId)) {
+      reviews.push(receipt);
+    }
+  }
+  return reviews;
 }
 
 /** Ask the owning agent to resolve bookkeeping and surface only real user decisions. */

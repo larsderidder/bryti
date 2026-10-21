@@ -508,7 +508,7 @@ describe("Scheduler", () => {
     const baseTime = Date.now();
     try {
       // Previously delivered human notices must not suppress the new agent review.
-      const legacy = workStore.accept({ ...workStore.get(workId)!.message, workId: `blocked:${workId}`, raw: { type: "recovery_notice" } }).record;
+      const legacy = workStore.accept({ ...workStore.get(workId)!.message, workId: `recovery:${workId}`, raw: { type: "recovery_notice" } }).record;
       workStore.claim([legacy.id]);
       workStore.recordResponse([legacy.id], "delivered");
       await runExactCallback();
@@ -533,6 +533,33 @@ describe("Scheduler", () => {
       scheduler.stop();
       workStore.close();
     }
+  });
+
+  it.each(["queued", "completed", "failed", "interrupted"] as const)("preserves an accepted %s agent review from the original namespace", async (status) => {
+    const config = { ...makeConfig(), data_dir: tempDir };
+    const workStore = createWorkStore(tempDir);
+    const onMessage = vi.fn().mockResolvedValue(true);
+    const id = addDueProjection(config, { summary: "Paused", resolved_when: dueWhen(), resolution: "exact" });
+    const scheduler = createScheduler(config, onMessage, workStore);
+    scheduler.start();
+    await runExactCallback();
+    const store = createProjectionStore("12345", tempDir);
+    const workId = store.getById(id)!.delivery_work_id!;
+    workStore.claim([workId]);
+    workStore.finish([workId], "interrupted");
+    const previous = workStore.accept({ ...workStore.get(workId)!.message,
+      workId: `recovery:${workId}`, raw: { type: "work_recovery" } }).record;
+    if (status !== "queued") {
+      workStore.claim([previous.id]);
+      workStore.finish([previous.id], status);
+    }
+    await runExactCallback();
+    expect(onMessage.mock.calls.filter(([msg]) => msg.raw.type === "work_recovery")).toEqual([]);
+    expect(workStore.get(workRecoveryId(workId))).toBeNull();
+    expect(store.getById(id)?.delivery_work_id).toBe(workId);
+    store.close();
+    scheduler.stop();
+    workStore.close();
   });
 
   it.each([false, true])("does not let rejected recovery admission prevent healthy settlement (throws=%s)", async (throws) => {

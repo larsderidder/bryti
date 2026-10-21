@@ -23,7 +23,7 @@ import { createDeviceStore } from "./web-e2ee/device-store.js";
 import { createWorkStore, type WorkRecord, type WorkStore } from "./work/store.js";
 import { scheduledWorkId, OBSOLETE_PROJECTION_WORK } from "./projection/occurrence.js";
 import { createCommandStore } from "./work/commands.js";
-import { createWorkRecoveryEvent, workRecoveryId } from "./work/recovery-event.js";
+import { createWorkRecoveryEvent, getWorkRecoveryReviews } from "./work/recovery-event.js";
 export { scheduledWorkId } from "./projection/occurrence.js";
 
 // ---------------------------------------------------------------------------
@@ -494,7 +494,7 @@ export function createScheduler(
           }
           // Acceptance consumes the single review attempt, even if it later fails or is interrupted.
           // Old recovery_notice receipts do not consume this agent-facing attempt.
-          if (projection.status === "pending" && !workStore.get(workRecoveryId(workId)) && isTargetAllowed(config, receipt.message)) {
+          if (projection.status === "pending" && getWorkRecoveryReviews(workStore, workId).length === 0 && isTargetAllowed(config, receipt.message)) {
             const event = createWorkRecoveryEvent(receipt, projection.summary);
             if (await onMessage(event) !== false) {
               workStore.accept(event);

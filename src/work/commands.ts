@@ -7,7 +7,7 @@ import type { WorkStore } from "./store.js";
 import { createProjectionStore } from "../projection/store.js";
 import { isCurrentProjectionWork } from "../projection/occurrence.js";
 import { isInternalMessage } from "../channels/types.js";
-import { isWorkRecoveryFor, workRecoveryId } from "./recovery-event.js";
+import { getWorkRecoveryReviews, isWorkRecoveryFor, workRecoveryParentId } from "./recovery-event.js";
 
 export interface WorkRecoveryState {
   commands: Array<{ id: string; status: CommandStatus; exitCode: number | null; logPath: string }>;
@@ -124,7 +124,7 @@ export function createCommandStore(dataDir: string): CommandStore {
   function recoveryState(workId: string, work: WorkStore, currentReviewId?: string): WorkRecoveryState {
     const tables = new Set((db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map((row) => row.name));
     const row = db.prepare("SELECT review_id FROM command_reviews WHERE work_id = ?").get(workId) as { review_id: string } | undefined;
-    const relatedIds = new Set([workId, workRecoveryId(workId)]);
+    const relatedIds = new Set([workId, ...getWorkRecoveryReviews(work, workId).map((review) => review.id)]);
     if (row) {
       relatedIds.add(row.review_id);
     }
@@ -394,8 +394,8 @@ export function isCommandContinuationCurrent(dataDir: string, target: IncomingMe
 
 /** Discard queued automatic reviews once the occurrence has been cancelled, replaced or reviewed. */
 export function isWorkRecoveryCurrent(dataDir: string, target: IncomingMessage, work: WorkStore): boolean {
-  const workId = target.workId?.slice("recovery:".length);
-  if (!workId || !isWorkRecoveryFor(target, workId)) {
+  const workId = workRecoveryParentId(target);
+  if (!workId) {
     return false;
   }
   const parent = work.get(workId);
