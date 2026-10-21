@@ -14,6 +14,7 @@ import { evaluateToolCall, type GuardrailInput, type GuardrailResult } from "./g
 import type { Config } from "../config.js";
 import type { ApprovalResult, ApprovalOpts } from "../channels/types.js";
 import type { ModelInfra } from "../model-infra.js";
+import { isAutomaticWorkRecoveryTool } from "../tools/commands.js";
 
 export type ApprovalCallback = (prompt: string, approvalKey: string, opts?: ApprovalOpts) => Promise<ApprovalResult>;
 export type GuardrailEvaluator = (input: GuardrailInput) => Promise<GuardrailResult>;
@@ -217,6 +218,10 @@ export function wrapToolWithTrustCheck<T extends AgentTool<any>>(
     }
     if (signalAborted(signal)) {
       return aborted(tool.name);
+    }
+    // The built-in still validates occurrence scope, evidence and every recovery blocker transactionally.
+    if (!freshApproval && isAutomaticWorkRecoveryTool(tool)) {
+      return originalExecute.call(tool, toolCallId, params, signal, onUpdate);
     }
 
     const guardrailResult = await runGuardrail(tool, params, context, signal);

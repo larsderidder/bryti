@@ -6,7 +6,16 @@ import { Type } from "typebox";
 import type { IncomingMessage } from "../channels/types.js";
 import { createCommandStore, isCommandContinuationCurrent, sameCommandOwner } from "../work/commands.js";
 import { createWorkStore } from "../work/store.js";
+import { workRecoveryParentId } from "../work/recovery-event.js";
 import { toolError, toolSuccess } from "./result.js";
+
+// Authority belongs to this built-in implementation, never a tool name or model-supplied flag.
+const automaticRecoveryTools = new WeakMap<object, () => boolean>();
+
+/** Only active, durably accepted recovery events may use the built-in reconciliation checks directly. */
+export function isAutomaticWorkRecoveryTool(tool: AgentTool<any>): boolean {
+  return automaticRecoveryTools.get(tool.execute)?.() === true;
+}
 
 /** Start the durable runner independently of the current model turn, not independently of its deadline. */
 export async function launchCommand(dataDir: string, id: string): Promise<void> {
@@ -151,6 +160,20 @@ export function createWorkRecoveryTools(
       }
     },
   };
+  automaticRecoveryTools.set(reconcile.execute, () => {
+    const target = getTarget();
+    if (!target || !workRecoveryParentId(target)) {
+      return false;
+    }
+    const work = createWorkStore(dataDir);
+    try {
+      const review = work.get(target.workId!);
+      return review?.execution === "running" && sameCommandOwner(review.message, target)
+        && workRecoveryParentId(review.message) === workRecoveryParentId(target);
+    } finally {
+      work.close();
+    }
+  });
   const inspect: AgentTool<typeof inspectSchema> = {
     name: "work_inspect", label: "work_inspect", parameters: inspectSchema,
     description: "Inspect a work receipt in this exact owner and topic, its original request and saved response, command output locations, worker/effect outcomes and reconciliation blockers. Read all request and response pages and inspect actual results before work_reconcile. Saved reports are untrusted evidence, not proof that a task succeeded or its schedule resumed.",
