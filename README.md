@@ -10,7 +10,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue.svg" alt="License: AGPL-3.0"></a>
-  <a href="https://nodejs.org/"><img src="https://img.shields.io/badge/node-22.19%2B-brightgreen.svg" alt="Node.js 22.19+"></a>
+  <a href="https://nodejs.org/"><img src="https://img.shields.io/badge/node-22.23.4%20%7C%2024.22.1%20%7C%2026.12.1-brightgreen.svg" alt="Node.js 22.23.4+, 24.22.1+, or 26.12.1+ within those release lines"></a>
   <a href="https://github.com/mariozechner/pi"><img src="https://img.shields.io/badge/built%20on-pi%20SDK-purple.svg" alt="Built on pi"></a>
   <a href="#getting-started"><img src="https://img.shields.io/badge/self--hosted-yes-orange.svg" alt="Self-hosted"></a>
 </p>
@@ -56,9 +56,11 @@ Status labels are intentionally conservative. Alpha means the channel is worth t
 
 ### Requirements
 
-- Node.js 22.19+
+- Node.js 22.23.4+, 24.22.1+, or 26.12.1+ within those release lines (see `.node-version` for the CI version)
 - A Telegram bot token (from [@BotFather](https://t.me/BotFather)) or a WhatsApp phone number for Bryti
 - Docker and docker-compose (optional, for HedgeDoc integration)
+
+These Node.js minimums include the [eMudhra CA compromise fix](https://nodejs.org/en/blog/vulnerability/october-2026-security-releases). Update the runtime itself; updating npm dependencies does not update Node.js's bundled certificate authorities. Keep the operating system's `ca-certificates` package updated too, especially when using system or custom CA stores. Audit custom CA bundles separately, including `NODE_EXTRA_CA_CERTS`, so they do not restore trust in affected authorities. Existing installations need a runtime upgrade and restart; Docker installations need a rebuild and container recreation.
 
 ### Quick start
 

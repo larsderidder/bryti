@@ -37,7 +37,7 @@
     "web-e2ee:invite": "npm run cli -- web-e2ee invite"
   },
   "engines": {
-    "node": ">=22.19.0"
+    "node": "^22.23.4 || ^24.22.1 || ^26.12.1"
   },
   "allowScripts": {
     "better-sqlite3@12.10.0": true
