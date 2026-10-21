@@ -7,6 +7,7 @@ import type { WorkStore } from "./store.js";
 import { createProjectionStore } from "../projection/store.js";
 import { isCurrentProjectionWork } from "../projection/occurrence.js";
 import { isInternalMessage } from "../channels/types.js";
+import { isWorkRecoveryFor, workRecoveryId } from "./recovery-event.js";
 
 export interface WorkRecoveryState {
   commands: Array<{ id: string; status: CommandStatus; exitCode: number | null; logPath: string }>;
@@ -123,7 +124,7 @@ export function createCommandStore(dataDir: string): CommandStore {
   function recoveryState(workId: string, work: WorkStore, currentReviewId?: string): WorkRecoveryState {
     const tables = new Set((db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map((row) => row.name));
     const row = db.prepare("SELECT review_id FROM command_reviews WHERE work_id = ?").get(workId) as { review_id: string } | undefined;
-    const relatedIds = new Set([workId]);
+    const relatedIds = new Set([workId, workRecoveryId(workId)]);
     if (row) {
       relatedIds.add(row.review_id);
     }
@@ -278,8 +279,10 @@ export function createCommandStore(dataDir: string): CommandStore {
       }
       if (isInternalMessage(review.message)) {
         const match = /^command:(c-[a-f0-9]{24}):completion$/.exec(review.id);
-        if (!match || !forWork(workId).some((command) => command.id === match[1])) {
-          throw new Error("Reconciliation requires a user-requested review or the owning command completion, not a notification");
+        const commandCompletion = match && forWork(workId).some((command) => command.id === match[1]);
+        const recovery = isWorkRecoveryFor(review.message, workId) && isWorkRecoveryCurrent(dataDir, review.message, work);
+        if (!commandCompletion && !recovery) {
+          throw new Error("Reconciliation requires a user-requested review, the owning command completion, or its scheduled recovery review");
         }
       }
       const commands = forWork(workId);
@@ -354,6 +357,9 @@ export function commandRecoveryNotice(dataDir: string, workIds: string[]): strin
 
 /** A completion may report existing results, but must not continue a cancelled scheduled task. */
 export function isCommandContinuationCurrent(dataDir: string, target: IncomingMessage, work: WorkStore): boolean {
+  if ((target.raw as { type?: string } | null)?.type === "work_recovery") {
+    return false;
+  }
   const match = /^command:(c-[a-f0-9]{24}):completion$/.exec(target.workId ?? "");
   if (!match) {
     return true;
@@ -382,6 +388,29 @@ export function isCommandContinuationCurrent(dataDir: string, target: IncomingMe
     }
     return true;
   } finally {
+    commands.close();
+  }
+}
+
+/** Discard queued automatic reviews once the occurrence has been cancelled, replaced or reviewed. */
+export function isWorkRecoveryCurrent(dataDir: string, target: IncomingMessage, work: WorkStore): boolean {
+  const workId = target.workId?.slice("recovery:".length);
+  if (!workId || !isWorkRecoveryFor(target, workId)) {
+    return false;
+  }
+  const parent = work.get(workId);
+  if (!parent || !sameCommandOwner(parent.message, target)
+    || (parent.message.raw as { type?: string } | null)?.type !== "projection_exact_check") {
+    return false;
+  }
+  const projections = createProjectionStore(target.userId, dataDir);
+  const commands = createCommandStore(dataDir);
+  try {
+    return isCurrentProjectionWork(parent.message, projections)
+      && projections.getAwaitingDelivery().some((projection) => projection.delivery_work_id === workId)
+      && !commands.isReconciled(workId, work);
+  } finally {
+    projections.close();
     commands.close();
   }
 }

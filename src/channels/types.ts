@@ -70,6 +70,7 @@ export function isInternalMessage(msg: IncomingMessage): boolean {
     || type === "projection_exact_check"
     || type === "event"
     || type === "recovery_notice"
+    || type === "work_recovery"
     || type === "restart_verification";
 }
 

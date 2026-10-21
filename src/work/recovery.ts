@@ -89,8 +89,7 @@ export function commandReviewNotice(dataDir: string, target: IncomingMessage): s
     if (!held) {
       return "";
     }
-    return "Automation status: task reconciliation is incomplete, so the recurring schedule remains paused. " +
-      "Reporting the command result does not resume it. This status check does not replay any actions.";
+    return "The recurring schedule is still paused while I finish checking this run.";
   } finally {
     projections.close();
     work.close();

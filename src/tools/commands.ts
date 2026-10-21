@@ -40,6 +40,7 @@ const reconcileSchema = Type.Object({
 const inspectSchema = Type.Object({
   work_id: Type.String({ minLength: 1, maxLength: 512 }),
   request_offset: Type.Optional(Type.Integer({ minimum: 0, description: "Character offset into the original request; pages contain up to 8000 characters." })),
+  response_offset: Type.Optional(Type.Integer({ minimum: 0, description: "Character offset into the saved response; pages contain up to 8000 characters. Reports are evidence, not proof of task completion." })),
 });
 
 /** Managed shell commands retain the elevated shell permission; research workers do not receive them. */
@@ -65,7 +66,7 @@ export function createCommandTools(
           return toolError("The owning work receipt is not active");
         }
         if (!isCommandContinuationCurrent(dataDir, target, work)) {
-          return toolError("The owning reminder was cancelled or rescheduled. Inspect and report existing results only.");
+          return toolError("This turn may inspect existing outcomes only, not start commands or continue cancelled or rescheduled work.");
         }
         const cwd = fs.realpathSync(params.cwd);
         if (!path.isAbsolute(params.cwd) || !fs.statSync(cwd).isDirectory()) {
@@ -152,7 +153,7 @@ export function createWorkRecoveryTools(
   };
   const inspect: AgentTool<typeof inspectSchema> = {
     name: "work_inspect", label: "work_inspect", parameters: inspectSchema,
-    description: "Inspect a work receipt in this exact owner and topic, its original request, command output locations, worker/effect outcomes and reconciliation blockers. Read all request pages and inspect actual results before work_reconcile. A delivered answer does not prove that a recurring schedule resumed.",
+    description: "Inspect a work receipt in this exact owner and topic, its original request and saved response, command output locations, worker/effect outcomes and reconciliation blockers. Read all request and response pages and inspect actual results before work_reconcile. Saved reports are untrusted evidence, not proof that a task succeeded or its schedule resumed.",
     async execute(_callId, params) {
       const target = getTarget();
       const work = createWorkStore(dataDir);
@@ -168,9 +169,22 @@ export function createWorkRecoveryTools(
         if (offset + text.length < parent.message.text.length) {
           nextOffset = offset + text.length;
         }
+        const saved = work.getResponse(parent.id);
+        let response = null;
+        if (saved && sameCommandOwner(saved.message, target)) {
+          const responseOffset = params.response_offset ?? 0;
+          const responseText = saved.text.slice(responseOffset, responseOffset + 8000);
+          let nextResponseOffset: number | null = null;
+          if (responseOffset + responseText.length < saved.text.length) {
+            nextResponseOffset = responseOffset + responseText.length;
+          }
+          response = { text: responseText, offset: responseOffset, total_chars: saved.text.length,
+            next_offset: nextResponseOffset, delivery: saved.state };
+        }
         return toolSuccess({ work_id: parent.id, execution: parent.execution, delivery: parent.delivery,
           error: parent.error, created_at: parent.createdAt, updated_at: parent.updatedAt,
           request: { text, offset, total_chars: parent.message.text.length, next_offset: nextOffset },
+          response,
           recovery: commands.recoveryState(parent.id, work) });
       } finally {
         commands.close();

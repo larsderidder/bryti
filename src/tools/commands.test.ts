@@ -8,6 +8,7 @@ import { createCommandStore } from "../work/commands.js";
 import type { IncomingMessage } from "../channels/types.js";
 import { createProjectionStore } from "../projection/store.js";
 
+import { createWorkRecoveryEvent } from "../work/recovery-event.js";
 describe("command tools", () => {
   let dir: string;
   let work: WorkStore;
@@ -39,6 +40,17 @@ describe("command tools", () => {
     work.finish(target.workIds!, "interrupted");
     const tools = createCommandTools(dir, () => target, 2, launch);
     const result = await tools[0].execute("call", { command: "sleep 10", cwd: dir, timeout_seconds: 20 });
+    expect(result.details).toHaveProperty("error");
+    expect(launch).not.toHaveBeenCalled();
+  });
+
+  it("does not launch commands from an automatic recovery review", async () => {
+    work.finish(target.workIds!, "interrupted");
+    const recovery = work.accept(createWorkRecoveryEvent(work.get(target.workId!)!, "Review")).record;
+    target = recovery.message;
+    work.claim(target.workIds!);
+    const tools = createCommandTools(dir, () => target, 2, launch);
+    const result = await tools[0].execute("replay", { command: "true", cwd: dir, timeout_seconds: 20 });
     expect(result.details).toHaveProperty("error");
     expect(launch).not.toHaveBeenCalled();
   });

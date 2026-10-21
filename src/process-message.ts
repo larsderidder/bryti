@@ -71,7 +71,7 @@ import { acquireSessionTurn } from "./compaction/proactive.js";
 import type { WorkStore, CompletedResponse } from "./work/store.js";
 import { isDeliveryError } from "./channels/delivery.js";
 import { isCurrentProjectionWork, OBSOLETE_PROJECTION_WORK } from "./projection/occurrence.js";
-import { commandRecoveryNotice, isCommandContinuationCurrent } from "./work/commands.js";
+import { commandRecoveryNotice, isCommandContinuationCurrent, isWorkRecoveryCurrent } from "./work/commands.js";
 import { commandReviewNotice } from "./work/recovery.js";
 import { createOperationalGuidelines } from "./trust/guidelines.js";
 import { extractPdfAttachment } from "./documents/pdf.js";
@@ -79,6 +79,13 @@ import { wrapEffectTool } from "./work/effects.js";
 
 /** Recheck after session loading too: cancellation can happen in another thread. */
 function skipObsoleteProjectionWork(state: AppState, msg: IncomingMessage): boolean {
+  if ((msg.raw as { type?: string } | null)?.type === "work_recovery") {
+    if (state.workStore && isWorkRecoveryCurrent(state.config.data_dir, msg, state.workStore)) {
+      return false;
+    }
+    state.workStore?.finish(msg.workIds ?? [], "failed", OBSOLETE_PROJECTION_WORK);
+    return true;
+  }
   if ((msg.raw as { type?: string } | null)?.type !== "projection_exact_check") {
     return false;
   }
@@ -886,7 +893,8 @@ export async function processMessage(
     if (skipObsoleteProjectionWork(state, originalMsg)) {
       return;
     }
-    if (state.workStore && !isCommandContinuationCurrent(state.config.data_dir, msg, state.workStore)) {
+    if ((msg.raw as { type?: string } | null)?.type === "command_completion"
+      && state.workStore && !isCommandContinuationCurrent(state.config.data_dir, msg, state.workStore)) {
       msg = { ...msg, text: "[System: The owning reminder was cancelled or rescheduled. Inspect and report existing command results only. Do not continue development, deploy, or recreate the reminder.]\n\n" + msg.text };
     }
     const promptStart = Date.now();
@@ -935,9 +943,13 @@ export async function processMessage(
       state.workStore?.finish(msg.workIds ?? [], "interrupted", `${describePromptTimeout(promptResult)} Not replayed.`);
       console.log(`[agent] Evicting session for ${sessionKey} after timeout abort`);
       try {
+        let notice = `${describePromptTimeout(promptResult)} I stopped the supervising turn. ${commandRecoveryNotice(state.config.data_dir, msg.workIds ?? [])}`;
+        if ((msg.raw as { type?: string } | null)?.type === "work_recovery") {
+          notice = "I couldn't finish checking the paused task. The schedule remains paused; I haven't rerun the task.";
+        }
         await getBridge(state, msg.platform).sendMessage(
           msg.channelId,
-          `${describePromptTimeout(promptResult)} I stopped the supervising turn. ${commandRecoveryNotice(state.config.data_dir, msg.workIds ?? [])}`,
+          notice,
           { channelThreadId: msg.channelThreadId },
         );
       } catch {
@@ -1088,9 +1100,13 @@ export async function processMessage(
     state.workStore?.finish(ids, "failed", "Message processing failed");
     const err = error as Error;
     console.error("Error processing message:", err);
+    let notice = "Something went wrong processing your message. Please try again.";
+    if ((msg.raw as { type?: string } | null)?.type === "work_recovery") {
+      notice = "I couldn't finish checking the paused task. The schedule remains paused; I haven't rerun the task.";
+    }
     await getBridge(state, msg.platform).sendMessage(
       msg.channelId,
-      "Something went wrong processing your message. Please try again.",
+      notice,
     );
   } finally {
     if (usageWindow) {

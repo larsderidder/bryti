@@ -23,6 +23,7 @@ import { createDeviceStore } from "./web-e2ee/device-store.js";
 import { createWorkStore, type WorkRecord, type WorkStore } from "./work/store.js";
 import { scheduledWorkId, OBSOLETE_PROJECTION_WORK } from "./projection/occurrence.js";
 import { createCommandStore } from "./work/commands.js";
+import { createWorkRecoveryEvent, workRecoveryId } from "./work/recovery-event.js";
 export { scheduledWorkId } from "./projection/occurrence.js";
 
 // ---------------------------------------------------------------------------
@@ -484,52 +485,19 @@ export function createScheduler(
         const waitingForCommands = recovery.commands.some((command) => ["queued", "running"].includes(command.status));
         const waitingForReview = recovery.commands.some((command) => {
           const review = workStore.get(`command:${command.id}:completion`);
-          return review && ["queued", "running"].includes(review.execution);
+          return !review || ["queued", "running"].includes(review.execution);
         });
         const needsReview = recovery.commands.length > 0 && !reconciled;
         if (!reconciled && (needsReview || recovery.blockers.length > 0 || !shouldSettleReceipt(receipt))) {
           if (!receipt || waitingForCommands || waitingForReview || !["completed", "failed", "interrupted"].includes(receipt.execution)) {
             continue;
           }
-          const firstNoticeId = `blocked:${workId}`;
-          const firstNotice = workStore.get(firstNoticeId);
-          const today = new Date().toISOString().slice(0, 10);
-          let noticeId = firstNoticeId;
-          if (firstNotice) {
-            if (firstNotice.createdAt.slice(0, 10) === today) {
-              continue;
-            }
-            noticeId = `${firstNoticeId}:${today}`;
-          }
-          if (!workStore.get(noticeId) && isTargetAllowed(config, receipt.message)) {
-            let description = "This reminder is blocked pending review.";
-            if (projection.recurrence) {
-              description = "This recurring schedule is paused pending review.";
-            }
-            let reason = "The previous occurrence failed or its delivery is unresolved.";
-            if (needsReview) {
-              reason = "Managed commands settled, but task reconciliation is missing or its review did not complete successfully.";
-            }
-            if (recovery.blockers.length > 0) {
-              reason += ` ${recovery.blockers.join("; ")}.`;
-            }
-            const notice: IncomingMessage = {
-              ...receipt.message,
-              workId: noticeId,
-              workIds: [noticeId],
-              images: undefined,
-              audio: undefined,
-              documents: undefined,
-              replyMode: "text",
-              text: `Reminder: ${projection.summary.slice(0, 500)}\n${description}\n${reason}\n` +
-                `Execution: ${receipt.execution}. Delivery: ${receipt.delivery}.\n` +
-                `No actions were automatically repeated. Use /work ${workId} to inspect the receipt. ` +
-                `Ask for an outcome review with work_inspect and work_reconcile to resume future occurrences without replaying this run. ` +
-                `Unknown effects must be resolved first. This notice repeats at most once per UTC day while unresolved.`,
-              raw: { type: "recovery_notice" },
-            };
-            if (await onMessage(notice) !== false) {
-              workStore.accept(notice);
+          // Acceptance consumes the single review attempt, even if it later fails or is interrupted.
+          // Old recovery_notice receipts do not consume this agent-facing attempt.
+          if (projection.status === "pending" && !workStore.get(workRecoveryId(workId)) && isTargetAllowed(config, receipt.message)) {
+            const event = createWorkRecoveryEvent(receipt, projection.summary);
+            if (await onMessage(event) !== false) {
+              workStore.accept(event);
             }
           }
           continue;

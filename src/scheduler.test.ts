@@ -9,6 +9,7 @@ import type { IncomingMessage } from "./channels/types.js";
 import { createProjectionStore, type Projection } from "./projection/index.js";
 import { createWorkStore, type WorkStore } from "./work/store.js";
 import { createCommandStore } from "./work/commands.js";
+import { workRecoveryId } from "./work/recovery-event.js";
 
 const cronMockState = vi.hoisted(() => ({
   callbacks: new Map<string, Array<() => Promise<void>>>(),
@@ -428,7 +429,7 @@ describe("Scheduler", () => {
     scheduler.stop();
   });
 
-  it("reports missing command reconciliation even after a successful delivered answer", async () => {
+  it("asks the agent to review missing reconciliation after a successful delivered answer", async () => {
     const config = { ...makeConfig(), data_dir: tempDir };
     const workStore = createWorkStore(tempDir);
     const commands = createCommandStore(tempDir);
@@ -444,10 +445,19 @@ describe("Scheduler", () => {
     commands.finish(command.id, "complete", 0);
     workStore.recordResponse([workId], "delivered");
     await runExactCallback();
-    const notice = onMessage.mock.calls.find(([msg]) => msg.workId === `blocked:${workId}`)?.[0];
-    expect(notice?.raw).toEqual({ type: "recovery_notice" });
-    expect(notice?.text).toContain("reconciliation");
-    expect(notice?.text).toContain("work_reconcile");
+    expect(workStore.get(workRecoveryId(workId))).toBeNull();
+    const completion = workStore.accept(commands.collectEvents()[0]).record;
+    workStore.claim([completion.id]);
+    await runExactCallback();
+    expect(workStore.get(workRecoveryId(workId))).toBeNull();
+    workStore.recordResponse([completion.id], "delivered");
+    await runExactCallback();
+    const review = onMessage.mock.calls.find(([msg]) => msg.workId === workRecoveryId(workId))?.[0];
+    expect(review).toMatchObject({ raw: { type: "work_recovery" }, userId: "12345", platform: "telegram" });
+    expect(review?.text).toContain("work_inspect");
+    expect(review?.text).toContain("work_reconcile");
+    expect(review?.text).toContain("NOOP");
+    expect(onMessage.mock.calls.some(([msg]) => msg.raw.type === "recovery_notice")).toBe(false);
     expect(store.getById(id)?.delivery_work_id).toBe(workId);
     store.close();
     commands.close();
@@ -483,7 +493,7 @@ describe("Scheduler", () => {
     workStore.close();
   });
 
-  it("repeats an unresolved hold once per day across scheduler restarts", async () => {
+  it.each(["completed", "failed", "interrupted"] as const)("does not repeat a %s recovery attempt across days and restarts", async (outcome) => {
     const config = { ...makeConfig(), data_dir: tempDir };
     const workStore = createWorkStore(tempDir);
     const onMessage = vi.fn().mockResolvedValue(true);
@@ -497,20 +507,25 @@ describe("Scheduler", () => {
     workStore.finish([workId], "interrupted");
     const baseTime = Date.now();
     try {
+      // Previously delivered human notices must not suppress the new agent review.
+      const legacy = workStore.accept({ ...workStore.get(workId)!.message, workId: `blocked:${workId}`, raw: { type: "recovery_notice" } }).record;
+      workStore.claim([legacy.id]);
+      workStore.recordResponse([legacy.id], "delivered");
       await runExactCallback();
+      const reviewId = workRecoveryId(workId);
+      expect(workStore.get(reviewId)?.execution).toBe("queued");
+      await runExactCallback();
+      workStore.claim([reviewId]);
+      workStore.finish([reviewId], outcome);
       vi.useFakeTimers();
       vi.setSystemTime(baseTime + 24 * 60 * 60 * 1000);
       await runExactCallback();
-      await runExactCallback();
-      const today = new Date().toISOString().slice(0, 10);
-      const notices = () => onMessage.mock.calls.filter(([msg]) => msg.workId === `blocked:${workId}:${today}`);
-      expect(notices()).toHaveLength(1);
       scheduler.stop();
       cronMockState.callbacks.clear();
       scheduler = createScheduler(config, onMessage, workStore);
       scheduler.start();
       await runExactCallback();
-      expect(notices()).toHaveLength(1);
+      expect(onMessage.mock.calls.filter(([msg]) => msg.workId === reviewId)).toHaveLength(1);
       expect(store.getById(id)?.delivery_work_id).toBe(workId);
     } finally {
       vi.useRealTimers();
@@ -520,14 +535,14 @@ describe("Scheduler", () => {
     }
   });
 
-  it("does not let a failed notice delivery prevent healthy occurrences from settling", async () => {
+  it.each([false, true])("does not let rejected recovery admission prevent healthy settlement (throws=%s)", async (throws) => {
     const config = { ...makeConfig(), data_dir: tempDir };
     const workStore = createWorkStore(tempDir);
     const onMessage = vi.fn(async (msg: IncomingMessage) => {
-      if ((msg.raw as { type: string }).type === "recovery_notice") {
-        throw new Error("notice transport unavailable");
+      if (throws && (msg.raw as { type: string }).type === "work_recovery") {
+        throw new Error("Recovery admission failed");
       }
-      return true;
+      return (msg.raw as { type: string }).type !== "work_recovery";
     });
     const first = addDueProjection(config, { summary: "Failed", resolved_when: dueWhen(), resolution: "exact" });
     const second = addDueProjection(config, { summary: "Healthy", resolved_when: dueWhen(), resolution: "exact" });
@@ -544,29 +559,38 @@ describe("Scheduler", () => {
     await runExactCallback();
     expect(store.getById(first)?.delivery_work_id).toBe(failed);
     expect(store.getById(second)?.status).toBe("passed");
+    expect(workStore.get(workRecoveryId(failed))).toBeNull();
+    await runExactCallback();
+    expect(onMessage.mock.calls.filter(([msg]) => msg.workId === workRecoveryId(failed))).toHaveLength(2);
     store.close();
     scheduler.stop();
     workStore.close();
   });
-  it("notifies once when a recurring occurrence is blocked, without replaying uncertain actions", async () => {
+  it("rearms after a silent agent recovery review without replaying the old occurrence", async () => {
     const config = { ...makeConfig(), data_dir: tempDir };
     const workStore = createWorkStore(tempDir);
+    const commands = createCommandStore(tempDir);
     const onMessage = vi.fn().mockResolvedValue(true);
-    const id = addDueProjection(config, { summary: "Paused schedule", resolved_when: dueWhen(), resolution: "exact", recurrence: "0 8 * * *" });
+    const id = addDueProjection(config, { summary: "Calendar", resolved_when: dueWhen(), resolution: "exact", recurrence: "0 8 * * *" });
     const scheduler = createScheduler(config, onMessage, workStore);
     scheduler.start();
     await runExactCallback();
     const store = createProjectionStore("12345", tempDir);
     const workId = store.getById(id)!.delivery_work_id!;
-    const when = store.getById(id)!.resolved_when;
     workStore.claim([workId]);
     workStore.finish([workId], "interrupted");
     await runExactCallback();
+    const review = workStore.get(workRecoveryId(workId))!;
+    workStore.claim([review.id]);
+    commands.reconcile(workId, review.message, "Read-only check stopped; inspected outcomes, no external effects", workStore);
+    expect(commands.isReconciled(workId, workStore)).toBe(false);
+    workStore.finish([review.id], "completed");
     await runExactCallback();
-    expect(onMessage.mock.calls.filter(([msg]) => msg.workId === `blocked:${workId}`)).toHaveLength(1);
-    expect(onMessage.mock.calls.find(([msg]) => msg.workId === `blocked:${workId}`)?.[0].text).toContain("recurring schedule is paused");
-    expect(store.getById(id)).toMatchObject({ status: "pending", resolved_when: when, delivery_work_id: workId });
+    expect(store.getById(id)?.delivery_work_id).not.toBe(workId);
+    expect(workStore.get(workId)?.execution).toBe("interrupted");
+    expect(onMessage.mock.calls.filter(([msg]) => msg.workId === workId)).toHaveLength(1);
     store.close();
+    commands.close();
     scheduler.stop();
     workStore.close();
   });
@@ -585,7 +609,7 @@ describe("Scheduler", () => {
     store.resolve(id, "done");
     workStore.recordResponse([workId], "unknown");
     await runExactCallback();
-    expect(onMessage.mock.calls.some(([msg]) => msg.workId === `blocked:${workId}`)).toBe(true);
+    expect(onMessage.mock.calls.some(([msg]) => msg.workId === workRecoveryId(workId))).toBe(false);
     workStore.recordResponse([workId], "delivered");
     await runExactCallback();
     expect(store.getById(id)).toMatchObject({ status: "done", delivery_work_id: null });

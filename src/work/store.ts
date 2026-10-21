@@ -37,6 +37,7 @@ export interface WorkStore {
   /** A durable outbound record proves the final response was produced. */
   recordResponse(ids: string[], delivery: WorkDelivery, error?: string): void;
   stageResponse(message: IncomingMessage, text: string, opts?: SendOpts, source?: CompletedResponse["source"]): CompletedResponse;
+  getResponse(workId: string): CompletedResponse | null;
   pendingResponses(): CompletedResponse[];
   recover(): { queued: WorkRecord[]; interrupted: WorkRecord[] };
   listUnresolved(userId?: string): WorkRecord[];
@@ -214,6 +215,15 @@ export function createWorkStore(dataDir: string): WorkStore {
       }
       return response;
     }),
+    getResponse(workId) {
+      const row = db.prepare(`SELECT record FROM completed_responses WHERE EXISTS (
+        SELECT 1 FROM json_each(record, '$.message.workIds') WHERE value = ?
+      ) LIMIT 1`).get(workId) as { record: string } | undefined;
+      if (!row) {
+        return null;
+      }
+      return JSON.parse(row.record) as CompletedResponse;
+    },
     pendingResponses() {
       const rows = db.prepare("SELECT record FROM completed_responses WHERE json_extract(record, '$.state') = 'pending' ORDER BY rowid").all() as Array<{ record: string }>;
       return rows.map((row) => JSON.parse(row.record) as CompletedResponse);

@@ -32,7 +32,9 @@ import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { createTopicDeliveryTracker } from "./channels/topic-delivery.js";
 import { getSessionKey } from "./threads.js";
 import { fixturePdf } from "./documents/__fixtures__/pdf.js";
-
+import { createWorkRecoveryEvent } from "./work/recovery-event.js";
+import { createCommandStore } from "./work/commands.js";
+import { MessageQueue } from "./message-queue.js";
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -1037,6 +1039,72 @@ describe("processMessage pipeline", () => {
       expect(workStore.get(record.id)).toMatchObject({ execution: "completed", delivery: "delivered" });
     } finally {
       workStore.close();
+    }
+  });
+
+  it.each(["silent", "decision", "failed", "cancelled"])("handles %s agent recovery without leaking the prompt or replacing user intent", async (outcome) => {
+    const session = makeUserSession("12345", []);
+    const state = makeState(config, session, tmpDir);
+    const work = createWorkStore(tmpDir);
+    state.workStore = work;
+    state.lastUserMessages.set("12345", "My actual request");
+    const projections = createProjectionStore("12345", tmpDir);
+    const commands = createCommandStore(tmpDir);
+    const id = projections.add({ summary: "Calendar", resolution: "exact", resolved_when: "2026-10-20 08:00", recurrence: "0 10 * * *" });
+    const workId = scheduledWorkId("12345", projections.getById(id)!);
+    const original = work.accept({ ...incomingMsg("Check calendar"), workId, raw: { type: "projection_exact_check" } }).record;
+    projections.markDeliveryWork(id, workId);
+    work.claim([workId]);
+    work.finish([workId], "interrupted");
+    const review = work.accept(createWorkRecoveryEvent(original, "Calendar")).record;
+    if (outcome === "cancelled") {
+      projections.resolve(id, "cancelled");
+    }
+    const question = "May I rotate the exposed token? The daily development schedule is paused until this is resolved.";
+    const prompt = vi.spyOn(session.session, "prompt").mockImplementation(async () => {
+      if (outcome === "failed") {
+        throw new Error("provider failed");
+      }
+      if (outcome === "decision") {
+        (session.session.messages as unknown[]).push(assistantMsg(question));
+      } else {
+        commands.reconcile(workId, review.message, "Read-only check interrupted, no external effects", work);
+        (session.session.messages as unknown[]).push(assistantMsg(SILENT_REPLY_TOKEN));
+      }
+    });
+    try {
+      const queue = new MessageQueue((message) => processMessage(state, message), async () => {}, 10, 0,
+        () => "main", { store: work, paused: true });
+      queue.start();
+      await queue.waitForIdle();
+      const sent = (state.bridges[0] as ReturnType<typeof makeBridge>).sent;
+      if (outcome === "cancelled") {
+        expect(prompt).not.toHaveBeenCalled();
+        expect(commands.isReconciled(workId, work)).toBe(false);
+        expect(sent).toEqual([]);
+      } else {
+        expect(prompt).toHaveBeenCalledOnce();
+        if (outcome === "silent") {
+          expect(commands.isReconciled(workId, work)).toBe(true);
+          expect(work.get(review.id)).toMatchObject({ execution: "completed", delivery: "none" });
+          expect(sent).toEqual([]);
+        } else {
+          expect(commands.isReconciled(workId, work)).toBe(false);
+          if (outcome === "decision") {
+            expect(sent).toEqual([{ channelId: original.message.channelId, text: question }]);
+          } else {
+            expect(work.get(review.id)?.execution).toBe("failed");
+            expect(sent).toEqual([{ channelId: original.message.channelId,
+              text: "I couldn't finish checking the paused task. The schedule remains paused; I haven't rerun the task." }]);
+          }
+        }
+      }
+      expect(state.lastUserMessages.get("12345")).toBe("My actual request");
+      expect(work.get(workId)?.execution).toBe("interrupted");
+    } finally {
+      projections.close();
+      commands.close();
+      work.close();
     }
   });
 

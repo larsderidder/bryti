@@ -62,6 +62,20 @@ describe("completed response recovery", () => {
     expect(() => work.stageResponse(message, "different answer")).toThrow("different content");
   });
 
+  it("finds the saved report for every receipt in a merged turn after restart", () => {
+    const second = work.accept({ ...message, workId: "second", workIds: undefined }).record;
+    work.claim([second.id]);
+    const combined = { ...message, workIds: [message.workId!, second.id] };
+    const response = work.stageResponse(combined, "Existing question awaiting user input");
+    work.recordResponse(combined.workIds, "delivered");
+    work.close();
+    work = createWorkStore(dir);
+    for (const id of combined.workIds) {
+      expect(work.getResponse(id)).toMatchObject({ id: response.id, text: response.text, state: "delivered" });
+    }
+    expect(work.getResponse("unrelated")).toBeNull();
+  });
+
   it("does not transfer a completed response to another destination", () => {
     work.stageResponse(message, "answer");
     expect(() => work.stageResponse({ ...message, channelId: "another-chat" }, "answer")).toThrow("owning work");
