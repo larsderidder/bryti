@@ -10,6 +10,7 @@ import { createCoreMemory } from "./memory/core-memory.js";
 import { createTrustStore } from "./trust/store.js";
 import { createGoogleTools } from "./integrations/google-tools.js";
 
+import type { TrustWrapperContext } from "./trust/wrapper.js";
 let infrastructure: ModelInfra;
 vi.mock("./model-infra.js", async (importActual) => {
   const actual = await importActual<typeof import("./model-infra.js")>();
@@ -80,11 +81,12 @@ describe("Bryti session loading", () => {
     }
     const approval = vi.fn().mockResolvedValue("allow");
     const guidelines = "Read the fixture project status; require approval before publishing its records.";
+    const deferred = vi.fn();
+    const context: TrustWrapperContext = { config, getLastUserMessage: () => "write a record", onApprovalNeeded: approval,
+      getOperationalGuidelines: () => guidelines, onApprovalDeferred: deferred,
+      evaluateToolCall: async () => ({ verdict: "ASK", reason: "Confirm" }) };
     userSession = await loadUserSession(config, createCoreMemory(directory), "owner", createGoogleTools(config, "owner"), undefined, "owner", {
-      trustStore: createTrustStore(directory),
-      context: { config, getLastUserMessage: () => "write a record", onApprovalNeeded: approval,
-        getOperationalGuidelines: () => guidelines,
-        evaluateToolCall: async () => ({ verdict: "ASK", reason: "Confirm" }) },
+      trustStore: createTrustStore(directory), context,
     });
     expect(userSession.extensionErrors).toEqual([]);
     expect(userSession.session.getActiveToolNames()).toContain("tool_search");
@@ -111,6 +113,18 @@ describe("Bryti session loading", () => {
     expect(userSession.session.messages.find((message) => message.role === "toolResult" && message.toolName === "contract_record"))
       .toMatchObject({ isError: false, content: [{ type: "text", text: "confirmed" }] });
     expect(globalThis.fetch).not.toHaveBeenCalled();
+
+    // The same discovered extension must yield, rather than wait, during an unattended run.
+    context.source = { source: "automation", automationId: "daily-check" };
+    faux.setResponses([
+      fauxAssistantMessage(fauxToolCall("contract_record", { value: "unattended" }), { stopReason: "toolUse" }),
+      fauxAssistantMessage("The write needs a decision"),
+    ]);
+    await userSession.session.prompt("Scheduled check");
+    expect(approval).toHaveBeenCalledOnce();
+    expect(deferred).toHaveBeenCalledWith("contract_record");
+    expect(userSession.session.messages.filter((message) => message.role === "toolResult" && message.toolName === "contract_record").at(-1))
+      .toMatchObject({ details: { approval: "deferred", executed: false } });
   });
 
   it("persists only changing prompt sections and recovers shortened reads after restart", async () => {

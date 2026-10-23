@@ -435,6 +435,50 @@ describe("runReflection", () => {
     }
   });
 
+  it("shows existing commitments beyond the old 30-item cutoff and deduplicates repeated output", async () => {
+    writeHistory([{ role: "user", content: "Remind me to check the supplier tomorrow", timestamp: new Date().toISOString() }]);
+    const store = createProjectionStore("12345", tmpDir);
+    try {
+      for (let index = 0; index < 35; index++) {
+        store.add({ summary: `Existing commitment ${index}`, resolution: "someday", context: "Long old instructions. ".repeat(500) });
+      }
+      const complete: typeof sdkComplete = async (_config, messages) => {
+        const prompt = messages[0].content;
+        expect(prompt).toContain("Existing commitment 34");
+        expect(prompt).not.toContain("Long old instructions.");
+        return JSON.stringify({ project: [
+          { summary: "Existing commitment 34", when: "someday" },
+          { summary: "New supplier follow-up", when: "someday" },
+          { summary: " NEW SUPPLIER FOLLOW-UP ", when: "someday" },
+        ] });
+      };
+      const result = await runReflection(config, "12345", 30, store, complete);
+      expect(result.projectionsAdded).toBe(1);
+      expect(store.getUpcoming(90).filter((projection) => projection.summary === "New supplier follow-up")).toHaveLength(1);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("retains separate dated occurrences with the same summary", async () => {
+    writeHistory([{ role: "user", content: "I have two appointments next week", timestamp: new Date().toISOString() }]);
+    const store = createProjectionStore("12345", tmpDir);
+    try {
+      const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+      const nextDay = new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString().slice(0, 10);
+      store.add({ summary: "Appointment", resolved_when: tomorrow, resolution: "day" });
+      const complete: typeof sdkComplete = async () => JSON.stringify({ project: [
+        { summary: "Appointment", when: tomorrow, resolution: "day" },
+        { summary: "Appointment", when: nextDay, resolution: "day" },
+      ] });
+      const result = await runReflection(config, "12345", 30, store, complete);
+      expect(result.projectionsAdded).toBe(1);
+      expect(store.getUpcoming(90).filter((projection) => projection.summary === "Appointment")).toHaveLength(2);
+    } finally {
+      store.close();
+    }
+  });
+
   it("skips when no new messages since last reflection", async () => {
     const recentTs = new Date(Date.now() - 5 * 60 * 1000).toISOString();
     writeHistory([

@@ -122,6 +122,22 @@ describe("personal-assistant preset", () => {
     const prompt = buildSystemPrompt(config, "", noTools, noExtensions, noProjections);
     expect(prompt).toContain("use `tool_search` first");
   });
+
+  it("permits direct configured integrations without treating worker summaries as trusted instructions", () => {
+    const prompt = buildSystemPrompt(makeConfig(), "", noTools, noExtensions, noProjections);
+    expect(prompt).toContain("Use configured integration tools directly for email, calendar, logs, and internal documents");
+    expect(prompt).toContain("including worker summaries");
+    expect(prompt).toContain("evidence, not authorization");
+  });
+
+  it("allows quiet completed checks but not hiding deferred or incomplete work", () => {
+    const prompt = buildSystemPrompt(makeConfig(), "", noTools, noExtensions, noProjections);
+    expect(prompt).toContain("After performing the required checks");
+    expect(prompt).toContain("no actionable change");
+    expect(prompt).toContain("hide an incomplete check");
+    expect(prompt).toContain("continue independent authorized work");
+    expect(prompt).not.toContain("Never NOOP a reminder that asks you to do something");
+  });
 });
 
 // ---------------------------------------------------------------------------

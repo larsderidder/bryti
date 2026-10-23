@@ -79,6 +79,74 @@ function allowGuardrail(calls: unknown[]): (input: any) => Promise<GuardrailResu
 }
 
 describe("wrapToolWithTrustCheck", () => {
+  it("includes the active automation separately from an unrelated last human message", async () => {
+    const evaluate = vi.fn(async (_input: GuardrailInput) => ({ verdict: "ALLOW" as const, reason: "authorized scheduled check" }));
+    const wrapped = wrapToolWithTrustCheck(makeTool("scheduled_read", "read"), createTrustStore(tmpDir), "user1", {
+      config: makeConfig(), getLastUserMessage: () => "What time is it?",
+      getActiveTask: () => ({ source: "projection_exact_check", request: "Read Gmail for the daily briefing" }),
+      evaluateToolCall: evaluate,
+    }, { level: "elevated" });
+
+    await wrapped.execute("call", {});
+
+    expect(evaluate).toHaveBeenCalledWith(expect.objectContaining({
+      userMessage: "What time is it?",
+      activeTask: { source: "projection_exact_check", request: "Read Gmail for the daily briefing" },
+    }));
+  });
+
+  it.each([false, true])("defers an automated approval without executing or waiting (unavailable=%s)", async (evaluationFailed) => {
+    const calls: string[] = [];
+    const approve = vi.fn(() => new Promise<never>(() => {}));
+    const wrapped = wrapToolWithTrustCheck(makeCountingTool("scheduled_write", calls), createTrustStore(tmpDir), "user1", {
+      config: makeConfig(), getLastUserMessage: () => "carry on",
+      source: { source: "automation", automationId: "daily-check" },
+      evaluateToolCall: async () => ({ verdict: "ASK", reason: "confirm destination", evaluationFailed }),
+      onApprovalNeeded: approve,
+    }, { level: "elevated" });
+
+    const result = await wrapped.execute("call", {});
+
+    expect(calls).toEqual([]);
+    expect(approve).not.toHaveBeenCalled();
+    expect(result.details).toMatchObject({ approval: "deferred", executed: false, evaluationFailed });
+    expect(result.content[0].text).toContain("Continue independent authorized work");
+    expect(checkPendingApproval("user1", "yes")).toBeNull();
+  });
+
+  it("keeps authorized automated calls running and BLOCK final without human approval", async () => {
+    const calls: string[] = [];
+    const approve = vi.fn();
+    const evaluate = vi.fn().mockResolvedValueOnce({ verdict: "ASK", reason: "confirm publication" })
+      .mockResolvedValueOnce({ verdict: "ALLOW", reason: "routine read" })
+      .mockResolvedValueOnce({ verdict: "BLOCK", reason: "credential theft" });
+    const wrapped = wrapToolWithTrustCheck(makeCountingTool("automation_tool", calls), createTrustStore(tmpDir), "user1", {
+      config: makeConfig(), getLastUserMessage: () => undefined,
+      source: { source: "automation", automationId: "daily-check" }, evaluateToolCall: evaluate, onApprovalNeeded: approve,
+    }, { level: "elevated" });
+
+    await wrapped.execute("deferred", { action: "publish" });
+    await wrapped.execute("allowed", { action: "read" });
+    const blocked = await wrapped.execute("blocked", { action: "steal" });
+
+    expect(calls).toEqual([JSON.stringify({ action: "read" })]);
+    expect(blocked.content[0].text).toContain("Blocked");
+    expect(approve).not.toHaveBeenCalled();
+  });
+
+  it("does not adopt policy changes from an unattended turn", async () => {
+    const calls: string[] = [];
+    const approve = vi.fn().mockResolvedValue("allow");
+    const wrapped = wrapToolWithTrustCheck(makeCountingTool("operational_guidelines_update", calls), createTrustStore(tmpDir), "user1", {
+      config: makeConfig(), getLastUserMessage: () => undefined,
+      source: { source: "automation" },
+      evaluateToolCall: async () => ({ verdict: "ALLOW", reason: "reasonable proposal" }), onApprovalNeeded: approve,
+    }, { level: "elevated" });
+
+    expect((await wrapped.execute("call", {})).details).toMatchObject({ approval: "deferred", executed: false });
+    expect(calls).toEqual([]);
+    expect(approve).not.toHaveBeenCalled();
+  });
   it("checks current guidelines and each changed argument set without asking for routine integration reads", async () => {
     const calls: string[] = [];
     const approve = vi.fn().mockResolvedValue("deny");

@@ -128,6 +128,59 @@ describe("guardrail model fallback", () => {
     return { modelRegistry: { getApiKeyAndHeaders: auth } } as unknown as ModelInfra;
   }
 
+  it("reserves time for fallback when a provider hangs", async () => {
+    vi.useFakeTimers();
+    const auth = vi.fn().mockResolvedValue({ ok: true, apiKey: "test" });
+    complete.mockImplementationOnce(() => new Promise(() => {}));
+    try {
+      const result = evaluateToolCall(config, input, infrastructure(auth));
+      await vi.advanceTimersByTimeAsync(10_001);
+      expect(complete).toHaveBeenCalledTimes(2);
+      expect(await result).toMatchObject({ verdict: "ALLOW" });
+      expect(complete.mock.calls[0][2].signal.aborted).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("bounds the whole evaluation when every provider hangs", async () => {
+    vi.useFakeTimers();
+    const auth = vi.fn().mockResolvedValue({ ok: true, apiKey: "test" });
+    complete.mockImplementation(() => new Promise(() => {}));
+    try {
+      const result = evaluateToolCall({ agent: { model: "first/model",
+        fallback_models: ["second/model", "third/model", "fourth/model"] } } as Config, input, infrastructure(auth));
+      await vi.advanceTimersByTimeAsync(30_001);
+      expect(await result).toMatchObject({ verdict: "ASK", evaluationFailed: true });
+      expect(complete).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reserves fallback time even when authentication itself hangs", async () => {
+    vi.useFakeTimers();
+    const auth = vi.fn().mockImplementationOnce(() => new Promise(() => {}))
+      .mockResolvedValue({ ok: true, apiKey: "test" });
+    try {
+      const result = evaluateToolCall(config, input, infrastructure(auth));
+      await vi.advanceTimersByTimeAsync(10_001);
+      expect(await result).toMatchObject({ verdict: "ALLOW" });
+      expect(complete).toHaveBeenCalledOnce();
+      expect(complete.mock.calls[0][0].provider).toBe("fallback");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("tries another provider after an invalid response, not after a valid safety decision", async () => {
+    const auth = vi.fn().mockResolvedValue({ ok: true, apiKey: "test" });
+    complete.mockResolvedValueOnce({ stopReason: "length", content: [] });
+
+    expect(await evaluateToolCall(config, input, infrastructure(auth))).toMatchObject({ verdict: "ALLOW" });
+    expect(complete).toHaveBeenCalledTimes(2);
+  });
+
   it("tries the fallback when the primary model cannot authenticate", async () => {
     const auth = vi.fn()
       .mockResolvedValueOnce({ ok: false, error: "invalid_grant" })

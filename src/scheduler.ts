@@ -389,11 +389,9 @@ function projectionReminderText(projection: Projection): string {
   }
   return `[Scheduled reminder]\n\nThe following reminder is due now:\n\n` +
     `${formatted}\n\n` +
-    `For this item:\n` +
-    `1. Search your memory for related context with memory_archival_search.\n` +
-    `2. Execute only authorized actions described in the full reminder, such as checking email or calendar.\n` +
-    `3. Send the user a helpful, natural message with your findings.\n\n` +
-    `Only reply NOOP if the reminder is purely informational and requires no action or message.`;
+    `Carry out this task within its scope and your approved operational guidelines. Use memory when useful. ` +
+    `Continue independent authorized work if one action cannot proceed. Report actionable findings, required reports, or incomplete checks. ` +
+    `If the checks are complete and there is no actionable change or required report, reply NOOP.`;
 }
 
 // ---------------------------------------------------------------------------

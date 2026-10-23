@@ -768,6 +768,34 @@ describe("processMessage pipeline", () => {
     expect(bridge.sent[0].text).toContain("too long");
   });
 
+  it.each([SILENT_REPLY_TOKEN, "Checks finished"])("does not hide deferred actions behind %s or interrupt future work", async (reply) => {
+    const session = makeUserSession("12345", [assistantMsg(reply)]);
+    const state = makeState(config, session, tmpDir);
+    vi.spyOn(session.session, "prompt").mockImplementation(async () => {
+      state.approvalListeners?.get("12345")?.({ type: "approval_deferred", toolName: "gmail_list" });
+      state.approvalListeners?.get("12345")?.({ type: "approval_deferred", toolName: "gmail_list" });
+    });
+    const work = createWorkStore(tmpDir);
+    state.workStore = work;
+    const record = work.accept({ ...incomingMsg("Check email"), raw: { type: "cron" } }).record;
+    work.claim([record.id]);
+    const bridge = state.bridges[0] as ReturnType<typeof makeBridge>;
+    const approval = vi.spyOn(bridge, "sendApprovalRequest");
+    try {
+      await processMessage(state, record.message);
+
+      expect(work.get(record.id)).toMatchObject({ execution: "completed" });
+      expect(bridge.sent).toHaveLength(1);
+      expect(bridge.sent[0].text).toContain("Not completed: gmail_list.");
+      expect(work.getResponse(record.id)?.text).toContain("Not completed: gmail_list.");
+      expect(approval).not.toHaveBeenCalled();
+      expect(session.dispose).not.toHaveBeenCalled();
+      expect(state.approvalListeners?.size).toBe(0);
+    } finally {
+      work.close();
+    }
+  });
+
   it("ends an automated turn when approval expires and preserves its interruption", async () => {
     const session = makeUserSession("12345");
     vi.spyOn(session.session, "prompt").mockImplementation(async () => {

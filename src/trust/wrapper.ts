@@ -22,8 +22,10 @@ export type GuardrailEvaluator = (input: GuardrailInput) => Promise<GuardrailRes
 export interface TrustWrapperContext {
   config: Config;
   getLastUserMessage: () => string | undefined;
+  getActiveTask?: () => GuardrailInput["activeTask"];
   getOperationalGuidelines?: () => string;
   onApprovalNeeded?: ApprovalCallback;
+  onApprovalDeferred?: (toolName: string) => void;
   modelInfra?: ModelInfra;
   evaluateToolCall?: GuardrailEvaluator;
   source?: Omit<ApprovalProvenance, "userId">;
@@ -142,6 +144,7 @@ async function runGuardrail(
       toolName: tool.name,
       args: canonicalizeToolArgs(params),
       userMessage: context.getLastUserMessage?.(),
+      activeTask: context.getActiveTask?.(),
       toolDescription: tool.description,
       operationalGuidelines: context.getOperationalGuidelines?.(),
     };
@@ -250,6 +253,14 @@ export function wrapToolWithTrustCheck<T extends AgentTool<any>>(
       trustStore.consumeOnce(tool.name);
     }
     if (needsApproval) {
+      if (provenance.source === "automation") {
+        // Unattended work must yield the conversation, not hold its queue for a human.
+        context?.onApprovalDeferred?.(tool.name);
+        return {
+          content: [{ type: "text", text: `Action deferred: ${tool.name}. ${guardrailResult.reason} The action was not executed and no approval wait was started. Continue independent authorized work. Do not retry or use another route to bypass this boundary. Report any incomplete checks honestly; surface a concrete permission decision only when needed.` }],
+          details: { approval: "deferred", executed: false, evaluationFailed: Boolean(guardrailResult.evaluationFailed) },
+        };
+      }
       const reason = guardrailResult.reason;
       let heading = "Permission request";
       if (guardrailResult.verdict === "ASK") {

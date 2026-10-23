@@ -563,6 +563,16 @@ export async function getOrLoadSession(
       return source;
     },
     getLastUserMessage: () => state.lastUserMessages.get(sessionKey),
+    getActiveTask: () => {
+      const target = state.deliveryTargets?.get(sessionKey) ?? msg;
+      if (!isInternalMessage(target)) {
+        return undefined;
+      }
+      return { source: (target.raw as { type: string }).type, request: target.text };
+    },
+    onApprovalDeferred: (toolName) => {
+      state.approvalListeners?.get(sessionKey)?.({ type: "approval_deferred", toolName });
+    },
     onApprovalNeeded: async (prompt, approvalKey, opts) => {
       const target = state.deliveryTargets?.get(sessionKey) ?? msg;
       const bridge = getBridge(state, target.platform);
@@ -898,13 +908,19 @@ export async function processMessage(
       msg = { ...msg, text: "[System: The owning reminder was cancelled or rescheduled. Inspect and report existing command results only. Do not continue development, deploy, or recreate the reminder.]\n\n" + msg.text };
     }
     const promptStart = Date.now();
+    const deferredApprovals = new Set<string>();
     usageWindow = { session, entryOffset: session.sessionManager?.getEntries().length, startedAt: promptStart };
     const promptResult = await runPromptWithActivityWatchdog({
       sessionKey,
       stopOnApprovalExpiry: isInternalMessage(msg),
       subscribe: (listener) => {
         state.approvalListeners ??= new Map();
-        state.approvalListeners.set(sessionKey, listener);
+        state.approvalListeners.set(sessionKey, (event) => {
+          if (event.type === "approval_deferred" && event.toolName) {
+            deferredApprovals.add(event.toolName);
+          }
+          listener(event);
+        });
         const unsubscribe = session.subscribe(listener);
         return () => {
           unsubscribe();
@@ -1029,6 +1045,10 @@ export async function processMessage(
     // silently swallowed — the user never sees it.
     // Filter out any NOOP entries — only suppress if ALL entries are NOOP.
     const visibleTexts = allResponseTexts.filter((t) => t !== SILENT_REPLY_TOKEN);
+    if (deferredApprovals.size > 0) {
+      // A model's NOOP or success wording cannot hide calls that never executed.
+      visibleTexts.push(`Not completed: ${[...deferredApprovals].join(", ")}. These actions were not run because permission or safety evaluation was required. Other authorized work can continue.`);
+    }
 
     if (visibleTexts.length === 0 && extractResponseText(lastAssistant).trim() === SILENT_REPLY_TOKEN) {
       console.log(`[agent] Silent reply from ${msg.userId}, suppressing message`);

@@ -11,8 +11,12 @@ import { createWorkStore, type WorkStore } from "./work/store.js";
 import { createCommandStore } from "./work/commands.js";
 import { workRecoveryId } from "./work/recovery-event.js";
 
+import { wrapToolWithTrustCheck } from "./trust/wrapper.js";
+import { createTrustStore } from "./trust/store.js";
+import { Type } from "typebox";
 const cronMockState = vi.hoisted(() => ({
   callbacks: new Map<string, Array<() => Promise<void>>>(),
+  nextOffsetMs: 60_000,
 }));
 
 vi.mock("croner", () => {
@@ -25,7 +29,7 @@ vi.mock("croner", () => {
     return {
       nextRun(after?: Date) {
         const base = after ?? new Date();
-        return new Date(base.getTime() + 60_000);
+        return new Date(base.getTime() + cronMockState.nextOffsetMs);
       },
       stop: vi.fn(),
     };
@@ -132,6 +136,7 @@ describe("Scheduler", () => {
   beforeEach(() => {
     tempDir = makeTempDir();
     cronMockState.callbacks.clear();
+    cronMockState.nextOffsetMs = 60_000;
     consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -340,6 +345,51 @@ describe("Scheduler", () => {
     store.close();
     scheduler.stop();
     workStore.close();
+  });
+
+  it("a deferred action does not block independent work or the next recurring occurrence", async () => {
+    cronMockState.nextOffsetMs = 24 * 60 * 60 * 1000;
+    const config = { ...makeConfig(), data_dir: tempDir };
+    const work = createWorkStore(tempDir);
+    const approvals = vi.fn(() => new Promise<never>(() => {}));
+    const executed = vi.fn(async () => ({ content: [{ type: "text" as const, text: "checked" }] }));
+    const evaluate = vi.fn().mockResolvedValueOnce({ verdict: "ASK", reason: "publication needs authorization" })
+      .mockResolvedValue({ verdict: "ALLOW", reason: "routine read" });
+    const onMessage = vi.fn(async (message: IncomingMessage) => {
+      const record = work.accept(message).record;
+      work.claim([record.id]);
+      const tool = wrapToolWithTrustCheck({ name: "integration", label: "Integration", description: "Read or publish",
+        parameters: Type.Object({}), execute: executed }, createTrustStore(tempDir), message.userId, {
+        config, getLastUserMessage: () => "Unrelated conversation",
+        getActiveTask: () => ({ source: "projection_exact_check", request: message.text }),
+        source: { source: "automation", automationId: record.id }, evaluateToolCall: evaluate, onApprovalNeeded: approvals,
+      }, { level: "elevated" });
+      expect((await tool.execute("publish", {})).details).toMatchObject({ approval: "deferred", executed: false });
+      await tool.execute("read", {});
+      work.recordResponse([record.id], "delivered");
+      return true;
+    });
+    const id = addDueProjection(config, { summary: "Daily checks", resolved_when: dueWhen(), resolution: "exact", recurrence: "0 8 * * *" });
+    const scheduler = createScheduler(config, onMessage, work);
+    const store = createProjectionStore("12345", tempDir);
+    try {
+      scheduler.start();
+      await runExactCallback();
+      const workId = store.getById(id)!.delivery_work_id!;
+      await runExactCallback();
+
+      expect(executed).toHaveBeenCalledOnce();
+      expect(approvals).not.toHaveBeenCalled();
+      expect(work.get(workId)?.execution).toBe("completed");
+      expect(store.getById(id)?.delivery_work_id).toBeNull();
+      expect(store.getById(id)?.resolved_when! > dueWhen()).toBe(true);
+      expect(work.get(workRecoveryId(workId))).toBeNull();
+      expect(onMessage).toHaveBeenCalledOnce();
+    } finally {
+      store.close();
+      scheduler.stop();
+      work.close();
+    }
   });
 
   it("holds a recurring schedule until managed work has a completed reconciliation", async () => {
