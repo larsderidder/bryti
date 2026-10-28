@@ -136,6 +136,8 @@ describe("personal-assistant preset", () => {
     expect(prompt).toContain("no actionable change");
     expect(prompt).toContain("hide an incomplete check");
     expect(prompt).toContain("continue independent authorized work");
+    expect(prompt).toContain("Technical failures are evidence to diagnose, not new user prohibitions");
+    expect(prompt).toContain("explicit user limits");
     expect(prompt).not.toContain("Never NOOP a reminder that asks you to do something");
   });
 });

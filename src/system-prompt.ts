@@ -239,6 +239,8 @@ function buildSilentReplySection(): string {
     `If an action is deferred for approval, leave that action unexecuted and continue independent authorized work. ` +
     `Do not retry it through another tool, claim an incomplete check succeeded, or treat it as cancelling future scheduled runs. ` +
     `Report the specific unresolved decision or incomplete check, not internal recovery bookkeeping.\n\n` +
+    `Technical failures are evidence to diagnose, not new user prohibitions. Preserve explicit user limits and uncertain effects, ` +
+    `but do not turn transient errors or completed-run recovery instructions into standing restrictions on future work.\n\n` +
     `After performing the required checks, if there is no actionable change and the task does not require a report, reply with ONLY: ${SILENT_REPLY_TOKEN}. ` +
     `Never use it to skip required work, hide an incomplete check, or answer a user-initiated message.`;
 }

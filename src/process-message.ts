@@ -74,6 +74,7 @@ import { isCurrentProjectionWork, OBSOLETE_PROJECTION_WORK } from "./projection/
 import { commandRecoveryNotice, isCommandContinuationCurrent, isWorkRecoveryCurrent } from "./work/commands.js";
 import { commandReviewNotice } from "./work/recovery.js";
 import { createOperationalGuidelines } from "./trust/guidelines.js";
+import { getActiveTask } from "./trust/active-task.js";
 import { extractPdfAttachment } from "./documents/pdf.js";
 import { wrapEffectTool } from "./work/effects.js";
 
@@ -565,10 +566,7 @@ export async function getOrLoadSession(
     getLastUserMessage: () => state.lastUserMessages.get(sessionKey),
     getActiveTask: () => {
       const target = state.deliveryTargets?.get(sessionKey) ?? msg;
-      if (!isInternalMessage(target)) {
-        return undefined;
-      }
-      return { source: (target.raw as { type: string }).type, request: target.text };
+      return getActiveTask(target, projectionStore);
     },
     onApprovalDeferred: (toolName) => {
       state.approvalListeners?.get(sessionKey)?.({ type: "approval_deferred", toolName });
