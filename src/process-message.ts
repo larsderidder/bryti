@@ -71,7 +71,7 @@ import { acquireSessionTurn } from "./compaction/proactive.js";
 import type { WorkStore, CompletedResponse } from "./work/store.js";
 import { isDeliveryError } from "./channels/delivery.js";
 import { isCurrentProjectionWork, OBSOLETE_PROJECTION_WORK } from "./projection/occurrence.js";
-import { commandRecoveryNotice, isCommandContinuationCurrent, isWorkRecoveryCurrent } from "./work/commands.js";
+import { commandRecoveryNotice, createCommandStore, isCommandContinuationCurrent, isWorkRecoveryCurrent } from "./work/commands.js";
 import { commandReviewNotice } from "./work/recovery.js";
 import { createOperationalGuidelines } from "./trust/guidelines.js";
 import { getActiveTask } from "./trust/active-task.js";
@@ -566,6 +566,14 @@ export async function getOrLoadSession(
     getLastUserMessage: () => state.lastUserMessages.get(sessionKey),
     getActiveTask: () => {
       const target = state.deliveryTargets?.get(sessionKey) ?? msg;
+      if ((target.raw as { type?: string } | null)?.type === "command_completion" && state.workStore) {
+        const commands = createCommandStore(state.config.data_dir);
+        try {
+          return getActiveTask(target, projectionStore, { work: state.workStore, commands });
+        } finally {
+          commands.close();
+        }
+      }
       return getActiveTask(target, projectionStore);
     },
     onApprovalDeferred: (toolName) => {
