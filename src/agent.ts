@@ -60,6 +60,8 @@ export interface UserSession {
   userId: string;
   /** Path to the per-user session directory on disk. */
   sessionDir: string;
+  /** Loaded application-owned reads, excluding same-name extension implementations. */
+  readOnlyToolNames?: ReadonlySet<string>;
   /** Timestamp of last user-initiated message (not scheduler). */
   lastUserMessageAt: number;
   /** Extension files that failed to load on startup. Empty if all loaded. */
@@ -505,6 +507,7 @@ export async function loadUserSession(
     modelRegistry,
     userId,
     sessionDir: sessDir,
+    readOnlyToolNames: eligibleContextTools,
     lastUserMessageAt: Date.now(),
     extensionErrors: [
       ...extensionsResult.errors.map((e) => ({

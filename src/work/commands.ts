@@ -44,8 +44,8 @@ export interface CommandStore {
   collectEvents(isAlive?: (record: CommandRecord) => boolean): IncomingMessage[];
   acknowledge(id: string): void;
   reconcile(workId: string, reviewer: IncomingMessage, evidence: string, work: WorkStore): void;
-  isReconciled(workId: string, work: WorkStore): boolean;
-  recoveryState(workId: string, work: WorkStore): WorkRecoveryState;
+  isReconciled(workId: string, work: WorkStore, currentReviewId?: string): boolean;
+  recoveryState(workId: string, work: WorkStore, currentReviewId?: string): WorkRecoveryState;
   close(): void;
 }
 
@@ -171,6 +171,18 @@ export function createCommandStore(dataDir: string): CommandStore {
     }
     if (parent && !["none", "delivered"].includes(parent.delivery)) {
       blockers.push("Original delivery is unresolved");
+    }
+    for (const relatedId of relatedIds) {
+      if (relatedId === workId || relatedId === currentReviewId) {
+        continue;
+      }
+      const related = work.get(relatedId);
+      if (related && ["queued", "running"].includes(related.execution)) {
+        blockers.push("An outcome review is still active");
+      }
+      if (related && ["pending", "unknown"].includes(related.delivery)) {
+        blockers.push("An outcome review delivery is unresolved");
+      }
     }
     if (commands.some((command) => ["queued", "running"].includes(command.status))) {
       blockers.push("A managed command is still active");
@@ -299,8 +311,8 @@ export function createCommandStore(dataDir: string): CommandStore {
       db.prepare("INSERT INTO command_reviews(work_id, review_id, evidence) VALUES (?, ?, ?) ON CONFLICT(work_id) DO UPDATE SET review_id = excluded.review_id, evidence = excluded.evidence")
         .run(workId, review.id, evidence);
     }),
-    isReconciled(workId, work) {
-      const recovery = recoveryState(workId, work);
+    isReconciled(workId, work, currentReviewId) {
+      const recovery = recoveryState(workId, work, currentReviewId);
       return recovery.blockers.length === 0 && recovery.review?.execution === "completed"
         && ["none", "delivered"].includes(recovery.review.delivery ?? "");
     },
@@ -408,7 +420,7 @@ export function isWorkRecoveryCurrent(dataDir: string, target: IncomingMessage, 
   try {
     return isCurrentProjectionWork(parent.message, projections)
       && projections.getAwaitingDelivery().some((projection) => projection.delivery_work_id === workId)
-      && !commands.isReconciled(workId, work);
+      && !commands.isReconciled(workId, work, target.workId);
   } finally {
     projections.close();
     commands.close();

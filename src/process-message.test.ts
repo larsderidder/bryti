@@ -18,7 +18,7 @@ import { SILENT_REPLY_TOKEN } from "./agent.js";
 import { createHistoryManager } from "./history.js";
 import { createCoreMemory } from "./memory/core-memory.js";
 import { createUsageTracker } from "./usage.js";
-import { fauxAssistantMessage } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { createTrustStore, setPendingApproval, checkPendingApproval } from "./trust/index.js";
 import type { ChannelBridge, IncomingMessage } from "./channels/types.js";
 import type { UserSession } from "./agent.js";
@@ -488,6 +488,33 @@ describe("processMessage pipeline", () => {
     expect(summary.total_cost_usd).toBe(1.5);
     expect((state.bridges[0] as ReturnType<typeof makeBridge>).sent.some((message) => message.text.includes("Intermediate answer"))).toBe(true);
   });
+
+  it.each([["read", false, true], ["read", true, false], ["bash", false, false], ["codemode", false, false]] as const)(
+    "records failure evidence only for settled trusted read turns (%s, streaming=%s)",
+    async (toolName, streaming, expected) => {
+      const userSession = makeUserSession("12345");
+      userSession.readOnlyToolNames = new Set(["read"]);
+      const manager = SessionManager.inMemory(tmpDir);
+      Object.assign(userSession.session, { sessionManager: manager, isStreaming: streaming });
+      Object.defineProperty(userSession.session, "messages", { get: () => manager.buildSessionContext().messages });
+      vi.spyOn(userSession.session, "prompt").mockImplementation(async () => {
+        manager.appendMessage(fauxAssistantMessage(fauxToolCall(toolName, {}), { stopReason: "error" }));
+        throw new Error("Provider unavailable");
+      });
+      const state = makeState(config, userSession, tmpDir);
+      const work = createWorkStore(tmpDir);
+      state.workStore = work;
+      const receipt = work.accept(incomingMsg("Check status")).record;
+      work.claim([receipt.id]);
+      try {
+        await processMessage(state, receipt.message);
+        expect(work.get(receipt.id)?.execution).toBe("failed");
+        expect(work.hasReadOnlyFailure(receipt.id)).toBe(expected);
+      } finally {
+        work.close();
+      }
+    },
+  );
 
   it("hides thinking blocks by default", async () => {
     const session = makeUserSession("12345", [{

@@ -33,6 +33,8 @@ export interface WorkStore {
   queued(): WorkRecord[];
   claim(ids: string[]): boolean;
   finish(ids: string[], execution: "completed" | "failed" | "interrupted", error?: string): void;
+  recordReadOnlyFailure(ids: string[], entryIds: string[]): void;
+  hasReadOnlyFailure(id: string): boolean;
   recordDelivery(ids: string[], delivery: WorkDelivery, error?: string): void;
   /** A durable outbound record proves the final response was produced. */
   recordResponse(ids: string[], delivery: WorkDelivery, error?: string): void;
@@ -129,6 +131,9 @@ export function createWorkStore(dataDir: string): WorkStore {
     CREATE TABLE IF NOT EXISTS completed_responses (
       id TEXT PRIMARY KEY, identity TEXT NOT NULL UNIQUE, record TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS read_only_failures (
+      work_id TEXT PRIMARY KEY, entry_ids TEXT NOT NULL
+    );
   `);
   const select = db.prepare("SELECT * FROM work WHERE id = ?");
   const selectQueued = db.prepare("SELECT * FROM work WHERE execution = 'queued' ORDER BY created_at, rowid");
@@ -178,6 +183,21 @@ export function createWorkStore(dataDir: string): WorkStore {
         update.run(execution, error ?? null, new Date().toISOString(), id);
       }
     }),
+    recordReadOnlyFailure: db.transaction((ids: string[], entryIds: string[]) => {
+      if (entryIds.length === 0 || entryIds.some((id) => !id)) {
+        throw new Error("Canonical turn evidence is required");
+      }
+      if (ids.length === 0 || ids.some((id) => !["failed", "interrupted"].includes(get(id)?.execution ?? ""))) {
+        throw new Error("Only failed or interrupted work can record read-only evidence");
+      }
+      for (const id of ids) {
+        db.prepare("INSERT OR IGNORE INTO read_only_failures(work_id, entry_ids) VALUES (?, ?)")
+          .run(id, JSON.stringify(entryIds));
+      }
+    }),
+    hasReadOnlyFailure(id) {
+      return Boolean(db.prepare("SELECT 1 FROM read_only_failures WHERE work_id = ?").get(id));
+    },
     stageResponse: db.transaction((message: IncomingMessage, text: string, opts: SendOpts = {}, source?: CompletedResponse["source"]) => {
       const ids = [...new Set(message.workIds ?? [])].sort();
       if (ids.length === 0 || ids.some((id) => {

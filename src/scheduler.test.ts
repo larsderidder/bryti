@@ -9,7 +9,7 @@ import type { IncomingMessage } from "./channels/types.js";
 import { createProjectionStore, type Projection } from "./projection/index.js";
 import { createWorkStore, type WorkStore } from "./work/store.js";
 import { createCommandStore } from "./work/commands.js";
-import { workRecoveryId } from "./work/recovery-event.js";
+import { createWorkRecoveryEvent, workRecoveryId } from "./work/recovery-event.js";
 
 import { wrapToolWithTrustCheck } from "./trust/wrapper.js";
 import { createTrustStore } from "./trust/store.js";
@@ -539,6 +539,71 @@ describe("Scheduler", () => {
     expect(onMessage.mock.calls.filter(([msg]) => msg.workId === workId)).toHaveLength(1);
     store.close();
     commands.close();
+    scheduler.stop();
+    workStore.close();
+  });
+
+  it.each(["none", "unknown", "command"] as const)("releases only proven read-only failures with no unresolved activity (%s)", async (blocker) => {
+    const config = { ...makeConfig(), data_dir: tempDir };
+    const workStore = createWorkStore(tempDir);
+    const commands = createCommandStore(tempDir);
+    const onMessage = vi.fn().mockResolvedValue(true);
+    const id = addDueProjection(config, { summary: "Calendar", resolved_when: dueWhen(), resolution: "exact", recurrence: "0 8 * * *" });
+    const scheduler = createScheduler(config, onMessage, workStore);
+    scheduler.start();
+    await runExactCallback();
+    const store = createProjectionStore("12345", tempDir);
+    const workId = store.getById(id)!.delivery_work_id!;
+    workStore.claim([workId]);
+    if (blocker === "command") {
+      const command = commands.accept(workStore.get(workId)!.message, "call", { command: "true", cwd: tempDir, timeoutSeconds: 60 }, 1);
+      commands.finish(command.id, "complete", 0);
+    } else if (blocker === "unknown") {
+      workStore.recordDelivery([workId], "unknown");
+    }
+    workStore.finish([workId], "failed", "Provider unavailable");
+    workStore.recordReadOnlyFailure([workId], ["canonical-entry"]);
+    await runExactCallback();
+    if (blocker === "none") {
+      expect(store.getById(id)?.delivery_work_id).not.toBe(workId);
+      expect(store.getById(id)!.resolved_when! > dueWhen()).toBe(true);
+      expect(onMessage.mock.calls.some(([msg]) => msg.raw.type === "recovery_notice")).toBe(false);
+      expect(onMessage.mock.calls.some(([msg]) => msg.raw.type === "work_recovery")).toBe(false);
+    } else {
+      expect(store.getById(id)?.delivery_work_id).toBe(workId);
+    }
+    expect(workStore.get(workId)?.execution).toBe("failed");
+    expect(onMessage.mock.calls.filter(([msg]) => msg.workId === workId)).toHaveLength(1);
+    store.close();
+    commands.close();
+    scheduler.stop();
+    workStore.close();
+  });
+
+  it("publishes one durable plain-text notice when automatic review attempts are exhausted", async () => {
+    const config = { ...makeConfig(), data_dir: tempDir };
+    const workStore = createWorkStore(tempDir);
+    const onMessage = vi.fn().mockResolvedValue(true);
+    const id = addDueProjection(config, { summary: "Paused check", resolved_when: dueWhen(), resolution: "exact", recurrence: "0 8 * * *" });
+    const scheduler = createScheduler(config, onMessage, workStore);
+    scheduler.start();
+    await runExactCallback();
+    const store = createProjectionStore("12345", tempDir);
+    const workId = store.getById(id)!.delivery_work_id!;
+    workStore.claim([workId]);
+    workStore.finish([workId], "interrupted");
+    for (const attempt of [1, 2, 3]) {
+      const review = createWorkRecoveryEvent(workStore.get(workId)!, "Paused check", attempt);
+      workStore.accept(review);
+      workStore.claim([review.workId!]);
+      workStore.finish([review.workId!], "failed");
+    }
+    await runExactCallback();
+    await runExactCallback();
+    expect(onMessage.mock.calls.filter(([msg]) => msg.raw.type === "recovery_notice")).toHaveLength(1);
+    expect(store.getById(id)?.delivery_work_id).toBe(workId);
+    expect(onMessage.mock.calls.filter(([msg]) => msg.workId === workId)).toHaveLength(1);
+    store.close();
     scheduler.stop();
     workStore.close();
   });

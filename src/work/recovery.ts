@@ -3,6 +3,7 @@ import { createWorkStore } from "./store.js";
 import { createCommandStore, sameCommandOwner } from "./commands.js";
 import { createProjectionStore } from "../projection/store.js";
 import type { IncomingMessage } from "../channels/types.js";
+import { getWorkRecoveryReviews, MAX_WORK_RECOVERY_ATTEMPTS } from "./recovery-event.js";
 
 /** Read the receipt rather than treating a pending projection as a healthy schedule. */
 export function inspectWorkRecovery(dataDir: string, workId: string) {
@@ -12,6 +13,7 @@ export function inspectWorkRecovery(dataDir: string, workId: string) {
     const receipt = work.get(workId);
     const recovery = commands.recoveryState(workId, work);
     const reconciled = commands.isReconciled(workId, work);
+    const reviews = getWorkRecoveryReviews(work, workId);
     let state = "paused";
     if (!receipt) {
       state = "missing_receipt";
@@ -22,7 +24,10 @@ export function inspectWorkRecovery(dataDir: string, workId: string) {
       state = "awaiting_settlement";
     }
     return { work_id: workId, state, execution: receipt?.execution, delivery: receipt?.delivery,
-      error: receipt?.error, created_at: receipt?.createdAt, updated_at: receipt?.updatedAt, reconciled, ...recovery };
+      error: receipt?.error, created_at: receipt?.createdAt, updated_at: receipt?.updatedAt, reconciled,
+      read_only_failure: work.hasReadOnlyFailure(workId),
+      automatic_reviews: reviews.map((review) => ({ id: review.id, execution: review.execution, delivery: review.delivery, updated_at: review.updatedAt })),
+      automatic_reviews_exhausted: reviews.length >= MAX_WORK_RECOVERY_ATTEMPTS, ...recovery };
   } finally {
     commands.close();
     work.close();
@@ -82,7 +87,7 @@ export function commandReviewNotice(dataDir: string, target: IncomingMessage): s
       if (projection.status !== "pending" || !projection.recurrence || !workId || !command.parentWorkIds.includes(workId)) {
         return false;
       }
-      const state = commands.recoveryState(workId, work);
+      const state = commands.recoveryState(workId, work, target.workId);
       return !commands.isReconciled(workId, work)
         && !(state.review?.id === target.workId && state.blockers.length === 0);
     });

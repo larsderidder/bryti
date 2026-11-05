@@ -180,6 +180,20 @@ describe("work recovery", () => {
     }
   });
 
+  it("skips a queued retry if an earlier review has already reconciled the occurrence", () => {
+    const { original, review } = scheduledRecovery();
+    const commands = createCommandStore(dir);
+    try {
+      commands.reconcile(original.id, review.message, "Read-only outcome established", work);
+      work.finish([review.id], "completed");
+      const retry = work.accept(createWorkRecoveryEvent(original, "Calendar", 2)).record;
+      work.claim([retry.id]);
+      expect(isWorkRecoveryCurrent(dir, retry.message, work)).toBe(false);
+    } finally {
+      commands.close();
+    }
+  });
+
   it.each(["cancelled", "rearmed"])("rejects a queued recovery after its projection is %s", (change) => {
     const { id, original, review } = scheduledRecovery();
     const projections = createProjectionStore("u", dir);
@@ -221,6 +235,30 @@ describe("work recovery", () => {
       expect(commands.isReconciled(original.id, work)).toBe(false);
     } finally {
       commands.close();
+    }
+  });
+
+  it.each(["active", "unknown_delivery", "unknown_effect"])("retains blockers from earlier retry reviews (%s)", (blocker) => {
+    const { original, review } = scheduledRecovery();
+    work.finish([review.id], "failed");
+    const earlier = work.accept(createWorkRecoveryEvent(original, "Calendar", 2)).record;
+    work.claim([earlier.id]);
+    const effects = new EffectStore(dir);
+    const commands = createCommandStore(dir);
+    try {
+      if (blocker === "unknown_effect") {
+        effects.accept(earlier.message, "write", "file_write", { path: "output" }, "implementation");
+        work.finish([earlier.id], "failed");
+      } else if (blocker === "unknown_delivery") {
+        work.recordResponse([earlier.id], "unknown");
+      }
+      const current = work.accept(createWorkRecoveryEvent(original, "Calendar", 3)).record;
+      work.claim([current.id]);
+      expect(() => commands.reconcile(original.id, current.message, "Checked original outcome", work)).toThrow();
+      expect(commands.isReconciled(original.id, work)).toBe(false);
+    } finally {
+      commands.close();
+      effects.close();
     }
   });
 

@@ -83,6 +83,20 @@ describe("durable work receipts", () => {
     expect(store.get(id)?.execution).toBe("interrupted");
   });
 
+  it("retains read-only failure evidence without rewriting the original outcome", () => {
+    const { id } = store.accept(message).record;
+    store.claim([id]);
+    expect(() => store.recordReadOnlyFailure([id], ["entry-1"])).toThrow(/failed|interrupted/i);
+    store.finish([id], "interrupted", "Provider timed out");
+    store.recordReadOnlyFailure([id], ["entry-1"]);
+    store.close();
+    store = createWorkStore(dir);
+    expect(store.hasReadOnlyFailure(id)).toBe(true);
+    expect(store.get(id)).toMatchObject({ execution: "interrupted", error: "Provider timed out" });
+    expect(store.hasReadOnlyFailure("legacy")).toBe(false);
+    expect(() => store.recordReadOnlyFailure([id], [])).toThrow(/evidence/i);
+  });
+
   it("does not persist raw platform objects or untrusted receipt aliases", () => {
     const record = store.accept({ ...message, raw: { type: "message", private: "platform-data" }, workIds: ["other"] }).record;
     expect(record.message.raw).toBeNull();

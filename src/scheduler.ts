@@ -23,7 +23,7 @@ import { createDeviceStore } from "./web-e2ee/device-store.js";
 import { createWorkStore, type WorkRecord, type WorkStore } from "./work/store.js";
 import { scheduledWorkId, OBSOLETE_PROJECTION_WORK } from "./projection/occurrence.js";
 import { createCommandStore } from "./work/commands.js";
-import { createWorkRecoveryEvent, getWorkRecoveryReviews } from "./work/recovery-event.js";
+import { createWorkRecoveryEvent, createWorkRecoveryNotice, getWorkRecoveryReviews, nextWorkRecoveryAttempt, MAX_WORK_RECOVERY_ATTEMPTS } from "./work/recovery-event.js";
 export { scheduledWorkId } from "./projection/occurrence.js";
 
 // ---------------------------------------------------------------------------
@@ -486,16 +486,31 @@ export function createScheduler(
           return !review || ["queued", "running"].includes(review.execution);
         });
         const needsReview = recovery.commands.length > 0 && !reconciled;
+        const reviews = getWorkRecoveryReviews(workStore, workId);
+        if (receipt && projection.status === "pending" && projection.recurrence &&
+            ["failed", "interrupted"].includes(receipt.execution) && workStore.hasReadOnlyFailure(workId) &&
+            recovery.blockers.length === 0 && recovery.commands.length === 0 && recovery.effects.length === 0 &&
+            recovery.workers.length === 0 && reviews.length === 0 && isTargetAllowed(config, receipt.message)) {
+          settleProjection(store, projection, timezone, true);
+          continue;
+        }
         if (!reconciled && (needsReview || recovery.blockers.length > 0 || !shouldSettleReceipt(receipt))) {
           if (!receipt || waitingForCommands || waitingForReview || !["completed", "failed", "interrupted"].includes(receipt.execution)) {
             continue;
           }
-          // Acceptance consumes the single review attempt, even if it later fails or is interrupted.
-          // Old recovery_notice receipts do not consume this agent-facing attempt.
-          if (projection.status === "pending" && getWorkRecoveryReviews(workStore, workId).length === 0 && isTargetAllowed(config, receipt.message)) {
-            const event = createWorkRecoveryEvent(receipt, projection.summary);
-            if (await onMessage(event) !== false) {
-              workStore.accept(event);
+          if (projection.status === "pending" && isTargetAllowed(config, receipt.message)) {
+            const attempt = nextWorkRecoveryAttempt(workStore, workId);
+            if (attempt !== null) {
+              const event = createWorkRecoveryEvent(receipt, projection.summary, attempt);
+              if (await onMessage(event) !== false) {
+                workStore.accept(event);
+              }
+            } else if (reviews.length >= MAX_WORK_RECOVERY_ATTEMPTS &&
+                reviews.every((review) => !["queued", "running"].includes(review.execution))) {
+              const notice = createWorkRecoveryNotice(receipt, projection.summary);
+              if (!workStore.get(notice.workId!) && await onMessage(notice) !== false) {
+                workStore.accept(notice);
+              }
             }
           }
           continue;

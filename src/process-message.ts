@@ -40,6 +40,7 @@ import type { AudioAttachment, IncomingMessage, ChannelBridge } from "./channels
 import { isInternalMessage } from "./channels/types.js";
 import { importTopicDeliveries } from "./channels/topic-delivery.js";
 import type { VoiceService } from "./voice.js";
+import { readOnlyTurnEvidence } from "./work/read-only.js";
 import {
   createTrustStore,
   checkPendingApproval,
@@ -845,7 +846,7 @@ export async function processMessage(
   await getBridge(state, msg.platform).sendTyping(msg.channelId, sendOptsFor(msg));
 
   let releaseSessionTurn: (() => void) | undefined;
-  let usageWindow: { session: AgentSession; entryOffset?: number; startedAt: number } | undefined;
+  let usageWindow: { session: AgentSession; readOnlyToolNames?: ReadonlySet<string>; entryOffset?: number; startedAt: number } | undefined;
   try {
     const userSession = await getOrLoadSession(state, msg);
     releaseSessionTurn = await acquireSessionTurn(userSession);
@@ -915,7 +916,8 @@ export async function processMessage(
     }
     const promptStart = Date.now();
     const deferredApprovals = new Set<string>();
-    usageWindow = { session, entryOffset: session.sessionManager?.getEntries().length, startedAt: promptStart };
+    usageWindow = { session, readOnlyToolNames: userSession.readOnlyToolNames,
+      entryOffset: session.sessionManager?.getEntries().length, startedAt: promptStart };
     const promptResult = await runPromptWithActivityWatchdog({
       sessionKey,
       stopOnApprovalExpiry: isInternalMessage(msg),
@@ -1136,6 +1138,20 @@ export async function processMessage(
     );
   } finally {
     if (usageWindow) {
+      try {
+        const { session, entryOffset } = usageWindow;
+        const work = state.workStore;
+        const ids = msg.workIds ?? [];
+        if (work && usageWindow.readOnlyToolNames && entryOffset !== undefined && !session.isStreaming &&
+            ids.length > 0 && ids.every((id) => ["failed", "interrupted"].includes(work.get(id)?.execution ?? ""))) {
+          const evidence = readOnlyTurnEvidence(session.sessionManager.getEntries().slice(entryOffset), usageWindow.readOnlyToolNames);
+          if (evidence) {
+            work.recordReadOnlyFailure(ids, evidence);
+          }
+        }
+      } catch {
+        console.warn("[work] Unable to record read-only failure evidence; future scheduling still requires review");
+      }
       try {
         const { session, entryOffset, startedAt } = usageWindow;
         const last = toAssistantMessage(session.messages.filter((message) => message.role === "assistant").pop());
