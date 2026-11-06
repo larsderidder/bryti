@@ -14,7 +14,7 @@ export interface PromptActivity {
 
 export interface PromptTimeout {
   status: "timeout";
-  reason: "inactivity" | "tool_deadline" | "prompt_deadline" | "approval_expired";
+  reason: "inactivity" | "tool_deadline" | "prompt_deadline" | "approval_expired" | "compaction_deadline";
   toolName?: string;
   elapsedMs: number;
 }
@@ -27,6 +27,7 @@ type PromptWatchdogParams<T> = {
   sessionKey: string;
   timeoutMs?: number;
   maxDurationMs?: number;
+  compactionTimeoutMs?: number;
   toolGraceMs?: number;
   stopOnApprovalExpiry?: boolean;
   subscribe: (listener: (event?: PromptActivity) => void) => () => void;
@@ -48,6 +49,7 @@ export async function runPromptWithActivityWatchdog<T>(
   const startedAt = Date.now();
   const hardDeadline = startedAt + maxDurationMs;
   let lastActivityAt = startedAt;
+  let compactionDeadline: number | undefined;
   const tools = new Map<string, { name: string; startedAt: number; deadline: number }>();
   const approvalWaits = new Set<string>();
   let approvalStartedAt: number | undefined;
@@ -99,6 +101,11 @@ export async function runPromptWithActivityWatchdog<T>(
     let toolName: string | undefined;
     if (approvalWaits.size > 0) {
       // Human response time is not a hung model or tool. The hard turn limit remains.
+    } else if (compactionDeadline !== undefined) {
+      if (compactionDeadline < deadline) {
+        deadline = compactionDeadline;
+        reason = "compaction_deadline";
+      }
     } else if (tools.size > 0) {
       for (const tool of tools.values()) {
         if (tool.deadline < deadline) {
@@ -123,6 +130,11 @@ export async function runPromptWithActivityWatchdog<T>(
       return;
     }
     lastActivityAt = Date.now();
+    if (event?.type === "compaction_start" && compactionDeadline === undefined) {
+      compactionDeadline = Date.now() + (params.compactionTimeoutMs ?? 15 * 60 * 1000);
+    } else if (event?.type === "compaction_end") {
+      compactionDeadline = undefined;
+    }
     if (event?.type === "approval_wait_start" && event.toolCallId) {
       if (approvalWaits.size === 0) {
         approvalStartedAt = Date.now();
@@ -173,6 +185,9 @@ export async function runPromptWithActivityWatchdog<T>(
 
 /** Report the timeout without exposing command arguments or claiming child processes stopped. */
 export function describePromptTimeout(timeout: PromptTimeout): string {
+  if (timeout.reason === "compaction_deadline") {
+    return "Conversation compaction exceeded its execution deadline before the task could continue.";
+  }
   if (timeout.reason === "approval_expired") {
     return `Required approval for ${timeout.toolName ?? "an action"} expired. That action was not run; the automation stopped rather than starting another approval wait.`;
   }

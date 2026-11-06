@@ -68,7 +68,9 @@ import {
   describePromptTimeout,
   type PromptActivity,
 } from "./prompt-lifecycle.js";
-import { acquireSessionTurn } from "./compaction/proactive.js";
+import { acquireSessionTurn, isSessionTurnReserved, isProactiveCompactionRunning } from "./compaction/proactive.js";
+import { MAX_SESSION_FILE_BYTES, trimSessionCache } from "./compaction/session-loading.js";
+import { pendingContextWarning } from "./compaction/context-state.js";
 import type { WorkStore, CompletedResponse } from "./work/store.js";
 import { isDeliveryError } from "./channels/delivery.js";
 import { isCurrentProjectionWork, OBSOLETE_PROJECTION_WORK } from "./projection/occurrence.js";
@@ -376,7 +378,7 @@ async function sendAssistantResponse(state: AppState, msg: IncomingMessage, text
 }
 
 /** Final output is durable before optional audit writes or voice synthesis. */
-async function deliverGeneratedResponse(state: AppState, msg: IncomingMessage, text: string, session: AgentSession, entryOffset?: number): Promise<void> {
+async function deliverGeneratedResponse(state: AppState, msg: IncomingMessage, text: string, session: AgentSession, entryOffset?: number, contextWarningId?: string): Promise<void> {
   if (state.workStore) {
     const notice = commandReviewNotice(state.config.data_dir, msg);
     if (notice) {
@@ -390,6 +392,9 @@ async function deliverGeneratedResponse(state: AppState, msg: IncomingMessage, t
       sessionFile: session.sessionFile,
       entryIds: entries.filter((entry) => entry.type === "message" && entry.message.role === "assistant").map((entry) => entry.id),
     });
+    if (contextWarningId) {
+      session.sessionManager.appendCustomEntry("bryti-context-disclosure", { id: contextWarningId });
+    }
   }
   try {
     await state.historyManager.append({ role: "assistant", content: text });
@@ -397,6 +402,9 @@ async function deliverGeneratedResponse(state: AppState, msg: IncomingMessage, t
     console.warn("[history] Assistant audit append failed; completed response retained");
   }
   await sendAssistantResponse(state, msg, text, undefined, staged);
+  if (contextWarningId && !staged) {
+    session.sessionManager.appendCustomEntry("bryti-context-disclosure", { id: contextWarningId });
+  }
 }
 
 /** Recovery consumes committed answers, never another model turn or caller-owned media. */
@@ -478,15 +486,29 @@ export async function triggerRestart(
  */
 export async function getOrLoadSession(
   state: AppState,
-  msg: IncomingMessage,
+  incoming: IncomingMessage,
+  onLoaded?: (session: UserSession) => void,
 ): Promise<UserSession> {
+  // Persistent callbacks need routing and authorization text, not attachment buffers.
+  const msg: IncomingMessage = { ...incoming, images: undefined, audio: undefined, documents: undefined };
   const { userId, channelId, platform } = msg;
   const threadId = msg.threadId ?? DEFAULT_THREAD_ID;
   const sessionKey = getSessionKey(userId, threadId);
   state.deliveryTargets ??= new Map();
   state.deliveryTargets.set(sessionKey, msg);
+  await trimSessionCache(state.sessions, sessionKey, { isBusy: () => state.workerLifecycle?.hasPendingWork() ?? false });
   const existing = state.sessions.get(sessionKey);
-  if (existing) return existing;
+  if (existing) {
+    const file = existing.session.sessionFile;
+    if (!file || !fs.existsSync(file) || fs.statSync(file).size <= MAX_SESSION_FILE_BYTES ||
+        existing.session.isStreaming || existing.session.isCompacting || isSessionTurnReserved(existing) ||
+        isProactiveCompactionRunning(existing) || state.workerLifecycle?.hasPendingWork()) {
+      onLoaded?.(existing);
+      return existing;
+    }
+    state.sessions.delete(sessionKey);
+    await existing.dispose();
+  }
 
   const modelInfra = await createModelInfra(state.config);
 
@@ -663,30 +685,27 @@ export async function getOrLoadSession(
     state.recoveredSessions.add(sessionKey);
   }
 
-  userSession.onCompactionComplete = () => {
-    const target = state.deliveryTargets?.get(sessionKey) ?? msg;
-    const compactionMsg: IncomingMessage = {
-      channelId: target.channelId,
-      userId: target.userId,
-      platform: target.platform,
-      threadId: target.threadId,
-      channelThreadId: target.channelThreadId,
-      text:
-        "[System: context was automatically compacted. If you were in the middle of a task " +
-        "for the user, continue where you left off. If not, say nothing (NOOP).]",
-      raw: { type: "compaction_resume" },
-    };
-    state.enqueue?.(compactionMsg);
-  };
+  // Compaction is maintenance, not permission to resume an earlier task.
+  // The SDK continues active turns itself; idle maintenance must not enqueue a model turn.
 
   // Wrap dispose so this module closes the store it owns.
   const originalDispose = userSession.dispose.bind(userSession);
+  let disposal: Promise<void> | undefined;
   userSession.dispose = () => {
-    originalDispose();
-    projectionStore.close();
+    if (!disposal) {
+      if (state.sessions.get(sessionKey) === userSession) {
+        state.sessions.delete(sessionKey);
+      }
+      disposal = (async () => {
+        await originalDispose();
+        projectionStore.close();
+      })();
+    }
+    return disposal;
   };
 
   state.sessions.set(sessionKey, userSession);
+  onLoaded?.(userSession);
   return userSession;
 }
 
@@ -848,8 +867,12 @@ export async function processMessage(
   let releaseSessionTurn: (() => void) | undefined;
   let usageWindow: { session: AgentSession; readOnlyToolNames?: ReadonlySet<string>; entryOffset?: number; startedAt: number } | undefined;
   try {
-    const userSession = await getOrLoadSession(state, msg);
-    releaseSessionTurn = await acquireSessionTurn(userSession);
+    let turnReservation: Promise<() => void> | undefined;
+    const userSession = await getOrLoadSession(state, msg, (loaded) => {
+      // Reserve synchronously, before cache eviction can observe this session as idle.
+      turnReservation = acquireSessionTurn(loaded);
+    });
+    releaseSessionTurn = await turnReservation!;
     const sessionKey = getSessionKey(msg.userId, msg.threadId ?? DEFAULT_THREAD_ID);
     if (state.recoveredSessions.has(sessionKey)) {
       state.recoveredSessions.delete(sessionKey);
@@ -967,15 +990,12 @@ export async function processMessage(
       state.workStore?.finish(msg.workIds ?? [], "interrupted", `${describePromptTimeout(promptResult)} Not replayed.`);
       console.log(`[agent] Evicting session for ${sessionKey} after timeout abort`);
       try {
-        let notice = `${describePromptTimeout(promptResult)} I stopped the supervising turn. ${commandRecoveryNotice(state.config.data_dir, msg.workIds ?? [])}`;
-        if ((msg.raw as { type?: string } | null)?.type === "work_recovery") {
-          notice = "I couldn't finish checking the paused task. The schedule remains paused; I haven't rerun the task.";
+        if ((msg.raw as { type?: string } | null)?.type !== "work_recovery") {
+          const notice = `${describePromptTimeout(promptResult)} I stopped the supervising turn. ${commandRecoveryNotice(state.config.data_dir, msg.workIds ?? [])}`;
+          await getBridge(state, msg.platform).sendMessage(
+            msg.channelId, notice, { channelThreadId: msg.channelThreadId },
+          );
         }
-        await getBridge(state, msg.platform).sendMessage(
-          msg.channelId,
-          notice,
-          { channelThreadId: msg.channelThreadId },
-        );
       } catch {
         // Best-effort — don't let a send failure mask the eviction
       }
@@ -1053,6 +1073,13 @@ export async function processMessage(
     // silently swallowed — the user never sees it.
     // Filter out any NOOP entries — only suppress if ALL entries are NOOP.
     const visibleTexts = allResponseTexts.filter((t) => t !== SILENT_REPLY_TOKEN);
+    let contextWarning: ReturnType<typeof pendingContextWarning>;
+    if (allResponseTexts.length > 0 && typeof session.sessionManager?.getBranch === "function") {
+      contextWarning = pendingContextWarning(session.sessionManager);
+      if (contextWarning && allResponseTexts.length > 0) {
+        visibleTexts.push(contextWarning.text);
+      }
+    }
     if (deferredApprovals.size > 0) {
       // A model's NOOP or success wording cannot hide calls that never executed.
       visibleTexts.push(`Not completed: ${[...deferredApprovals].join(", ")}. These actions were not run because permission or safety evaluation was required. Other authorized work can continue.`);
@@ -1062,7 +1089,7 @@ export async function processMessage(
       console.log(`[agent] Silent reply from ${msg.userId}, suppressing message`);
     } else if (visibleTexts.length > 0) {
       const combinedText = visibleTexts.join("\n\n");
-      await deliverGeneratedResponse(state, msg, combinedText, session, usageWindow.entryOffset);
+      await deliverGeneratedResponse(state, msg, combinedText, session, usageWindow.entryOffset, contextWarning?.id);
     } else if (!isSchedulerMessage) {
       console.log(
         `[agent] No text response from ${msg.userId} after user message, re-prompting`,
@@ -1128,14 +1155,12 @@ export async function processMessage(
     state.workStore?.finish(ids, "failed", "Message processing failed");
     const err = error as Error;
     console.error("Error processing message:", err);
-    let notice = "Something went wrong processing your message. Please try again.";
-    if ((msg.raw as { type?: string } | null)?.type === "work_recovery") {
-      notice = "I couldn't finish checking the paused task. The schedule remains paused; I haven't rerun the task.";
+    if ((msg.raw as { type?: string } | null)?.type !== "work_recovery") {
+      await getBridge(state, msg.platform).sendMessage(
+        msg.channelId, "Something went wrong processing your message. Please try again.",
+        { channelThreadId: msg.channelThreadId },
+      );
     }
-    await getBridge(state, msg.platform).sendMessage(
-      msg.channelId,
-      notice,
-    );
   } finally {
     if (usageWindow) {
       try {

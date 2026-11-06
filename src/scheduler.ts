@@ -506,7 +506,7 @@ export function createScheduler(
                 workStore.accept(event);
               }
             } else if (reviews.length >= MAX_WORK_RECOVERY_ATTEMPTS &&
-                reviews.every((review) => !["queued", "running"].includes(review.execution))) {
+                reviews.every((review) => ["failed", "interrupted"].includes(review.execution))) {
               const notice = createWorkRecoveryNotice(receipt, projection.summary);
               if (!workStore.get(notice.workId!) && await onMessage(notice) !== false) {
                 workStore.accept(notice);

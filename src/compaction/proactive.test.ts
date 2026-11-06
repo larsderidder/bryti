@@ -42,6 +42,17 @@ describe("tryCompact", () => {
     vi.restoreAllMocks();
   });
 
+  it("does not compact unchanged history again on the next idle check", async () => {
+    const compact = vi.fn().mockResolvedValue(undefined);
+    const userSession = makeUserSession({ compact });
+    await tryCompact(userSession, "idle");
+    await tryCompact(userSession, "idle");
+    expect(compact).toHaveBeenCalledOnce();
+    userSession.session.messages.push({ role: "user", content: "new work", timestamp: Date.now() });
+    await tryCompact(userSession, "idle");
+    expect(compact).toHaveBeenCalledTimes(2);
+  });
+
   it("skips proactive compaction while the session is streaming", async () => {
     const compact = vi.fn().mockResolvedValue(undefined);
     const userSession = makeUserSession({ compact, isStreaming: true });

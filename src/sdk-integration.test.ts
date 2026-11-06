@@ -11,6 +11,7 @@ import {
 import { createTrustStore, registerToolCapabilities, wrapToolWithTrustCheck } from "./trust/index.js";
 import type { Config } from "./config.js";
 import { createTopicDeliveryTracker, importTopicDeliveries } from "./channels/topic-delivery.js";
+import { createBoundedCompactionExtension } from "./compaction/bounded.js";
 
 /** Real SDK sessions with scripted provider output. No network or model inference. */
 describe("Pi SDK integration contracts", () => {
@@ -50,6 +51,7 @@ describe("Pi SDK integration contracts", () => {
       cwd: directory, agentDir, settingsManager: settings,
       noExtensions: true, noSkills: true, noPromptTemplates: true,
       noThemes: true, noContextFiles: true, systemPrompt: "Offline SDK contract test.",
+      extensionFactories: [{ name: "bryti-bounded-compaction", factory: createBoundedCompactionExtension() }],
     });
     await loader.reload();
     const { session } = await createAgentSession({
@@ -93,6 +95,58 @@ describe("Pi SDK integration contracts", () => {
     await reopened.session.prompt("Continue");
     expect(reopened.session.getLastAssistantText()).toBe("Still here");
     expect(tool.execute).toHaveBeenCalledOnce();
+  });
+
+  it("keeps manual compaction focus instructions in the bounded summarizer", async () => {
+    const manager = SessionManager.create(directory, path.join(directory, "sessions"));
+    manager.appendMessage({ role: "user", content: "Previous investigation ".repeat(10000), timestamp: 1 });
+    manager.appendMessage(fauxAssistantMessage("Previous answer"));
+    manager.appendMessage({ role: "user", content: "Latest question ".repeat(100), timestamp: 2 });
+    const { session, faux } = await setup([], manager);
+    await session.setModel({ ...faux.getModel(), contextWindow: 4096 });
+    faux.setResponses([(context) => {
+      expect(JSON.stringify(context)).toContain("Keep the publication restriction");
+      return fauxAssistantMessage("Approval remains required before publication.");
+    }]);
+    const result = await session.compact("Keep the publication restriction");
+    expect(result.summary).toBe("Approval remains required before publication.");
+    expect(faux.state.callCount).toBe(1);
+  });
+
+  it("persists a degraded automatic boundary and makes progress after reopen without retrying the summary", async () => {
+    const manager = SessionManager.create(directory, path.join(directory, "sessions"));
+    for (let index = 0; index < 30; index++) {
+      manager.appendMessage({ role: "user", content: `Historical turn ${index}: ` + "context ".repeat(300), timestamp: index + 1 });
+    }
+    const originalEntries = manager.getEntries().map((entry) => entry.id);
+    const first = await setup([], manager);
+    await first.session.setModel({ ...first.faux.getModel(), contextWindow: 4096 });
+    first.session.setAutoCompactionEnabled(true);
+    first.faux.setResponses([
+      fauxAssistantMessage("", { stopReason: "error", errorMessage: "maximum context length exceeded" }),
+      fauxAssistantMessage("", { stopReason: "error", errorMessage: "Summary unavailable" }),
+      fauxAssistantMessage("The new request completed"),
+    ]);
+    await first.session.prompt("A new inspection only, do not repeat older actions");
+    expect(first.session.getLastAssistantText()).toBe("The new request completed");
+    expect(first.faux.state.callCount).toBe(3);
+    expect(manager.getEntries().filter((entry) => entry.type === "compaction")).toMatchObject([
+      { details: { bryti: { degraded: true, reason: "summary_failed" } } },
+    ]);
+    expect(manager.getEntries().slice(0, originalEntries.length).map((entry) => entry.id)).toEqual(originalEntries);
+    const file = first.session.sessionFile!;
+    first.session.dispose();
+    sessions.splice(sessions.indexOf(first.session), 1);
+    const reopened = await setup([], SessionManager.open(file));
+    reopened.faux.setResponses([(context) => {
+      expect(JSON.stringify(context.messages)).toContain("without a new summary");
+      expect(context.messages.at(-1)).toMatchObject({ role: "user" });
+      expect(JSON.stringify(context.messages.at(-1))).toContain("Another fresh request");
+      return fauxAssistantMessage("Still usable");
+    }]);
+    await reopened.session.prompt("Another fresh request");
+    expect(reopened.faux.state.callCount).toBe(1);
+    expect(reopened.session.getLastAssistantText()).toBe("Still usable");
   });
 
   it("carries a confirmed cross-topic send into the destination's next provider context", async () => {

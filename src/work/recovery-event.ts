@@ -47,14 +47,14 @@ export function getWorkRecoveryReviews(work: WorkStore, workId: string): WorkRec
   return reviews;
 }
 
-/** Retry only settled reviews, with ten-minute then one-hour backoff and no daily reset. */
+/** Retry failed reviews only, with ten-minute then one-hour backoff and no daily reset. */
 export function nextWorkRecoveryAttempt(work: WorkStore, workId: string, now = Date.now()): number | null {
   const reviews = getWorkRecoveryReviews(work, workId);
   if (reviews.length === 0) {
     return 1;
   }
   if (reviews.length >= MAX_WORK_RECOVERY_ATTEMPTS || reviews.some((review) =>
-    ["queued", "running"].includes(review.execution) || ["pending", "unknown"].includes(review.delivery))) {
+    ["queued", "running", "completed"].includes(review.execution) || ["pending", "unknown"].includes(review.delivery))) {
     return null;
   }
   const latest = Math.max(...reviews.map((review) => Date.parse(review.updatedAt)));

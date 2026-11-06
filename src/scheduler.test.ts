@@ -580,7 +580,7 @@ describe("Scheduler", () => {
     workStore.close();
   });
 
-  it("publishes one durable plain-text notice when automatic review attempts are exhausted", async () => {
+  it.each([{ outcome: "failed", notices: 1 }, { outcome: "completed", notices: 0 }] as const)("limits final notices to failed automatic reviews ($outcome)", async ({ outcome, notices }) => {
     const config = { ...makeConfig(), data_dir: tempDir };
     const workStore = createWorkStore(tempDir);
     const onMessage = vi.fn().mockResolvedValue(true);
@@ -596,11 +596,11 @@ describe("Scheduler", () => {
       const review = createWorkRecoveryEvent(workStore.get(workId)!, "Paused check", attempt);
       workStore.accept(review);
       workStore.claim([review.workId!]);
-      workStore.finish([review.workId!], "failed");
+      workStore.finish([review.workId!], outcome);
     }
     await runExactCallback();
     await runExactCallback();
-    expect(onMessage.mock.calls.filter(([msg]) => msg.raw.type === "recovery_notice")).toHaveLength(1);
+    expect(onMessage.mock.calls.filter(([msg]) => msg.raw.type === "recovery_notice")).toHaveLength(notices);
     expect(store.getById(id)?.delivery_work_id).toBe(workId);
     expect(onMessage.mock.calls.filter(([msg]) => msg.workId === workId)).toHaveLength(1);
     store.close();

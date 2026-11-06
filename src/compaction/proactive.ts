@@ -31,6 +31,18 @@ type SessionLifecycleState = {
 };
 
 const sessionLifecycle = new WeakMap<UserSession, SessionLifecycleState>();
+const lastCompactedHistory = new WeakMap<UserSession, unknown>();
+
+/** Ignore bookkeeping and compaction itself when deciding whether maintenance has new work. */
+function historyIdentity(userSession: UserSession): unknown {
+  const manager = userSession.session.sessionManager;
+  if (manager) {
+    return manager.getBranch().findLast((entry) =>
+      entry.type === "message" || entry.type === "custom_message" || entry.type === "branch_summary",
+    )?.id;
+  }
+  return userSession.session.messages.at(-1);
+}
 
 function getSessionLifecycle(userSession: UserSession): SessionLifecycleState {
   let state = sessionLifecycle.get(userSession);
@@ -149,6 +161,11 @@ export async function tryCompact(
     return;
   }
 
+  const history = historyIdentity(userSession);
+  if (lastCompactedHistory.has(userSession) && lastCompactedHistory.get(userSession) === history) {
+    return;
+  }
+
   let finishProactiveCompaction!: () => void;
   lifecycle.proactiveCompaction = new Promise<void>((resolve) => {
     finishProactiveCompaction = resolve;
@@ -188,6 +205,7 @@ export async function tryCompact(
 
     await session.compact(`${reasonHint} ${contextHint}`);
     recordCompactionSuccess(userId);
+    lastCompactedHistory.set(userSession, historyIdentity(userSession));
     console.log(`[compaction] proactive ${reason} done for user ${userId}`);
   } catch (err) {
     recordCompactionFailure(userId);

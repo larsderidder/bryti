@@ -141,6 +141,12 @@ export class WorkerLifecycle {
     return [...this.registries].reduce((count, registry) => count + registry.runningCount(), 0);
   }
 
+  /** Keep stores alive while accepted workers or completion bookkeeping still use them. */
+  hasPendingWork(): boolean {
+    return this.runs.size > 0 || [...this.registries].some((registry) => registry.list().some((entry) =>
+      entry.runActive || ["queued", "running", "stopping"].includes(entry.status)));
+  }
+
   register(registry: WorkerRegistry): void {
     this.registries.add(registry);
   }

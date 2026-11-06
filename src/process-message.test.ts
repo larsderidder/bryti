@@ -13,7 +13,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { AppState } from "./process-message.js";
-import { processMessage } from "./process-message.js";
+import { processMessage, getOrLoadSession } from "./process-message.js";
 import { SILENT_REPLY_TOKEN } from "./agent.js";
 import { createHistoryManager } from "./history.js";
 import { createCoreMemory } from "./memory/core-memory.js";
@@ -23,7 +23,7 @@ import { createTrustStore, setPendingApproval, checkPendingApproval } from "./tr
 import type { ChannelBridge, IncomingMessage } from "./channels/types.js";
 import type { UserSession } from "./agent.js";
 import type { Config } from "./config.js";
-import { tryCompact } from "./compaction/proactive.js";
+import { tryCompact, acquireSessionTurn, isSessionTurnReserved } from "./compaction/proactive.js";
 import { createWorkStore } from "./work/store.js";
 import { deliveryNotSent } from "./channels/delivery.js";
 import { createProjectionStore } from "./projection/store.js";
@@ -464,6 +464,34 @@ describe("processMessage pipeline", () => {
     expect(record.output_tokens).toBe(50);
   });
 
+  it("does not retain attachment payloads in cached session callbacks or routing state", async () => {
+    const session = makeUserSession("12345", []);
+    const state = makeState(config, session, tmpDir);
+    const message = { ...incomingMsg("Inspect this report"),
+      documents: [{ data: "PDF payload", mimeType: "application/pdf" as const }],
+      images: [{ data: "Image payload", mimeType: "image/png" }],
+    };
+    await getOrLoadSession(state, message);
+    const target = state.deliveryTargets?.get("12345");
+    expect(target?.text).toBe(message.text);
+    expect(target?.documents).toBeUndefined();
+    expect(target?.images).toBeUndefined();
+    expect(message.documents[0].data).toBe("PDF payload");
+  });
+
+  it("reserves a loaded session before exposing it to concurrent cache eviction", async () => {
+    const session = makeUserSession("12345", []);
+    const state = makeState(config, session, tmpDir);
+    let reservation: Promise<() => void> | undefined;
+    const loaded = await getOrLoadSession(state, incomingMsg("Inspect"), (candidate) => {
+      reservation = acquireSessionTurn(candidate);
+    });
+    expect(isSessionTurnReserved(loaded)).toBe(true);
+    const release = await reservation!;
+    release();
+    expect(isSessionTurnReserved(loaded)).toBe(false);
+  });
+
   it("accounts from canonical entries across compaction, nested usage, and multiple assistant responses", async () => {
     const userSession = makeUserSession("12345");
     const manager = SessionManager.inMemory(tmpDir);
@@ -487,6 +515,36 @@ describe("processMessage pipeline", () => {
     expect(summary.total_output_tokens).toBe(25);
     expect(summary.total_cost_usd).toBe(1.5);
     expect((state.bridges[0] as ReturnType<typeof makeBridge>).sent.some((message) => message.text.includes("Intermediate answer"))).toBe(true);
+  });
+
+  it("stages one context-loss disclosure with the completed answer and does not repeat it", async () => {
+    const userSession = makeUserSession("12345");
+    const manager = SessionManager.inMemory(tmpDir);
+    const old = manager.appendMessage({ role: "user", content: "Earlier history", timestamp: 1 });
+    manager.appendCompaction("Older context omitted", old, 200000, { bryti: { degraded: true } }, true);
+    Object.defineProperty(userSession.session, "sessionManager", { value: manager });
+    Object.defineProperty(userSession.session, "messages", { get: () => manager.buildSessionContext().messages });
+    vi.spyOn(userSession.session, "prompt").mockImplementation(async () => {
+      manager.appendMessage(fauxAssistantMessage("Fresh answer"));
+    });
+    const state = makeState(config, userSession, tmpDir);
+    const work = createWorkStore(tmpDir);
+    state.workStore = work;
+    try {
+      for (const text of ["First request", "Second request"]) {
+        const receipt = work.accept(incomingMsg(text)).record;
+        work.claim([receipt.id]);
+        await processMessage(state, receipt.message);
+        if (text === "First request") {
+          expect(work.getResponse(receipt.id)?.text.includes("older conversation context was omitted")).toBe(true);
+        }
+      }
+      const sent = (state.bridges[0] as ReturnType<typeof makeBridge>).sent;
+      expect(sent).toHaveLength(2);
+      expect(sent.filter((message) => message.text.includes("older conversation context was omitted"))).toHaveLength(1);
+    } finally {
+      work.close();
+    }
   });
 
   it.each([["read", false, true], ["read", true, false], ["bash", false, false], ["codemode", false, false]] as const)(
@@ -1149,8 +1207,7 @@ describe("processMessage pipeline", () => {
             expect(sent).toEqual([{ channelId: original.message.channelId, text: question }]);
           } else {
             expect(work.get(review.id)?.execution).toBe("failed");
-            expect(sent).toEqual([{ channelId: original.message.channelId,
-              text: "I couldn't finish checking the paused task. The schedule remains paused; I haven't rerun the task." }]);
+            expect(sent).toEqual([]);
           }
         }
       }

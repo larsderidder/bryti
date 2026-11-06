@@ -6,6 +6,43 @@ describe("runPromptWithActivityWatchdog", () => {
     vi.useRealTimers();
   });
 
+  it("gives compaction its own deadline instead of treating it as model silence", async () => {
+    vi.useFakeTimers();
+    let activity: (event?: PromptActivity) => void = () => {};
+    let complete!: () => void;
+    const abort = vi.fn().mockResolvedValue(undefined);
+    const pending = runPromptWithActivityWatchdog({
+      sessionKey: "compacting", timeoutMs: 1000, compactionTimeoutMs: 3000,
+      subscribe(listener) { activity = listener; return () => {}; }, abort,
+      operation: () => new Promise<void>((resolve) => { complete = resolve; }),
+    });
+    activity({ type: "compaction_start" });
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(abort).not.toHaveBeenCalled();
+    activity({ type: "compaction_end" });
+    complete();
+    await expect(pending).resolves.toMatchObject({ status: "completed" });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("bounds a compaction even if unrelated activity continues", async () => {
+    vi.useFakeTimers();
+    let activity: (event?: PromptActivity) => void = () => {};
+    const pending = runPromptWithActivityWatchdog({
+      sessionKey: "stuck-compaction", timeoutMs: 1000, compactionTimeoutMs: 2500,
+      subscribe(listener) { activity = listener; return () => {}; },
+      abort: vi.fn().mockResolvedValue(undefined), operation: () => new Promise(() => {}),
+    });
+    activity({ type: "compaction_start" });
+    for (let tick = 0; tick < 3; tick++) {
+      await vi.advanceTimersByTimeAsync(800);
+      activity({ type: "compaction_progress" });
+    }
+    await vi.advanceTimersByTimeAsync(100);
+    await expect(pending).resolves.toMatchObject({ reason: "compaction_deadline" });
+    expect(describePromptTimeout(await pending as any)).toContain("compaction");
+  });
+
   it("cleans up the inactivity timer and listener when the prompt rejects", async () => {
     vi.useFakeTimers();
     const listeners = new Set<() => void>();

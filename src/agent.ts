@@ -22,7 +22,6 @@ import {
   createCodemodeExtension,
   DefaultResourceLoader,
   ModelRegistry,
-  SessionManager,
   type AgentSession,
   type AgentSessionEvent,
 } from "@earendil-works/pi-coding-agent";
@@ -44,6 +43,9 @@ import { isSessionTurnReserved } from "./compaction/proactive.js";
 import { collectSessionUsage } from "./session-usage.js";
 import { createUsageTracker } from "./usage.js";
 import { resolveEffectResult } from "./work/effects.js";
+import { createBoundedCompactionExtension } from "./compaction/bounded.js";
+import { openBoundedSession } from "./compaction/session-loading.js";
+import { contextLoss } from "./compaction/context-state.js";
 
 // Re-export for backward compatibility with index.ts
 export { SILENT_REPLY_TOKEN };
@@ -66,8 +68,6 @@ export interface UserSession {
   lastUserMessageAt: number;
   /** Extension files that failed to load on startup. Empty if all loaded. */
   extensionErrors: Array<{ path: string; error: string }>;
-  /** Called after auto-compaction completes successfully. Set by index.ts. */
-  onCompactionComplete?: () => void;
   /**
    * The single ProjectionStore for this user. Shared with the tool set so
    * there is exactly one DB connection per user. Closed by dispose().
@@ -183,7 +183,7 @@ export async function loadUserSession(
   // Each user gets their own session directory so continueRecent finds the right file.
   const sessDir = userSessionDir(config, sessionKey);
   const isNewUser = !fs.existsSync(sessDir) || fs.readdirSync(sessDir).length === 0;
-  const sessionManager = SessionManager.continueRecent(config.data_dir, sessDir);
+  const sessionManager = openBoundedSession(config.data_dir, sessDir);
   const sessionTools = customTools;
   const toolPolicy = createExtensionToolPolicy({ ...extensionTrust, userId });
   const promptTools: ToolSummary[] = sessionTools.map((tool) => ({
@@ -251,6 +251,7 @@ export async function loadUserSession(
     additionalExtensionPaths,
     additionalSkillPaths,
     extensionFactories: [
+      { name: "bryti-bounded-compaction", factory: createBoundedCompactionExtension() },
       { name: "bryti-codemode", factory: (pi) => createCodemodeExtension({ mode: "on", models: false })({
         ...pi,
         registerTool(definition) {
@@ -285,6 +286,14 @@ export async function loadUserSession(
             delete event.systemPromptOptions.sections[key];
           }
           Object.assign(event.systemPromptOptions.sections, prompt.sections);
+          delete event.systemPromptOptions.sections.bryti_context_loss;
+          if (contextLoss(sessionManager.getBranch())) {
+            event.systemPromptOptions.sections.bryti_context_loss =
+              "Older conversation context has been omitted. Archives remain available. A new summary does not establish historical outcomes or permissions. " +
+              "Use the current approved operational guidelines and stored full task scope, not inferred historical authorization. " +
+              "Inspect durable work, effect and delivery receipts before continuing older tasks. Unknown effects and unresolved deliveries remain blocked. " +
+              "If applicable restrictions or outcomes cannot be established, ask for clarification instead of acting. Never replay an old action to discover whether it succeeded.";
+          }
           try {
             const guidelines = extensionTrust?.context?.getOperationalGuidelines?.();
             if (guidelines) {
@@ -456,12 +465,13 @@ export async function loadUserSession(
           willRetry: event.willRetry,
           tokensBefore: event.result.tokensBefore,
           summaryLength: summary.length,
+          degraded: (event.result.details as { bryti?: { degraded?: boolean } } | undefined)?.bryti?.degraded === true,
           messageCount: session.messages.length,
           contextUsage: session.getContextUsage(),
           model: session.model ? `${session.model.provider}/${session.model.id}` : null,
         });
         compactionStartedAt = null;
-        userSessionRef?.onCompactionComplete?.();
+        // The SDK owns continuation after active-turn compaction. Idle compaction stays idle.
       } else if (event.errorMessage) {
         appendCompactionLog({
           phase: "end",

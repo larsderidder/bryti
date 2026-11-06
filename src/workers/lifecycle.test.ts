@@ -42,6 +42,17 @@ describe("worker shutdown", () => {
     });
   }
 
+  it("keeps shared session resources alive through terminal worker bookkeeping", async () => {
+    const entry = worker();
+    const run = deferred();
+    lifecycle.track(run.promise);
+    registry.update(entry.workerId, { status: "complete" });
+    expect(lifecycle.hasPendingWork()).toBe(true);
+    run.resolve();
+    await run.promise;
+    expect(lifecycle.hasPendingWork()).toBe(false);
+  });
+
   it("waits for completion within the grace period without aborting", async () => {
     const entry = worker();
     const run = deferred();

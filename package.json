@@ -33,7 +33,7 @@
     "clean": "rm -rf dist",
     "test": "node --test scripts/prepare-dependencies.test.mjs && vitest run",
     "test:watch": "vitest",
-    "check": "npm test && npm run build && node scripts/check-pdf-worker.mjs",
+    "check": "npm test && npm run build && node scripts/check-pdf-worker.mjs && node --max-old-space-size=128 scripts/check-session-loading.mjs",
     "web-e2ee:invite": "npm run cli -- web-e2ee invite"
   },
   "engines": {

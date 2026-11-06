@@ -48,6 +48,17 @@ describe("bounded durable recovery attempts", () => {
     expect(work.get(receipt.id)?.execution).toBe("interrupted");
   });
 
+  it("does not repeat a completed review merely because its hold remains unresolved", () => {
+    const receipt = parent();
+    const review = createWorkRecoveryEvent(receipt, "Waiting for a decision");
+    work.accept(review);
+    work.claim([review.workId!]);
+    work.finish([review.workId!], "completed");
+    vi.setSystemTime(Date.now() + 24 * 60 * 60 * 1000);
+    expect(nextWorkRecoveryAttempt(work, receipt.id)).toBeNull();
+    expect(work.get(receipt.id)?.execution).toBe("interrupted");
+  });
+
   it("retains unknown review delivery as a blocker instead of retrying", () => {
     const receipt = parent();
     const event = createWorkRecoveryEvent(receipt, "Check");
