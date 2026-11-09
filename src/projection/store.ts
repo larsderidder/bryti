@@ -95,10 +95,9 @@ export interface ProjectionStore {
   getUpcoming(horizon_days: number): Projection[];
 
   /**
-   * Get pending projections due in the next window_minutes minutes that have
-   * resolution='exact'. Used by the 5-minute scheduler check. window_minutes
-   * must be larger than the scheduler tick to avoid missing events that fall
-   * between ticks.
+   * Preview pending exact projections through the next window_minutes minutes.
+   * Execution callers use zero to exclude future occurrences. Recent overdue
+   * one-offs and recurring checks remain eligible through their catch-up windows.
    */
   getExactDue(window_minutes: number): Projection[];
 
@@ -725,13 +724,10 @@ export function createProjectionStore(userId: string, dataDir: string): Projecti
     },
 
     getExactDue(window_minutes) {
-      // Filters to resolution='exact' only: day/week/month projections are surfaced
-      // through getUpcoming, not here. window_minutes should match the scheduler
-      // tick interval (5 min) so projections due between ticks are never skipped
-      // but also never fire early. The lower bound ('-10 minutes') prevents
-      // re-firing events that already fired but whose resolved_at hasn't been
-      // written yet. Recurring exact projections get a wider 4-hour catch-up
-      // window so a restart shortly after the scheduled time still runs them.
+      // Positive windows preview upcoming exact projections; execution uses zero.
+      // Day/week/month projections are surfaced through getUpcoming instead.
+      // Keep a ten-minute one-off grace period and a four-hour recurring catch-up
+      // window for a first check after downtime, without executing future work.
       const rows = stmtExactDue.all(String(window_minutes)) as ProjectionRow[];
       return rows.map(rowToProjection);
     },

@@ -17,6 +17,7 @@ import { Type } from "typebox";
 const cronMockState = vi.hoisted(() => ({
   callbacks: new Map<string, Array<() => Promise<void>>>(),
   nextOffsetMs: 60_000,
+  realCron: undefined as typeof import("croner").Cron | undefined,
 }));
 
 vi.mock("croner", () => {
@@ -25,6 +26,9 @@ vi.mock("croner", () => {
       const callbacks = cronMockState.callbacks.get(expr) ?? [];
       callbacks.push(callbackOrOptions as () => Promise<void>);
       cronMockState.callbacks.set(expr, callbacks);
+    }
+    if (typeof callbackOrOptions !== "function" && cronMockState.realCron) {
+      return new cronMockState.realCron(expr, callbackOrOptions as { timezone: string; startAt: Date });
     }
     return {
       nextRun(after?: Date) {
@@ -137,6 +141,7 @@ describe("Scheduler", () => {
     tempDir = makeTempDir();
     cronMockState.callbacks.clear();
     cronMockState.nextOffsetMs = 60_000;
+    cronMockState.realCron = undefined;
     consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -234,6 +239,119 @@ describe("Scheduler", () => {
       fallback,
     ]);
     expect([...grouped.values()].map((entry) => entry.projections.map((p) => p.id))).toEqual([["stored"], ["legacy"]]);
+  });
+
+  it.each([
+    { name: "one-off", recurrence: undefined },
+    { name: "recurring", recurrence: "*/5 * * * *" },
+  ])("does not enqueue a $name projection before its scheduled time", async ({ recurrence }) => {
+    const config = {
+      ...makeConfig(), data_dir: tempDir,
+      agent_def: { ...PERSONAL_ASSISTANT_DEFAULTS, memory: { ...PERSONAL_ASSISTANT_DEFAULTS.memory, daily_review: false } },
+    } as Config;
+    const id = addDueProjection(config, {
+      summary: "Future check", resolved_when: dueWhen(3), resolution: "exact", recurrence,
+    });
+    const onMessage = vi.fn().mockResolvedValue(true);
+    const scheduler = createScheduler(config, onMessage);
+    scheduler.start();
+    try {
+      await runExactCallback();
+      expect(onMessage).not.toHaveBeenCalled();
+      const store = createProjectionStore("12345", tempDir);
+      try {
+        expect(store.getById(id)?.delivery_work_id).toBeNull();
+      } finally {
+        store.close();
+      }
+    } finally {
+      scheduler.stop();
+    }
+  });
+
+  it.each([45, 180])("advances a completed recurring check %i minutes late to a future slot", async (lateMinutes) => {
+    cronMockState.realCron = (await vi.importActual<typeof import("croner")>("croner")).Cron;
+    const config = {
+      ...makeConfig(), data_dir: tempDir,
+      agent_def: { ...PERSONAL_ASSISTANT_DEFAULTS, memory: { ...PERSONAL_ASSISTANT_DEFAULTS.memory, daily_review: false } },
+    } as Config;
+    const workStore = createWorkStore(tempDir);
+    const id = addDueProjection(config, {
+      summary: "Recurring check", resolved_when: dueWhen(-lateMinutes),
+      resolution: "exact", recurrence: "*/5 * * * *",
+    });
+    const onMessage = vi.fn().mockResolvedValue(true);
+    const scheduler = createScheduler(config, onMessage, workStore);
+    scheduler.start();
+    try {
+      await runExactCallback();
+      const message = onMessage.mock.calls[0][0] as IncomingMessage;
+      const workId = message.workId!;
+      workStore.claim([workId]);
+      workStore.finish([workId], "completed");
+      const original = workStore.get(workId);
+      const beforeSettlement = Date.now();
+      await runExactCallback();
+      expect(onMessage).toHaveBeenCalledTimes(1);
+      const store = createProjectionStore("12345", tempDir);
+      try {
+        const projection = store.getById(id)!;
+        expect(projection.delivery_work_id).toBeNull();
+        const next = new Date(projection.resolved_when + "Z").getTime();
+        expect(next).toBeGreaterThan(beforeSettlement);
+        expect(next).toBeLessThanOrEqual(Date.now() + 5 * 60_000);
+        expect(next % (5 * 60_000)).toBe(0);
+      } finally {
+        store.close();
+      }
+      expect(workStore.get(workId)).toEqual(original);
+    } finally {
+      scheduler.stop();
+      workStore.close();
+    }
+  });
+
+  it.each([[5, 5], [10, 10], [15, 15], [5, 45], [5, 180]])("keeps a %i-minute cadence when settlement is %i minutes after the prior slot", async (minutes, elapsedMinutes) => {
+    cronMockState.realCron = (await vi.importActual<typeof import("croner")>("croner")).Cron;
+    const period = minutes * 60_000;
+    // Keep simulated slots in the past because SQLite owns its UTC clock.
+    const currentSlot = Math.floor(Date.now() / period) * period;
+    const previousSlot = currentSlot - elapsedMinutes * 60_000;
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(previousSlot + 250);
+    const config = {
+      ...makeConfig(), data_dir: tempDir,
+      agent_def: { ...PERSONAL_ASSISTANT_DEFAULTS, memory: { ...PERSONAL_ASSISTANT_DEFAULTS.memory, daily_review: false } },
+    } as Config;
+    const workStore = createWorkStore(tempDir);
+    const id = addDueProjection(config, {
+      summary: "Periodic check", resolved_when: dueWhen(0),
+      resolution: "exact", recurrence: `*/${minutes} * * * *`,
+    });
+    const onMessage = vi.fn().mockResolvedValue(true);
+    const scheduler = createScheduler(config, onMessage, workStore);
+    scheduler.start();
+    try {
+      await runExactCallback();
+      const previous = onMessage.mock.calls[0][0] as IncomingMessage;
+      workStore.claim([previous.workId!]);
+      vi.setSystemTime(previousSlot + 60_000);
+      workStore.finish([previous.workId!], "completed");
+      const original = workStore.get(previous.workId!);
+      vi.setSystemTime(currentSlot + 250);
+      await runExactCallback();
+      expect(onMessage).toHaveBeenCalledTimes(2);
+      const current = onMessage.mock.calls[1][0] as IncomingMessage;
+      const currentWhen = new Date(currentSlot).toISOString().replace("T", " ").slice(0, 16);
+      expect(current.workId).toBe(`projection:12345:${id}:${currentWhen}`);
+      expect(workStore.get(previous.workId!)).toEqual(original);
+      await runExactCallback();
+      expect(onMessage).toHaveBeenCalledTimes(2);
+    } finally {
+      scheduler.stop();
+      workStore.close();
+      vi.useRealTimers();
+    }
   });
 
   it("marks accepted projection occurrences and settles only after completed receipt", async () => {

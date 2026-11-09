@@ -259,6 +259,7 @@ export function groupDueByTarget(
 // ---------------------------------------------------------------------------
 
 const DAILY_REVIEW_TAG = "__daily_review__";
+const EXACT_CHECK_INTERVAL_MINUTES = 5;
 
 function bootstrapDailyReview(config: Config): void {
   const mem = config.agent_def.memory;
@@ -355,15 +356,26 @@ function shouldSettleReceipt(receipt: WorkRecord | null): boolean {
   return receipt.delivery === "delivered" || receipt.delivery === "none";
 }
 
-function settleProjection(store: ProjectionStore, projection: Projection, timezone: string, reconciled = false): void {
+/**
+ * Advance settled work without changing its receipt. Normal completion can use
+ * the current tick; recovery resumes strictly in the future.
+ */
+function settleProjection(store: ProjectionStore, projection: Projection, timezone: string, completedAt?: string): void {
   if (projection.recurrence) {
     let scheduledTime = new Date();
-    if (projection.resolved_when) {
-      scheduledTime = new Date(projection.resolved_when + "Z");
+    if (completedAt) {
+      const completedTime = new Date(completedAt).getTime();
+      if (Number.isFinite(completedTime)) {
+        // Keep cadence without retaining a backlog from before the last tick.
+        const lastTick = scheduledTime.getTime() - EXACT_CHECK_INTERVAL_MINUTES * 60_000;
+        scheduledTime = new Date(Math.max(lastTick, completedTime));
+      }
     }
-    if (reconciled && scheduledTime.getTime() < Date.now()) {
-      // Recovery resumes the schedule from now, never with catch-up executions.
-      scheduledTime = new Date();
+    if (projection.resolved_when) {
+      const previousSlot = new Date(projection.resolved_when + "Z");
+      if (previousSlot.getTime() > scheduledTime.getTime()) {
+        scheduledTime = previousSlot;
+      }
     }
     const next = nextCronOccurrence(projection.recurrence, scheduledTime, timezone);
     if (next) {
@@ -491,7 +503,7 @@ export function createScheduler(
             ["failed", "interrupted"].includes(receipt.execution) && workStore.hasReadOnlyFailure(workId) &&
             recovery.blockers.length === 0 && recovery.commands.length === 0 && recovery.effects.length === 0 &&
             recovery.workers.length === 0 && reviews.length === 0 && isTargetAllowed(config, receipt.message)) {
-          settleProjection(store, projection, timezone, true);
+          settleProjection(store, projection, timezone);
           continue;
         }
         if (!reconciled && (needsReview || recovery.blockers.length > 0 || !shouldSettleReceipt(receipt))) {
@@ -516,7 +528,11 @@ export function createScheduler(
           continue;
         }
         if (projection.status === "pending") {
-          settleProjection(store, projection, timezone, reconciled);
+          let completedAt: string | undefined;
+          if (!reconciled && receipt?.execution === "completed") {
+            completedAt = receipt.updatedAt;
+          }
+          settleProjection(store, projection, timezone, completedAt);
         } else {
           store.clearDeliveryWork(projection.id, workId);
         }
@@ -577,7 +593,7 @@ export function createScheduler(
     }
 
     const exactJob = new Cron(
-      "*/5 * * * *",
+      `*/${EXACT_CHECK_INTERVAL_MINUTES} * * * *`,
       runNonOverlapping("projection-exact", async () => {
         if (!isActiveNow(config.active_hours)) {
           return;
@@ -604,7 +620,7 @@ export function createScheduler(
               console.log(`[projections] user=${userId} auto-expired ${expired} stale projection(s)`);
             }
 
-            const due = store.getExactDue(5);
+            const due = store.getExactDue(0);
             if (due.length === 0) {
               continue;
             }
